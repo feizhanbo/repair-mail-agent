@@ -4,6 +4,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.tsbuildinfo
 .mypy_cache/
 .ruff_cache/
 .venv/
@@ -12,6 +13,8 @@ dist/
 build/
 node_modules/
 frontend/dist/
+frontend/vite.config.js
+frontend/vite.config.d.ts
 logs/
 *.log
 .DS_Store

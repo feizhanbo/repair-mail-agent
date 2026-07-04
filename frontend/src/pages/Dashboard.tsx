@@ -1,43 +1,73 @@
-import { Card, Col, Row, Table, Typography } from 'antd';
+import {
+  AlertOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  MailOutlined,
+  RobotOutlined,
+  TeamOutlined,
+} from '@ant-design/icons';
+import { useQuery } from '@tanstack/react-query';
+import { Col, Row, Table, Typography } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
+import { api } from '../api/client';
+import PageTitle from '../components/PageTitle';
+import SectionPanel from '../components/SectionPanel';
+import StatusTag from '../components/StatusTag';
+import type { JobRunLog } from '../types/api';
+import { formatTime } from '../utils/format';
 
-const metrics = [
-  ['今日新邮件', 0],
-  ['待解析', 0],
-  ['待人工', 0],
-  ['追问中', 0],
-  ['异常', 0],
-  ['可导出', 0],
-  ['AI 低置信度', 0],
-] as const;
+const columns: ColumnsType<JobRunLog> = [
+  { title: '任务', dataIndex: 'job_name' },
+  { title: '类型', dataIndex: 'job_type', width: 150 },
+  { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <StatusTag value={value} /> },
+  { title: '失败数', dataIndex: 'failed_count', width: 90 },
+  { title: '开始时间', dataIndex: 'started_at', width: 160, render: formatTime },
+  { title: '错误', dataIndex: 'error_message', ellipsis: true },
+];
 
 export default function Dashboard() {
+  const summaryQuery = useQuery({
+    queryKey: ['dashboard-summary'],
+    queryFn: api.dashboard,
+    refetchInterval: 60_000,
+  });
+  const summary = summaryQuery.data;
+  const metrics = [
+    { label: '待解析邮件', value: summary?.pending_parse ?? 0, icon: <MailOutlined />, tone: 'blue' },
+    { label: '人工复核工单', value: summary?.manual_review ?? 0, icon: <TeamOutlined />, tone: 'orange' },
+    { label: '待客户补充', value: summary?.need_customer_info ?? 0, icon: <ClockCircleOutlined />, tone: 'gold' },
+    { label: '可导出工单', value: summary?.ready_for_export ?? 0, icon: <CheckCircleOutlined />, tone: 'green' },
+    { label: '异常工单', value: summary?.error ?? 0, icon: <AlertOutlined />, tone: 'red' },
+    { label: 'AI 低置信度', value: summary?.ai_low_confidence ?? 0, icon: <RobotOutlined />, tone: 'cyan' },
+  ];
+
   return (
     <div className="page-stack">
-      <Typography.Title level={2}>首页看板</Typography.Title>
-      <Row gutter={[16, 16]}>
-        {metrics.map(([label, value]) => (
-          <Col key={label} xs={24} sm={12} md={8} xl={6}>
-            <Card size="small">
-              <Typography.Text type="secondary">{label}</Typography.Text>
-              <div className="metric-value">{value}</div>
-            </Card>
+      <PageTitle title="首页看板" />
+      <Row gutter={[12, 12]}>
+        {metrics.map((metric) => (
+          <Col key={metric.label} xs={24} sm={12} md={8} xl={4}>
+            <div className={`metric-card metric-${metric.tone}`}>
+              <span className="metric-icon">{metric.icon}</span>
+              <Typography.Text type="secondary">{metric.label}</Typography.Text>
+              <div className="metric-value">{metric.value}</div>
+            </div>
           </Col>
         ))}
       </Row>
-      <Card title="最近异常任务" size="small">
-        <Table
+      <SectionPanel>
+        <div className="section-heading">
+          <Typography.Title level={4}>最近异常任务</Typography.Title>
+        </div>
+        <Table<JobRunLog>
           size="middle"
           rowKey="id"
-          dataSource={[]}
-          columns={[
-            { title: '任务', dataIndex: 'job_name' },
-            { title: '状态', dataIndex: 'status' },
-            { title: '时间', dataIndex: 'created_at' },
-          ]}
+          loading={summaryQuery.isFetching}
+          dataSource={summary?.recent_failed_jobs ?? []}
+          columns={columns}
           pagination={false}
         />
-      </Card>
+      </SectionPanel>
     </div>
   );
 }
-

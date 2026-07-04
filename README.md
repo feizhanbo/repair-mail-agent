@@ -18,7 +18,7 @@
 - 任务调度：APScheduler
 - 文件存储：阿里云 OSS
 - 邮件：IMAP 收信、SMTP 发信
-- AI：统一 AI Provider 抽象层
+- AI：统一 AI Provider 抽象层，当前默认 DeepSeek OpenAI 兼容接口
 - 前端：React、TypeScript、Vite、Ant Design、TanStack Query、Zustand
 - 部署：Docker Compose、Nginx、GitHub Actions
 
@@ -35,6 +35,17 @@ repair-mail-agent/
   docker-compose.yml       # MySQL、后端、前端、Nginx 编排
   deploy.sh                # 远程服务器部署脚本
 ```
+
+## 当前开发进度
+
+当前已推进到“基础业务开发 + DeepSeek AI 接入”阶段，重点完成后端业务 API、前端业务页面、AI 解析/追问草稿能力和本地只读验证。
+
+- 后端已补齐认证依赖、统一响应、邮件、工单、人工复核、解析结果、回复、基础资料、通知、AI 日志和系统信息等 API。
+- 工单侧支持字段编辑、明细编辑、SN 校验、状态流转、解析结果采纳、邮件时间线、附件、字段证据和状态日志查询。
+- 人工复核侧支持任务队列、详情上下文、领取、释放、处理、重解析和解析结果采纳。
+- AI 侧已接入 DeepSeek Provider 抽象，支持 JSON 输出解析、AI 解析候选、追问草稿生成、AI 调用日志摘要和失败回退；API key 只从运行环境读取。
+- 前端已替换占位页，新增邮件中心、工单中心、人工复核、回复审核、基础资料、AI 日志和系统配置等页面。
+- 当前不接真实 IMAP、SMTP、OSS，不自动发送邮件，`AUTO_SEND_ENABLED=false` 保持默认。
 
 ## 环境变量
 
@@ -56,7 +67,7 @@ repair-mail-agent/
 
 ## 本地启动
 
-当前阶段已完成工程骨架、ORM model 和首个 Alembic 迁移。本地通过 SSH 隧道连接远程 Docker MySQL 后再执行迁移和联调。
+当前阶段本地开发通过 SSH 隧道连接远程 Docker MySQL。数据库结构保持现有 ORM/Alembic 状态；除明确进行数据库维护外，不执行迁移、seed 或会写入数据的 smoke 脚本。
 
 后端开发命令：
 
@@ -89,7 +100,7 @@ docker compose up -d mysql
 
 已生成首个 Alembic 迁移并在远程 `repair_system_dev` 验证通过。
 
-后续模型变更后执行：
+后续确需数据库结构变更时，先确认备份和迁移范围，再执行：
 
 ```bash
 cd backend
@@ -101,12 +112,19 @@ python -m app.db_smoke
 
 数据库实现差异记录：`oss_objects.object_key` 在数据库文档中为 `VARCHAR(700)`，但与 `bucket VARCHAR(128)` 组成 `utf8mb4` 联合唯一键时会超过 MySQL 3072 字节索引上限；当前实现调整为 `VARCHAR(640)`。
 
+本次开发只读核验结果：
+
+- 本地经 SSH 隧道连接远端 `repair_system_dev` 成功。
+- 本地 ORM 26 张业务表与远端数据库业务表字段一致，差异数为 0；数据库额外表仅 `alembic_version`。
+- 当前基础数据包含流程状态、流程流转、角色和回复模板；真实登录验收需要先通过合规方式初始化用户。
+
 ## 测试命令
+
+当前前后端开发验证命令：
 
 ```bash
 cd backend
 python -m compileall app
-python -m app.db_smoke
 pytest
 ```
 
@@ -115,6 +133,8 @@ cd frontend
 npm run typecheck
 npm run build
 ```
+
+本次已验证：后端 `compileall` 通过，`pytest` 7 passed；前端 Node 20 下 `typecheck` 和 `build` 通过。Vite build 仅提示大 chunk 警告。
 
 ## Docker 部署
 

@@ -1,8 +1,14 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import AppLayout from '../layouts/AppLayout';
+import AiLogsPage from '../pages/AiLogsPage';
 import Dashboard from '../pages/Dashboard';
+import EmailsPage from '../pages/EmailsPage';
 import Login from '../pages/Login';
-import PlaceholderPage from '../pages/PlaceholderPage';
+import ManualReviewPage from '../pages/ManualReviewPage';
+import MasterDataPage from '../pages/MasterDataPage';
+import RepliesPage from '../pages/RepliesPage';
+import SystemPage from '../pages/SystemPage';
+import TicketsPage from '../pages/TicketsPage';
 
 const router = createBrowserRouter([
   {
@@ -14,13 +20,13 @@ const router = createBrowserRouter([
     element: <AppLayout />,
     children: [
       { index: true, element: <Dashboard /> },
-      { path: 'emails', element: <PlaceholderPage title="邮件中心" /> },
-      { path: 'tickets', element: <PlaceholderPage title="工单中心" /> },
-      { path: 'manual-review', element: <PlaceholderPage title="人工复核" /> },
-      { path: 'replies', element: <PlaceholderPage title="自动回复审核" /> },
-      { path: 'master-data', element: <PlaceholderPage title="基础资料" /> },
-      { path: 'ai-logs', element: <PlaceholderPage title="AI 日志" /> },
-      { path: 'system', element: <PlaceholderPage title="系统配置" /> },
+      { path: 'emails', element: <EmailsPage /> },
+      { path: 'tickets', element: <TicketsPage /> },
+      { path: 'manual-review', element: <ManualReviewPage /> },
+      { path: 'replies', element: <RepliesPage /> },
+      { path: 'master-data', element: <MasterDataPage /> },
+      { path: 'ai-logs', element: <AiLogsPage /> },
+      { path: 'system', element: <SystemPage /> },
     ],
   },
   {
@@ -30,4 +36,3 @@ const router = createBrowserRouter([
 ]);
 
 export default router;
-

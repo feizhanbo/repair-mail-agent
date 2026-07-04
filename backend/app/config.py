@@ -30,10 +30,13 @@ class Settings(BaseSettings):
     OSS_ACCESS_KEY: str = ""
     OSS_SECRET_KEY: str = ""
 
-    AI_PROVIDER: str = "openai"
+    AI_PROVIDER: str = "deepseek"
     AI_API_KEY: str = ""
-    AI_MODEL: str = "gpt-4o-mini"
-    AI_BASE_URL: str = "https://api.openai.com/v1"
+    AI_MODEL: str = "deepseek-v4-flash"
+    AI_BASE_URL: str = "https://api.deepseek.com"
+    AI_TIMEOUT_SECONDS: float = 30.0
+    AI_MAX_INPUT_CHARS: int = 12000
+    AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
 
     AUTO_SEND_ENABLED: bool = False
     MAX_FOLLOW_UP: int = 3

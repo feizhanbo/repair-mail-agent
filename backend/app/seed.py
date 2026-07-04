@@ -16,9 +16,9 @@ from app.models import ReplyTemplate, Role, User, UserRole, WorkflowStatus, Work
 WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
     {
         "status_code": "new_email",
-        "status_name": "新邮件",
+        "status_name": "邮件已入库",
         "status_category": "intake",
-        "description": "邮件已进入系统，等待解析。",
+        "description": "邮件和附件已归档，尚未解析。",
         "sort_order": 10,
     },
     {
@@ -44,37 +44,37 @@ WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
     },
     {
         "status_code": "manual_review",
-        "status_name": "人工审核",
+        "status_name": "人工复核",
         "status_category": "review",
         "description": "解析置信度不足、字段冲突或规则命中，需要人工处理。",
         "sort_order": 50,
     },
     {
         "status_code": "ready_for_export",
-        "status_name": "待导出",
+        "status_name": "可导出",
         "status_category": "export",
         "description": "工单字段已确认，可以进入导出或下游同步。",
         "sort_order": 60,
-    },
-    {
-        "status_code": "closed",
-        "status_name": "已关闭",
-        "status_category": "terminal",
-        "description": "工单处理流程结束。",
-        "is_terminal": True,
-        "sort_order": 70,
     },
     {
         "status_code": "error",
         "status_name": "异常",
         "status_category": "error",
         "description": "系统处理失败，等待排查或重试。",
+        "sort_order": 70,
+    },
+    {
+        "status_code": "closed",
+        "status_name": "已关闭",
+        "status_category": "terminal",
+        "description": "工单完成或终止。",
+        "is_terminal": True,
         "sort_order": 80,
     },
 )
 
 
-WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
+BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     {
         "from_status_code": "new_email",
         "to_status_code": "parsed",
@@ -89,36 +89,22 @@ WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "require_manual": True,
     },
     {
-        "from_status_code": "new_email",
-        "to_status_code": "error",
-        "trigger_event": "system_error",
-        "condition_desc": "邮件入库或解析阶段发生系统异常。",
-        "require_manual": True,
+        "from_status_code": "parsed",
+        "to_status_code": "ready_for_export",
+        "trigger_event": "validation_passed",
+        "condition_desc": "字段完整且 SN 校验通过。",
     },
     {
         "from_status_code": "parsed",
         "to_status_code": "need_customer_info",
-        "trigger_event": "missing_required_fields",
-        "condition_desc": "缺少创建报修所需关键字段。",
+        "trigger_event": "missing_fields_detected",
+        "condition_desc": "关键字段缺失且可追问。",
     },
     {
         "from_status_code": "parsed",
         "to_status_code": "manual_review",
         "trigger_event": "field_conflict",
-        "condition_desc": "字段冲突、SN 校验失败或规则命中人工审核。",
-        "require_manual": True,
-    },
-    {
-        "from_status_code": "parsed",
-        "to_status_code": "ready_for_export",
-        "trigger_event": "validation_passed",
-        "condition_desc": "字段完整且校验通过。",
-    },
-    {
-        "from_status_code": "parsed",
-        "to_status_code": "error",
-        "trigger_event": "system_error",
-        "condition_desc": "结构化处理阶段发生系统异常。",
+        "condition_desc": "字段冲突、SN 异常或置信度不足。",
         "require_manual": True,
     },
     {
@@ -128,51 +114,37 @@ WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "condition_desc": "补充信息邮件已生成并发送。",
     },
     {
-        "from_status_code": "need_customer_info",
-        "to_status_code": "manual_review",
-        "trigger_event": "followup_limit_exceeded",
-        "condition_desc": "补充信息轮次达到上限。",
-        "require_manual": True,
-    },
-    {
         "from_status_code": "auto_replied",
         "to_status_code": "parsed",
-        "trigger_event": "customer_replied",
+        "trigger_event": "customer_reply_received",
         "condition_desc": "客户回复后重新解析补充内容。",
     },
     {
-        "from_status_code": "auto_replied",
-        "to_status_code": "manual_review",
-        "trigger_event": "followup_limit_exceeded",
-        "condition_desc": "自动追问达到上限。",
+        "from_status_code": "manual_review",
+        "to_status_code": "ready_for_export",
+        "trigger_event": "manual_resolved",
+        "condition_desc": "人工修正且校验通过。",
         "require_manual": True,
     },
     {
         "from_status_code": "manual_review",
         "to_status_code": "parsed",
-        "trigger_event": "review_completed",
-        "condition_desc": "人工修正后回到解析完成态继续校验。",
+        "trigger_event": "manual_resolved",
+        "condition_desc": "人工修正后回到解析态。",
         "require_manual": True,
     },
     {
         "from_status_code": "manual_review",
         "to_status_code": "need_customer_info",
-        "trigger_event": "need_customer_info",
-        "condition_desc": "人工判断仍需客户补充信息。",
+        "trigger_event": "manual_resolved",
+        "condition_desc": "人工判定需要客户补充信息。",
         "require_manual": True,
     },
     {
-        "from_status_code": "manual_review",
-        "to_status_code": "ready_for_export",
-        "trigger_event": "review_approved",
-        "condition_desc": "人工审核通过。",
-        "require_manual": True,
-    },
-    {
-        "from_status_code": "manual_review",
-        "to_status_code": "error",
-        "trigger_event": "system_error",
-        "condition_desc": "人工处理阶段发生系统异常。",
+        "from_status_code": "error",
+        "to_status_code": "parsed",
+        "trigger_event": "manual_resolved",
+        "condition_desc": "异常修复后人工恢复。",
         "require_manual": True,
     },
     {
@@ -184,10 +156,56 @@ WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
 )
 
 
+def _build_workflow_transitions() -> tuple[dict[str, Any], ...]:
+    statuses = [status["status_code"] for status in WORKFLOW_STATUSES]
+    terminal_statuses = {status["status_code"] for status in WORKFLOW_STATUSES if status.get("is_terminal")}
+    non_terminal_statuses = [status for status in statuses if status not in terminal_statuses]
+    transitions = list(BASE_WORKFLOW_TRANSITIONS)
+
+    for from_status in non_terminal_statuses:
+        if from_status != "manual_review":
+            transitions.append(
+                {
+                    "from_status_code": from_status,
+                    "to_status_code": "manual_review",
+                    "trigger_event": "manual_review_required",
+                    "condition_desc": "需要人工介入。",
+                    "require_manual": True,
+                }
+            )
+        if from_status != "error":
+            transitions.append(
+                {
+                    "from_status_code": from_status,
+                    "to_status_code": "error",
+                    "trigger_event": "system_error",
+                    "condition_desc": "系统处理异常。",
+                    "require_manual": True,
+                }
+            )
+        transitions.append(
+            {
+                "from_status_code": from_status,
+                "to_status_code": "closed",
+                "trigger_event": "manual_close",
+                "condition_desc": "人工关闭。",
+                "require_manual": True,
+            }
+        )
+
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for transition in transitions:
+        key = (transition["from_status_code"], transition["to_status_code"], transition["trigger_event"])
+        unique[key] = transition
+    return tuple(unique.values())
+
+
+WORKFLOW_TRANSITIONS = _build_workflow_transitions()
+
+
 ROLES: tuple[dict[str, str], ...] = (
     {"role_code": "admin", "role_name": "系统管理员", "description": "拥有系统配置、用户管理和全部数据操作权限。"},
-    {"role_code": "reviewer", "role_name": "审核员", "description": "处理人工审核队列，修正解析结果并审批回复。"},
-    {"role_code": "service_agent", "role_name": "客服处理员", "description": "查看报修邮件、工单和客户补充信息。"},
+    {"role_code": "operator", "role_name": "处理员", "description": "处理人工复核队列、修正工单字段并审批回复。"},
     {"role_code": "viewer", "role_name": "只读观察员", "description": "只读查看系统数据、统计和处理记录。"},
 )
 
