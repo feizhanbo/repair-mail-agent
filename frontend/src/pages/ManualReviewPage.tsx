@@ -25,11 +25,12 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type {
   Attachment,
   EmailItem,
@@ -39,17 +40,27 @@ import type {
   ParseResult,
   ReplyRecord,
   TicketLine,
+  UserAccount,
 } from '../types/api';
 import { compactText, formatTime, numberText } from '../utils/format';
+import { hasAnyRole } from '../utils/roles';
 
 type TaskFilters = {
   status?: string;
   task_type?: string;
+  scope?: string;
 };
 
 type ResolveForm = {
   resolution: string;
+  resolution_type?: string;
   next_action: string;
+  result_payload_text?: string;
+};
+
+type AssignForm = {
+  assigned_user_id?: number;
+  reason?: string;
 };
 
 type TicketFieldForm = {
@@ -94,6 +105,22 @@ const resolveActionOptions = [
   { value: 'keep_manual_review', label: '保持人工复核' },
 ];
 
+const taskScopeOptions = [
+  { value: 'mine', label: '我的任务' },
+  { value: 'unassigned', label: '未分配' },
+  { value: 'claimed', label: '我已领取' },
+  { value: 'all', label: '全部任务' },
+];
+
+const resolutionTypeOptions = [
+  { value: 'field_fixed', label: '字段已修正' },
+  { value: 'sn_checked', label: 'SN 已核验' },
+  { value: 'need_followup', label: '需要追问' },
+  { value: 'false_positive', label: '无需处理' },
+  { value: 'system_exception', label: '系统异常' },
+  { value: 'other', label: '其他' },
+];
+
 const lockOptions = [
   { value: false, label: '未锁定' },
   { value: true, label: '人工锁定' },
@@ -104,10 +131,24 @@ export default function ManualReviewPage() {
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
   const [fieldOpen, setFieldOpen] = useState(false);
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
   const queryClient = useQueryClient();
+  const currentUserRoles = useAuthStore((state) => state.user?.roles);
+  const canAssignTasks = hasAnyRole(currentUserRoles, ['admin', 'supervisor']);
+  const visibleTaskScopeOptions = canAssignTasks ? taskScopeOptions : taskScopeOptions.filter((item) => item.value !== 'all');
+  const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
+  const confirmAction = (title: string, onOk: () => void) => {
+    Modal.confirm({
+      title,
+      content: '该操作会更新当前复核任务或关联工单。',
+      okText: '确认',
+      cancelText: '取消',
+      onOk,
+    });
+  };
 
   const tasksQuery = useQuery({
     queryKey: ['manual-tasks', filters, page],
@@ -117,6 +158,11 @@ export default function ManualReviewPage() {
     queryKey: ['manual-task-detail', selectedId],
     queryFn: () => api.manualTaskDetail(selectedId as number),
     enabled: Boolean(selectedId),
+  });
+  const usersQuery = useQuery({
+    queryKey: ['users', 'active-assignees'],
+    queryFn: () => api.users({ page: 1, page_size: 100, status: 'active' }),
+    enabled: canAssignTasks,
   });
 
   useEffect(() => {
@@ -130,6 +176,7 @@ export default function ManualReviewPage() {
     void queryClient.invalidateQueries({ queryKey: ['manual-task-detail', selectedId] });
     void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     void queryClient.invalidateQueries({ queryKey: ['ticket-detail'] });
+    void queryClient.invalidateQueries({ queryKey: ['notifications'] });
   };
 
   const claimMutation = useMutation({
@@ -138,6 +185,7 @@ export default function ManualReviewPage() {
       message.success('任务已领取');
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const releaseMutation = useMutation({
     mutationFn: (id: number) => api.releaseTask(id),
@@ -145,14 +193,40 @@ export default function ManualReviewPage() {
       message.success('任务已释放');
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const resolveMutation = useMutation({
-    mutationFn: (values: ResolveForm) => api.resolveTask(selectedId as number, values),
+    mutationFn: (values: ResolveForm) => {
+      let result_payload: Record<string, unknown> | undefined;
+      if (values.result_payload_text?.trim()) {
+        try {
+          result_payload = JSON.parse(values.result_payload_text);
+        } catch {
+          result_payload = { note: values.result_payload_text };
+        }
+      }
+      return api.resolveTask(selectedId as number, {
+        resolution: values.resolution,
+        resolution_type: values.resolution_type,
+        next_action: values.next_action,
+        result_payload,
+      });
+    },
     onSuccess: () => {
       message.success('任务已解决');
       setResolveOpen(false);
       invalidateWorkbench();
     },
+    onError: handleMutationError,
+  });
+  const assignMutation = useMutation({
+    mutationFn: (values: AssignForm) => api.assignTask(selectedId as number, values),
+    onSuccess: () => {
+      message.success('任务分配已更新');
+      setAssignOpen(false);
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
   });
   const reparseMutation = useMutation({
     mutationFn: () => api.reparseTask(selectedId as number, { mode: 'field_extract', reason: '前端人工复核重解析' }),
@@ -160,6 +234,7 @@ export default function ManualReviewPage() {
       message.success('已触发重新解析');
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const draftReplyMutation = useMutation({
     mutationFn: () => {
@@ -176,6 +251,7 @@ export default function ManualReviewPage() {
       invalidateWorkbench();
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
     },
+    onError: handleMutationError,
   });
   const validateSnMutation = useMutation({
     mutationFn: () => api.validateTicketSn((detailQuery.data as ManualTaskDetail).ticket_context.ticket.id),
@@ -183,6 +259,7 @@ export default function ManualReviewPage() {
       message.success('SN 校验完成');
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const patchFieldsMutation = useMutation({
     mutationFn: (values: TicketFieldForm) => {
@@ -198,6 +275,7 @@ export default function ManualReviewPage() {
       setFieldOpen(false);
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const patchItemsMutation = useMutation({
     mutationFn: (values: TicketItemForm) => {
@@ -211,13 +289,18 @@ export default function ManualReviewPage() {
       setEditingItem(null);
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
   const applyParseMutation = useMutation({
-    mutationFn: (parseResultId: number) => api.applyParseResult(parseResultId, '前端人工复核采纳解析候选'),
+    mutationFn: ({ id, action }: { id: number; action: 'apply' | 'reject' }) => api.applyParseResult(id, {
+      action,
+      reason: action === 'reject' ? '前端人工复核拒绝解析候选' : '前端人工复核采纳解析候选',
+    }),
     onSuccess: () => {
-      message.success('解析候选已采纳');
+      message.success('解析候选状态已更新');
       invalidateWorkbench();
     },
+    onError: handleMutationError,
   });
 
   const openItemEditor = (item?: TicketLine) => {
@@ -239,6 +322,7 @@ export default function ManualReviewPage() {
     },
     { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag value={value} kind="task" /> },
     { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <StatusTag value={value} kind="priority" /> },
+    { title: '处理人', dataIndex: 'claimed_by_user_id', width: 90, render: (_, record) => record.claimed_by_user_id || record.assigned_user_id || '-' },
   ];
 
   return (
@@ -258,6 +342,9 @@ export default function ManualReviewPage() {
             <Form.Item name="status" label="任务状态">
               <Select allowClear options={taskStatusOptions} />
             </Form.Item>
+            <Form.Item name="scope" label="任务范围" initialValue="mine">
+              <Select allowClear options={visibleTaskScopeOptions} />
+            </Form.Item>
             <Form.Item name="task_type" label="任务类型">
               <Input allowClear prefix={<SearchOutlined />} />
             </Form.Item>
@@ -269,6 +356,7 @@ export default function ManualReviewPage() {
             columns={taskColumns}
             dataSource={tasksQuery.data?.items ?? []}
             loading={tasksQuery.isFetching}
+            locale={{ emptyText: tasksQuery.isError ? '复核任务加载失败' : '暂无复核任务' }}
             rowClassName={(record) => (record.id === selectedId ? 'is-selected' : '')}
             onRow={(record) => ({ onClick: () => setSelectedId(record.id) })}
             pagination={{ current: page, pageSize: 20, total: tasksQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false, size: 'small' }}
@@ -278,26 +366,30 @@ export default function ManualReviewPage() {
           <ManualEvidencePane
             detail={detailQuery.data}
             loading={detailQuery.isFetching}
-            onApplyParse={(id) => applyParseMutation.mutate(id)}
+            onApplyParse={(id) => confirmAction('确认采纳该解析候选？', () => applyParseMutation.mutate({ id, action: 'apply' }))}
+            onRejectParse={(id) => confirmAction('确认拒绝该解析候选？', () => applyParseMutation.mutate({ id, action: 'reject' }))}
           />
         </SectionPanel>
         <SectionPanel className="action-panel">
           <ManualActionPane
             detail={detailQuery.data}
             loading={detailQuery.isFetching}
-            onClaim={(id) => claimMutation.mutate(id)}
-            onRelease={(id) => releaseMutation.mutate(id)}
+            onClaim={(id) => confirmAction('确认领取该复核任务？', () => claimMutation.mutate(id))}
+            onRelease={(id) => confirmAction('确认释放该复核任务？', () => releaseMutation.mutate(id))}
+            onAssign={() => setAssignOpen(true)}
             onResolve={() => setResolveOpen(true)}
-            onReparse={() => reparseMutation.mutate()}
-            onDraftReply={() => draftReplyMutation.mutate()}
-            onValidateSn={() => validateSnMutation.mutate()}
+            onReparse={() => confirmAction('确认重新解析关联邮件？', () => reparseMutation.mutate())}
+            onDraftReply={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
+            onValidateSn={() => confirmAction('确认执行 SN 校验？', () => validateSnMutation.mutate())}
             onEditFields={() => setFieldOpen(true)}
             onEditItem={openItemEditor}
             claimLoading={claimMutation.isPending}
             releaseLoading={releaseMutation.isPending}
+            assignLoading={assignMutation.isPending}
             reparseLoading={reparseMutation.isPending}
             draftLoading={draftReplyMutation.isPending}
             validateLoading={validateSnMutation.isPending}
+            canAssign={canAssignTasks}
           />
         </SectionPanel>
       </div>
@@ -375,18 +467,44 @@ export default function ManualReviewPage() {
         </Form>
       </Modal>
       <Modal title="完成复核任务" open={resolveOpen} onCancel={() => setResolveOpen(false)} footer={null} destroyOnClose>
-        <Form<ResolveForm> layout="vertical" onFinish={(values) => resolveMutation.mutate(values)}>
+        <Form<ResolveForm> layout="vertical" onFinish={(values) => confirmAction('确认完成复核任务？', () => resolveMutation.mutate(values))}>
+          <Form.Item label="处理类型" name="resolution_type">
+            <Select allowClear options={resolutionTypeOptions} />
+          </Form.Item>
           <Form.Item label="后续动作" name="next_action" rules={[{ required: true }]}>
             <Select options={resolveActionOptions} />
           </Form.Item>
           <Form.Item label="处理结论" name="resolution" rules={[{ required: true }]}>
             <Input.TextArea rows={4} />
           </Form.Item>
+          <Form.Item label="结构化结果 JSON/备注" name="result_payload_text">
+            <Input.TextArea rows={3} placeholder='例如 {"fixed_fields":["sn"]}；非 JSON 将按备注保存' />
+          </Form.Item>
           <Button type="primary" htmlType="submit" loading={resolveMutation.isPending}>
             提交
           </Button>
         </Form>
       </Modal>
+      {canAssignTasks ? (
+        <Modal title="分配/转派任务" open={assignOpen} onCancel={() => setAssignOpen(false)} footer={null} destroyOnClose>
+          <Form<AssignForm> layout="vertical" onFinish={(values) => assignMutation.mutate(values)}>
+            <Form.Item label="处理人" name="assigned_user_id">
+              <Select
+                allowClear
+                placeholder="清空后任务回到未分配"
+                options={(usersQuery.data?.items ?? []).map((user: UserAccount) => ({
+                  value: user.id,
+                  label: `${user.real_name}（${user.username}）`,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item label="分配说明" name="reason">
+              <Input.TextArea rows={3} />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={assignMutation.isPending}>保存分配</Button>
+          </Form>
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -395,10 +513,12 @@ function ManualEvidencePane({
   detail,
   loading,
   onApplyParse,
+  onRejectParse,
 }: {
   detail?: ManualTaskDetail;
   loading: boolean;
   onApplyParse: (id: number) => void;
+  onRejectParse: (id: number) => void;
 }) {
   if (!detail && !loading) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择左侧任务" />;
@@ -477,9 +597,21 @@ function ManualEvidencePane({
                   { title: '解析器', dataIndex: 'parser_type', width: 100 },
                   { title: '意图', dataIndex: 'intent_type', width: 120, render: (value?: string) => value || '-' },
                   { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
-                  { title: '采纳', dataIndex: 'accepted', width: 80, render: (value: boolean) => <StatusTag value={value ? 'success' : 'pending'} /> },
+                  { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
                   { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },
-                  { title: '操作', width: 80, render: (_, record) => <Button type="link" size="small" disabled={record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button> },
+                  {
+                    title: '操作',
+                    width: 130,
+                    render: (_, record) => {
+                      const handled = Boolean(record.apply_status && record.apply_status !== 'pending');
+                      return (
+                        <Space size={0}>
+                          <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button>
+                          <Button type="link" size="small" danger disabled={handled} onClick={() => onRejectParse(record.id)}>拒绝</Button>
+                        </Space>
+                      );
+                    },
+                  },
                 ]}
                 expandable={{
                   expandedRowRender: (record) => (
@@ -577,6 +709,7 @@ function ManualActionPane({
   loading,
   onClaim,
   onRelease,
+  onAssign,
   onResolve,
   onReparse,
   onDraftReply,
@@ -585,14 +718,17 @@ function ManualActionPane({
   onEditItem,
   claimLoading,
   releaseLoading,
+  assignLoading,
   reparseLoading,
   draftLoading,
   validateLoading,
+  canAssign,
 }: {
   detail?: ManualTaskDetail;
   loading: boolean;
   onClaim: (id: number) => void;
   onRelease: (id: number) => void;
+  onAssign: () => void;
   onResolve: () => void;
   onReparse: () => void;
   onDraftReply: () => void;
@@ -601,9 +737,11 @@ function ManualActionPane({
   onEditItem: (item?: TicketLine) => void;
   claimLoading: boolean;
   releaseLoading: boolean;
+  assignLoading: boolean;
   reparseLoading: boolean;
   draftLoading: boolean;
   validateLoading: boolean;
+  canAssign: boolean;
 }) {
   if (!detail && !loading) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务后处理" />;
@@ -635,6 +773,7 @@ function ManualActionPane({
       <div className="action-button-grid">
         <Button disabled={!canClaim} loading={claimLoading} onClick={() => onClaim(task.id)}>领取</Button>
         <Button disabled={!canRelease} loading={releaseLoading} onClick={() => onRelease(task.id)}>释放</Button>
+        {canAssign ? <Button loading={assignLoading} onClick={onAssign}>分配/转派</Button> : null}
         <Button icon={<EditOutlined />} onClick={onEditFields}>字段修正</Button>
         <Button icon={<FileAddOutlined />} onClick={() => onEditItem()}>新增明细</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateLoading} onClick={onValidateSn}>SN 校验</Button>

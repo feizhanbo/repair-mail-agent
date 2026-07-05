@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
@@ -77,7 +77,7 @@ async def transition(
     ticket_id: int,
     payload: TicketTransitionRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
     await transition_ticket(
@@ -123,7 +123,13 @@ async def apply_parse_result(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    result = await ticket_service.apply_parse_result(session, parse_result_id=parse_result_id, user_id=current_user.id, reason=payload.reason)
+    result = await ticket_service.apply_parse_result(
+        session,
+        parse_result_id=parse_result_id,
+        user_id=current_user.id,
+        reason=payload.reason,
+        action=payload.action,
+    )
     await session.commit()
     return ok(result, "parse result applied")
 

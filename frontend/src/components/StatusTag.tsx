@@ -23,6 +23,18 @@ const defaultColors: Record<string, string> = {
   draft: 'blue',
   send_disabled: 'default',
   rejected: 'red',
+  auto_applied: 'green',
+  manually_applied: 'green',
+  partially_applied: 'gold',
+};
+
+const defaultLabels: Record<string, string> = {
+  pending: '待处理',
+  success: '成功',
+  rejected: '已拒绝',
+  auto_applied: '自动应用',
+  manually_applied: '人工应用',
+  partially_applied: '部分应用',
 };
 
 function getLabel(value: string, kind: StatusTagProps['kind']) {
@@ -30,7 +42,7 @@ function getLabel(value: string, kind: StatusTagProps['kind']) {
   if (kind === 'parse') return parseStatusLabels[value] ?? value;
   if (kind === 'task') return taskStatusLabels[value] ?? value;
   if (kind === 'review') return reviewStatusLabels[value] ?? value;
-  return value;
+  return defaultLabels[value] ?? value;
 }
 
 function getColor(value: string, kind: StatusTagProps['kind']) {

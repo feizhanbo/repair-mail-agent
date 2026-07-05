@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ManualReviewTask
-from app.services.audit import log_operation
+from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
 from app.services.emails import reparse_email
 from app.services.replies import create_reply_draft
@@ -53,6 +53,8 @@ async def list_tasks(
     task_status: str | None = None,
     task_type: str | None = None,
     assigned_user_id: int | None = None,
+    current_user_id: int | None = None,
+    scope: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     statement = select(ManualReviewTask)
     if task_status:
@@ -61,6 +63,15 @@ async def list_tasks(
         statement = statement.where(ManualReviewTask.task_type == task_type)
     if assigned_user_id:
         statement = statement.where(ManualReviewTask.assigned_user_id == assigned_user_id)
+    if scope == "mine" and current_user_id:
+        statement = statement.where(
+            (ManualReviewTask.assigned_user_id == current_user_id)
+            | (ManualReviewTask.claimed_by_user_id == current_user_id)
+        )
+    elif scope == "unassigned":
+        statement = statement.where(ManualReviewTask.assigned_user_id.is_(None), ManualReviewTask.claimed_by_user_id.is_(None))
+    elif scope == "claimed" and current_user_id:
+        statement = statement.where(ManualReviewTask.claimed_by_user_id == current_user_id)
     statement = statement.order_by(ManualReviewTask.created_at.desc(), ManualReviewTask.id.desc())
     tasks, total = await paginate_scalars(session, statement, page, page_size)
     return [serialize_task(task) for task in tasks], total
@@ -90,12 +101,28 @@ async def claim_task(session: AsyncSession, *, task_id: int, user_id: int) -> di
     return serialize_task(task)
 
 
-async def assign_task(session: AsyncSession, *, task_id: int, assigned_user_id: int, operator_user_id: int) -> dict[str, Any]:
+async def assign_task(
+    session: AsyncSession,
+    *,
+    task_id: int,
+    assigned_user_id: int | None,
+    operator_user_id: int,
+    reason: str | None = None,
+) -> dict[str, Any]:
     task = await get_task(session, task_id)
     if task.status in {"resolved", "closed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_CLOSED")
+    before = {
+        "assigned_user_id": task.assigned_user_id,
+        "claimed_by_user_id": task.claimed_by_user_id,
+        "status": task.status,
+    }
     task.assigned_user_id = assigned_user_id
-    if task.status == "pending":
+    if assigned_user_id is None:
+        task.status = "pending"
+        task.claimed_by_user_id = None
+        task.claimed_at = None
+    elif task.status == "pending":
         task.status = "assigned"
     await log_operation(
         session,
@@ -103,8 +130,23 @@ async def assign_task(session: AsyncSession, *, task_id: int, assigned_user_id: 
         operation_type="manual_task_assigned",
         target_type="manual_review_task",
         target_id=task.id,
-        after_data={"assigned_user_id": assigned_user_id},
+        description=reason,
+        before_data=before,
+        after_data={"assigned_user_id": assigned_user_id, "status": task.status},
     )
+    if assigned_user_id is not None:
+        await create_notification(
+            session,
+            event_type="manual_review_assigned",
+            target_type="manual_review_task",
+            target_id=task.id,
+            title="人工复核任务已分配",
+            content=reason or task.trigger_reason or task.description,
+            priority=task.priority,
+            recipient_user_id=assigned_user_id,
+            recipient_role_code=None,
+            metadata={"ticket_id": task.ticket_id, "task_type": task.task_type},
+        )
     return serialize_task(task)
 
 
@@ -134,6 +176,8 @@ async def resolve_task(
     user_id: int,
     resolution: str,
     next_action: str,
+    resolution_type: str | None = None,
+    result_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task = await get_task(session, task_id)
     if task.status in {"resolved", "closed"}:
@@ -208,7 +252,17 @@ async def resolve_task(
         target_type="manual_review_task",
         target_id=task.id,
         description=resolution,
-        after_data={"next_action": next_action},
+        after_data={
+            "resolution_type": resolution_type,
+            "next_action": next_action,
+            "result_payload": result_payload,
+            "followup_reply_id": followup_result.get("reply", {}).get("id") if isinstance(followup_result, dict) else None,
+            "reparse_result_id": (
+                reparse_result.get("parse_result", {}).get("id")
+                if isinstance(reparse_result, dict) and isinstance(reparse_result.get("parse_result"), dict)
+                else None
+            ),
+        },
     )
     return {
         "task": serialize_task(task),

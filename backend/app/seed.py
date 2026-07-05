@@ -4,12 +4,12 @@ import asyncio
 from collections.abc import Iterable
 from typing import Any
 
-import bcrypt
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.database import AsyncSessionLocal, engine
+from app.core.security import hash_password
 from app.models import ReplyTemplate, Role, User, UserRole, WorkflowStatus, WorkflowTransition
 
 
@@ -204,9 +204,9 @@ WORKFLOW_TRANSITIONS = _build_workflow_transitions()
 
 
 ROLES: tuple[dict[str, str], ...] = (
-    {"role_code": "admin", "role_name": "系统管理员", "description": "拥有系统配置、用户管理和全部数据操作权限。"},
-    {"role_code": "operator", "role_name": "处理员", "description": "处理人工复核队列、修正工单字段并审批回复。"},
-    {"role_code": "viewer", "role_name": "只读观察员", "description": "只读查看系统数据、统计和处理记录。"},
+    {"role_code": "admin", "role_name": "系统管理员", "description": "用户管理、角色分配、系统配置、基础资料维护、权限配置、全部数据查看和全部业务兜底操作。"},
+    {"role_code": "supervisor", "role_name": "主管", "description": "查看全部业务数据，任务分配、转派、释放，查看工单、通知和日志摘要，审核回复，处理异常任务。"},
+    {"role_code": "operator", "role_name": "一般操作员", "description": "处理本人可见或已领取任务，修正字段、SN 校验、采纳解析、生成追问和提交回复草稿。"},
 )
 
 
@@ -251,13 +251,6 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         ),
     },
 )
-
-
-def _hash_password(password: str) -> str:
-    password_bytes = password.encode("utf-8")
-    if len(password_bytes) > 72:
-        raise ValueError("DEFAULT_ADMIN_PASSWORD must be 72 bytes or fewer for bcrypt.")
-    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 async def _get_one(session: AsyncSession, model: type[Any], *conditions: Any) -> Any | None:
@@ -335,7 +328,7 @@ async def _seed_default_admin(session: AsyncSession, admin_role: Role) -> User:
     if user is None:
         user = User(
             username=username,
-            password_hash=_hash_password(settings.DEFAULT_ADMIN_PASSWORD),
+            password_hash=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
             phone=None,
             department="System",
             **payload,

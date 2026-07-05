@@ -25,6 +25,10 @@ export const parseStatusLabels: Record<string, string> = {
   parsed: '已解析',
   skipped: '已跳过',
   failed: '失败',
+  auto_applied: '自动应用',
+  manually_applied: '人工应用',
+  partially_applied: '部分应用',
+  rejected: '已拒绝',
 };
 
 export const reviewStatusLabels: Record<string, string> = {

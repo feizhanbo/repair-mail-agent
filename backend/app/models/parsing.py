@@ -17,6 +17,7 @@ class ParseResult(CreatedAtMixin, Base):
         Index("idx_parse_results_attachment", "source_attachment_id"),
         Index("idx_parse_results_ticket", "ticket_id"),
         Index("idx_parse_results_parser", "parser_type", "parser_version"),
+        Index("idx_parse_results_apply_status", "apply_status"),
         Index("idx_parse_results_accepted", "accepted"),
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="confidence_between_0_and_1"),
     )
@@ -35,6 +36,9 @@ class ParseResult(CreatedAtMixin, Base):
     confidence_score: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
     field_confidences: Mapped[dict | None] = mapped_column(mysql.JSON)
     evidence: Mapped[dict | None] = mapped_column(mysql.JSON)
+    apply_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
+    applied_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_parse_results_applied_by"))
+    applied_at: Mapped[datetime | None] = datetime_column()
     accepted: Mapped[bool] = bool_column(False)
     accepted_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_parse_results_accepted_by"))
     accepted_at: Mapped[datetime | None] = datetime_column()

@@ -2,6 +2,18 @@
 
 This record intentionally stores only non-sensitive deployment facts. Do not write the root password in this file.
 
+## Current Project Baseline
+
+Updated on 2026-07-05.
+
+- The current development baseline uses 26 business tables plus `alembic_version`.
+- The latest Alembic revision is `9d2b7c4f1a30`.
+- `parse_results.apply_status`, `applied_by_user_id`, and `applied_at` are implemented.
+- Roles are `admin`, `supervisor`, and `operator`.
+- A separate validation database named `repair_system_codex_dev_test` was migrated to `9d2b7c4f1a30`.
+- The validation database keeps one temporary admin account, `codex_admin_validation`; the temporary validation user was deleted through the frontend user management page.
+- The actual MySQL root password is controlled by container/private environment configuration and must not be written in this document.
+
 ## Deployment Facts
 
 | Item | Value |

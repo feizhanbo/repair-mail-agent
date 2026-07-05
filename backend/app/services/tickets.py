@@ -167,6 +167,9 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "confidence_score",
             "field_confidences",
             "evidence",
+            "apply_status",
+            "applied_by_user_id",
+            "applied_at",
             "accepted",
             "accepted_by_user_id",
             "accepted_at",
@@ -519,6 +522,12 @@ async def create_ticket_from_parse_result(session: AsyncSession, email: Email, p
         if thread:
             thread.ticket_id = ticket.id
     parse_result.ticket_id = ticket.id
+    parse_result.apply_status = "auto_applied"
+    parse_result.applied_by_user_id = None
+    parse_result.applied_at = utcnow()
+    parse_result.accepted = True
+    parse_result.accepted_by_user_id = None
+    parse_result.accepted_at = parse_result.applied_at
     await _create_items_from_parse_result(session, ticket, parse_result, user_id=None)
     await log_operation(
         session,
@@ -594,10 +603,35 @@ async def apply_parse_result(
     parse_result_id: int,
     user_id: int | None = None,
     reason: str | None = None,
+    action: str = "apply",
+    apply_status: str | None = None,
 ) -> dict[str, Any]:
     parse_result = await session.get(ParseResult, parse_result_id)
     if parse_result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PARSE_RESULT_NOT_FOUND")
+    now = utcnow()
+    if action == "reject":
+        if parse_result.ticket_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PARSE_RESULT_TICKET_NOT_FOUND")
+        ticket = await get_ticket(session, parse_result.ticket_id)
+        parse_result.apply_status = "rejected"
+        parse_result.applied_by_user_id = user_id
+        parse_result.applied_at = now
+        parse_result.accepted = False
+        parse_result.accepted_by_user_id = None
+        parse_result.accepted_at = None
+        await log_operation(
+            session,
+            user_id=user_id,
+            operation_type="parse_result_rejected",
+            target_type="parse_result",
+            target_id=parse_result.id,
+            description=reason,
+            after_data={"ticket_id": ticket.id, "apply_status": "rejected"},
+        )
+        return await get_ticket_detail(session, ticket.id)
+    if action not in {"apply", "partial_apply"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PARSE_RESULT_ACTION_INVALID")
     email = await session.get(Email, parse_result.email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
@@ -633,9 +667,13 @@ async def apply_parse_result(
     ticket.confidence_score = parse_result.confidence_score
     await _create_items_from_parse_result(session, ticket, parse_result, user_id)
 
+    result_status = apply_status or ("partially_applied" if action == "partial_apply" or ticket.manual_locked else ("manually_applied" if user_id else "auto_applied"))
+    parse_result.apply_status = result_status
+    parse_result.applied_by_user_id = user_id
+    parse_result.applied_at = now
     parse_result.accepted = True
     parse_result.accepted_by_user_id = user_id
-    parse_result.accepted_at = utcnow()
+    parse_result.accepted_at = now
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
     ticket.version += 1
@@ -646,7 +684,7 @@ async def apply_parse_result(
         target_type="parse_result",
         target_id=parse_result.id,
         description=reason,
-        after_data={"ticket_id": ticket.id, "changed_fields": changed},
+        after_data={"ticket_id": ticket.id, "changed_fields": changed, "apply_status": result_status, "action": action},
     )
 
     if ticket.current_status_code == "new_email":

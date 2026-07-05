@@ -6,9 +6,12 @@ import EmailsPage from '../pages/EmailsPage';
 import Login from '../pages/Login';
 import ManualReviewPage from '../pages/ManualReviewPage';
 import MasterDataPage from '../pages/MasterDataPage';
+import NotificationsPage from '../pages/NotificationsPage';
+import ProfilePage from '../pages/ProfilePage';
 import RepliesPage from '../pages/RepliesPage';
 import SystemPage from '../pages/SystemPage';
 import TicketsPage from '../pages/TicketsPage';
+import UsersPage from '../pages/UsersPage';
 
 const router = createBrowserRouter([
   {
@@ -25,6 +28,9 @@ const router = createBrowserRouter([
       { path: 'manual-review', element: <ManualReviewPage /> },
       { path: 'replies', element: <RepliesPage /> },
       { path: 'master-data', element: <MasterDataPage /> },
+      { path: 'users', element: <UsersPage /> },
+      { path: 'profile', element: <ProfilePage /> },
+      { path: 'notifications', element: <NotificationsPage /> },
       { path: 'ai-logs', element: <AiLogsPage /> },
       { path: 'system', element: <SystemPage /> },
     ],

@@ -1,0 +1,100 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Button, Descriptions, Drawer, Select, Space, Table, Tag, message } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api, apiErrorMessage } from '../api/client';
+import JsonBlock from '../components/JsonBlock';
+import PageTitle from '../components/PageTitle';
+import SectionPanel from '../components/SectionPanel';
+import type { NotificationEvent } from '../types/api';
+import { formatTime } from '../utils/format';
+
+export default function NotificationsPage() {
+  const [page, setPage] = useState(1);
+  const [deliveryStatus, setDeliveryStatus] = useState<string | undefined>('pending');
+  const [selected, setSelected] = useState<NotificationEvent | null>(null);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    queryKey: ['notifications-page', page, deliveryStatus],
+    queryFn: () => api.notifications({ page, page_size: 20, delivery_status: deliveryStatus }),
+  });
+  const readMutation = useMutation({
+    mutationFn: (id: number) => api.markNotificationRead(id),
+    onSuccess: () => {
+      message.success('消息已标记为已读');
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications-page'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+
+  const jumpToTarget = (record: NotificationEvent) => {
+    if (record.target_type === 'manual_review_task') navigate('/manual-review');
+    else if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') navigate('/tickets');
+    else if (record.target_type === 'reply') navigate('/replies');
+  };
+
+  const columns: ColumnsType<NotificationEvent> = [
+    { title: '标题', dataIndex: 'title', ellipsis: true },
+    { title: '类型', dataIndex: 'event_type', width: 150 },
+    { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <Tag color={value === 'high' ? 'orange' : 'blue'}>{value}</Tag> },
+    { title: '状态', dataIndex: 'delivery_status', width: 90, render: (value: string) => <Tag color={value === 'read' ? 'default' : 'green'}>{value === 'read' ? '已读' : '未读'}</Tag> },
+    { title: '时间', dataIndex: 'created_at', width: 160, render: formatTime },
+    {
+      title: '操作',
+      width: 180,
+      render: (_, record) => (
+        <Space>
+          <Button size="small" onClick={() => setSelected(record)}>详情</Button>
+          <Button size="small" disabled={record.delivery_status === 'read'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
+          <Button size="small" onClick={() => jumpToTarget(record)}>跳转</Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div className="page-stack">
+      <PageTitle title="站内消息" />
+      <SectionPanel>
+        <Space className="filter-bar">
+          <Select
+            allowClear
+            value={deliveryStatus}
+            style={{ width: 160 }}
+            options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
+            onChange={(value) => {
+              setDeliveryStatus(value);
+              setPage(1);
+            }}
+            placeholder="消息状态"
+          />
+        </Space>
+        <Table<NotificationEvent>
+          rowKey="id"
+          columns={columns}
+          dataSource={query.data?.items ?? []}
+          loading={query.isFetching}
+          pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
+        />
+      </SectionPanel>
+      <Drawer title="消息详情" open={Boolean(selected)} onClose={() => setSelected(null)} width={520}>
+        {selected ? (
+          <div className="drawer-stack">
+            <Descriptions bordered column={1} size="small">
+              <Descriptions.Item label="标题">{selected.title}</Descriptions.Item>
+              <Descriptions.Item label="内容">{selected.content || '-'}</Descriptions.Item>
+              <Descriptions.Item label="事件类型">{selected.event_type}</Descriptions.Item>
+              <Descriptions.Item label="目标">{selected.target_type} #{selected.target_id}</Descriptions.Item>
+              <Descriptions.Item label="状态">{selected.delivery_status}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{formatTime(selected.created_at)}</Descriptions.Item>
+            </Descriptions>
+            <JsonBlock value={selected.metadata ?? selected.metadata_json} />
+          </div>
+        ) : null}
+      </Drawer>
+    </div>
+  );
+}

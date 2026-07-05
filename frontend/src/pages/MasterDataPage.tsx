@@ -3,11 +3,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Form, Input, Modal, Space, Table, Tabs, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type { BoardCard, SnAsset } from '../types/api';
+import { hasRole } from '../utils/roles';
 
 type ImportForm = {
   json: string;
@@ -22,6 +24,7 @@ export default function MasterDataPage() {
   const [keyword, setKeyword] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const queryClient = useQueryClient();
+  const canImport = hasRole(useAuthStore((state) => state.user?.roles), 'admin');
   const snQuery = useQuery({
     queryKey: ['sn-assets', keyword, page],
     queryFn: () => api.snAssets({ keyword, page, page_size: 20 }),
@@ -44,7 +47,7 @@ export default function MasterDataPage() {
       void queryClient.invalidateQueries({ queryKey: ['sn-assets'] });
       void queryClient.invalidateQueries({ queryKey: ['board-cards'] });
     },
-    onError: () => message.error('导入数据格式不正确'),
+    onError: (error) => message.error(error instanceof SyntaxError ? '导入数据格式不正确' : apiErrorMessage(error)),
   });
   const snColumns: ColumnsType<SnAsset> = useMemo(
     () => [
@@ -70,7 +73,10 @@ export default function MasterDataPage() {
 
   return (
     <div className="page-stack">
-      <PageTitle title="基础资料" extra={<Button type="primary" icon={<UploadOutlined />} onClick={() => setImportOpen(true)} />} />
+      <PageTitle
+        title="基础资料"
+        extra={canImport ? <Button type="primary" icon={<UploadOutlined />} onClick={() => setImportOpen(true)} /> : null}
+      />
       <SectionPanel>
         <Space className="filter-bar">
           <Input.Search allowClear placeholder="SN、客户、物料" onSearch={(value) => { setPage(1); setKeyword(value); }} />
@@ -88,6 +94,7 @@ export default function MasterDataPage() {
                   columns={snColumns}
                   dataSource={snQuery.data?.items ?? []}
                   loading={snQuery.isFetching}
+                  locale={{ emptyText: snQuery.isError ? 'SN 资产加载失败' : '暂无 SN 资产' }}
                   pagination={{ current: page, pageSize: 20, total: snQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
                 />
               ),
@@ -101,6 +108,7 @@ export default function MasterDataPage() {
                   columns={boardColumns}
                   dataSource={boardQuery.data?.items ?? []}
                   loading={boardQuery.isFetching}
+                  locale={{ emptyText: boardQuery.isError ? '板卡规则加载失败' : '暂无板卡规则' }}
                   pagination={{ current: page, pageSize: 20, total: boardQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
                 />
               ),

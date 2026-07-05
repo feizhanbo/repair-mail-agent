@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -23,6 +23,7 @@ export default function EmailsPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [ingestOpen, setIngestOpen] = useState(false);
   const queryClient = useQueryClient();
+  const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const emailsQuery = useQuery({
     queryKey: ['emails', filters, page],
     queryFn: () => api.emails({ ...filters, page, page_size: 20 }),
@@ -40,6 +41,7 @@ export default function EmailsPage() {
       void queryClient.invalidateQueries({ queryKey: ['emails'] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     },
+    onError: handleMutationError,
   });
   const reparseMutation = useMutation({
     mutationFn: (id: number) => api.reparseEmail(id),
@@ -48,6 +50,7 @@ export default function EmailsPage() {
       void queryClient.invalidateQueries({ queryKey: ['email-detail', selectedId] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     },
+    onError: handleMutationError,
   });
 
   const columns: ColumnsType<EmailItem> = [
@@ -65,7 +68,18 @@ export default function EmailsPage() {
           <Button type="link" size="small" onClick={() => setSelectedId(record.id)}>
             详情
           </Button>
-          <Button type="link" size="small" icon={<ReloadOutlined />} onClick={() => reparseMutation.mutate(record.id)} />
+          <Button
+            type="link"
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => Modal.confirm({
+              title: '确认重新解析该邮件？',
+              content: '该操作会生成新的解析候选，并可能更新关联工单。',
+              okText: '确认',
+              cancelText: '取消',
+              onOk: () => reparseMutation.mutate(record.id),
+            })}
+          />
         </Space>
       ),
     },
@@ -112,6 +126,7 @@ export default function EmailsPage() {
           columns={columns}
           dataSource={emailsQuery.data?.items ?? []}
           loading={emailsQuery.isFetching}
+          locale={{ emptyText: emailsQuery.isError ? '邮件加载失败' : '暂无邮件' }}
           pagination={{ current: page, pageSize: 20, total: emailsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>
@@ -136,7 +151,7 @@ export default function EmailsPage() {
                   { title: '解析器', dataIndex: 'parser_type', width: 90 },
                   { title: '意图', dataIndex: 'intent_type', width: 120 },
                   { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
-                  { title: '已采纳', dataIndex: 'accepted', width: 80, render: (value: boolean) => <StatusTag value={value ? 'success' : 'pending'} /> },
+                  { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
                   { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },
                 ]}
               />

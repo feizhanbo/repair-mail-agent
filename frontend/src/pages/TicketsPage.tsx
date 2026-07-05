@@ -25,11 +25,12 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type {
   Attachment,
   EmailItem,
@@ -44,6 +45,7 @@ import type {
   TicketLine,
 } from '../types/api';
 import { compactText, formatTime, numberText } from '../utils/format';
+import { hasAnyRole } from '../utils/roles';
 import { ticketStatusLabels } from '../utils/status';
 
 type TicketFilters = {
@@ -105,6 +107,17 @@ export default function TicketsPage() {
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
   const queryClient = useQueryClient();
+  const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor']);
+  const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
+  const confirmAction = (title: string, onOk: () => void) => {
+    Modal.confirm({
+      title,
+      content: '该操作会更新当前工单数据。',
+      okText: '确认',
+      cancelText: '取消',
+      onOk,
+    });
+  };
 
   const ticketsQuery = useQuery({
     queryKey: ['tickets', filters, page],
@@ -127,6 +140,7 @@ export default function TicketsPage() {
       message.success('SN 校验完成');
       invalidateDetail();
     },
+    onError: handleMutationError,
   });
   const transitionMutation = useMutation({
     mutationFn: (values: TransitionForm) => api.transitionTicket(selectedId as number, values),
@@ -136,6 +150,7 @@ export default function TicketsPage() {
       invalidateDetail();
       void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
     },
+    onError: handleMutationError,
   });
   const patchFieldsMutation = useMutation({
     mutationFn: (values: TicketFieldForm) => {
@@ -147,6 +162,7 @@ export default function TicketsPage() {
       setFieldOpen(false);
       invalidateDetail();
     },
+    onError: handleMutationError,
   });
   const patchItemsMutation = useMutation({
     mutationFn: (values: TicketItemForm) => {
@@ -159,13 +175,18 @@ export default function TicketsPage() {
       setEditingItem(null);
       invalidateDetail();
     },
+    onError: handleMutationError,
   });
   const applyParseMutation = useMutation({
-    mutationFn: (parseResultId: number) => api.applyParseResult(parseResultId, '前端人工采纳解析候选'),
+    mutationFn: ({ id, action }: { id: number; action: 'apply' | 'reject' }) => api.applyParseResult(id, {
+      action,
+      reason: action === 'reject' ? '前端人工拒绝解析候选' : '前端人工采纳解析候选',
+    }),
     onSuccess: () => {
-      message.success('解析候选已采纳');
+      message.success('解析候选状态已更新');
       invalidateDetail();
     },
+    onError: handleMutationError,
   });
   const draftReplyMutation = useMutation({
     mutationFn: () => {
@@ -182,6 +203,7 @@ export default function TicketsPage() {
       invalidateDetail();
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
     },
+    onError: handleMutationError,
   });
 
   const openItemEditor = (item?: TicketLine) => {
@@ -223,6 +245,7 @@ export default function TicketsPage() {
           columns={columns}
           dataSource={ticketsQuery.data?.items ?? []}
           loading={ticketsQuery.isFetching}
+          locale={{ emptyText: ticketsQuery.isError ? '工单加载失败' : '暂无工单' }}
           pagination={{ current: page, pageSize: 20, total: ticketsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>
@@ -243,15 +266,25 @@ export default function TicketsPage() {
               <Button icon={<EditOutlined />} onClick={() => setFieldOpen(true)}>
                 编辑字段
               </Button>
-              <Button icon={<CheckCircleOutlined />} loading={validateMutation.isPending} onClick={() => validateMutation.mutate(detailQuery.data.ticket.id)}>
+              <Button
+                icon={<CheckCircleOutlined />}
+                loading={validateMutation.isPending}
+                onClick={() => confirmAction('确认执行 SN 校验？', () => validateMutation.mutate(detailQuery.data.ticket.id))}
+              >
                 SN 校验
               </Button>
-              <Button icon={<MailOutlined />} loading={draftReplyMutation.isPending} onClick={() => draftReplyMutation.mutate()}>
+              <Button
+                icon={<MailOutlined />}
+                loading={draftReplyMutation.isPending}
+                onClick={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
+              >
                 生成追问
               </Button>
-              <Button type="primary" onClick={() => setTransitionOpen(true)}>
-                状态流转
-              </Button>
+              {canTransitionTicket ? (
+                <Button type="primary" onClick={() => setTransitionOpen(true)}>
+                  状态流转
+                </Button>
+              ) : null}
             </Space>
           ) : null
         }
@@ -259,9 +292,14 @@ export default function TicketsPage() {
         {detailQuery.data ? (
           <TicketDetailView
             detail={detailQuery.data}
-            onApplyParse={(id) => applyParseMutation.mutate(id)}
+            onApplyParse={(id) => confirmAction('确认采纳该解析候选？', () => applyParseMutation.mutate({ id, action: 'apply' }))}
+            onRejectParse={(id) => confirmAction('确认拒绝该解析候选？', () => applyParseMutation.mutate({ id, action: 'reject' }))}
             onEditItem={openItemEditor}
           />
+        ) : detailQuery.isFetching ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="正在加载工单详情" />
+        ) : detailQuery.isError ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="工单详情加载失败" />
         ) : null}
       </Drawer>
       <Modal title="编辑工单字段" open={fieldOpen} onCancel={() => setFieldOpen(false)} footer={null} destroyOnClose>
@@ -341,22 +379,24 @@ export default function TicketsPage() {
           </Button>
         </Form>
       </Modal>
-      <Modal title="状态流转" open={transitionOpen} onCancel={() => setTransitionOpen(false)} footer={null} destroyOnClose>
-        <Form<TransitionForm> layout="vertical" onFinish={(values) => transitionMutation.mutate(values)}>
-          <Form.Item label="目标状态" name="to_status_code" rules={[{ required: true }]}>
-            <Select options={transitionOptions.map((item) => ({ value: item.to_status_code, label: item.label }))} />
-          </Form.Item>
-          <Form.Item label="触发事件" name="trigger_event" rules={[{ required: true }]}>
-            <Select options={transitionOptions.map((item) => ({ value: item.trigger_event, label: item.trigger_event }))} />
-          </Form.Item>
-          <Form.Item label="原因" name="reason">
-            <Input.TextArea rows={3} />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={transitionMutation.isPending}>
-            提交
-          </Button>
-        </Form>
-      </Modal>
+      {canTransitionTicket ? (
+        <Modal title="状态流转" open={transitionOpen} onCancel={() => setTransitionOpen(false)} footer={null} destroyOnClose>
+          <Form<TransitionForm> layout="vertical" onFinish={(values) => transitionMutation.mutate(values)}>
+            <Form.Item label="目标状态" name="to_status_code" rules={[{ required: true }]}>
+              <Select options={transitionOptions.map((item) => ({ value: item.to_status_code, label: item.label }))} />
+            </Form.Item>
+            <Form.Item label="触发事件" name="trigger_event" rules={[{ required: true }]}>
+              <Select options={transitionOptions.map((item) => ({ value: item.trigger_event, label: item.trigger_event }))} />
+            </Form.Item>
+            <Form.Item label="原因" name="reason">
+              <Input.TextArea rows={3} />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={transitionMutation.isPending}>
+              提交
+            </Button>
+          </Form>
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -364,10 +404,12 @@ export default function TicketsPage() {
 function TicketDetailView({
   detail,
   onApplyParse,
+  onRejectParse,
   onEditItem,
 }: {
   detail: TicketDetail;
   onApplyParse: (id: number) => void;
+  onRejectParse: (id: number) => void;
   onEditItem: (item: TicketLine) => void;
 }) {
   const timelineEmails = detail.email_timeline.length > 0 ? detail.email_timeline : detail.source_email ? [detail.source_email] : [];
@@ -465,10 +507,22 @@ function TicketDetailView({
                   { title: '解析器', dataIndex: 'parser_type', width: 100 },
                   { title: '意图', dataIndex: 'intent_type', width: 130, render: (value?: string) => value || '-' },
                   { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
-                  { title: '采纳', dataIndex: 'accepted', width: 80, render: (value: boolean) => <StatusTag value={value ? 'success' : 'pending'} /> },
+                  { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
                   { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },
                   { title: '创建时间', dataIndex: 'created_at', width: 160, render: formatTime },
-                  { title: '操作', width: 90, render: (_, record) => <Button type="link" size="small" disabled={record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button> },
+                  {
+                    title: '操作',
+                    width: 130,
+                    render: (_, record) => {
+                      const handled = Boolean(record.apply_status && record.apply_status !== 'pending');
+                      return (
+                        <Space size={0}>
+                          <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button>
+                          <Button type="link" size="small" danger disabled={handled} onClick={() => onRejectParse(record.id)}>拒绝</Button>
+                        </Space>
+                      );
+                    },
+                  },
                 ]}
               />
             ),

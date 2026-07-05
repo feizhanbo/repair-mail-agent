@@ -240,6 +240,7 @@ async def reparse_email(
             },
             "mode": mode,
         },
+        apply_status="pending",
     )
     session.add(parse_result)
     await session.flush()
@@ -255,7 +256,13 @@ async def reparse_email(
     )
     applied: dict[str, Any] | None = None
     if intent_type in {"new_repair", "customer_reply", "internal_forward", "unknown"}:
-        applied = await apply_parse_result(session, parse_result_id=parse_result.id, user_id=user_id, reason=reason or "规则解析结果自动采纳。")
+        applied = await apply_parse_result(
+            session,
+            parse_result_id=parse_result.id,
+            user_id=user_id,
+            reason=reason or "规则解析结果自动采纳。",
+            apply_status="auto_applied",
+        )
 
     ai_result: dict[str, Any] | None = None
     ai_applied: dict[str, Any] | None = None
@@ -297,6 +304,7 @@ async def reparse_email(
                 parse_result_id=ai_parse_result.id,
                 user_id=user_id,
                 reason=reason or "DeepSeek 结构化解析候选自动采纳。",
+                apply_status="auto_applied",
             )
     return {
         "parse_result": serialize_parse_result(parse_result),

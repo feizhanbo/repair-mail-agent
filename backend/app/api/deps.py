@@ -21,6 +21,9 @@ class CurrentUser:
     username: str
     real_name: str
     email: str | None
+    phone: str | None
+    department: str | None
+    status: str
     roles: list[str]
 
 
@@ -51,7 +54,16 @@ async def get_current_user(
         .order_by(Role.role_code)
     )
     roles = list(roles_result.scalars().all())
-    return CurrentUser(id=user.id, username=user.username, real_name=user.real_name, email=user.email, roles=roles)
+    return CurrentUser(
+        id=user.id,
+        username=user.username,
+        real_name=user.real_name,
+        email=user.email,
+        phone=user.phone,
+        department=user.department,
+        status=user.status,
+        roles=roles,
+    )
 
 
 def require_roles(*allowed_roles: str):

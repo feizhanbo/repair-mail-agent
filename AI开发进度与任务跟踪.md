@@ -1,69 +1,158 @@
 # AI开发进度与任务跟踪
 
-## 1. PRD 摘要
+更新日期：2026-07-05
 
-一期目标是完成邮件报修自动化内部试运行底座，覆盖邮件归档、回复链识别、结构化解析、SN 校验、追问草稿、人工复核、工单沉淀和可追溯控制台。默认关闭真实自动发送，附件和原始 EML 进入 OSS，数据库只保存元数据和对象引用。
+## 1. 当前阶段
 
-## 2. 当前开发阶段
+当前阶段为“内部试运行闭环硬化”。基础业务、DeepSeek AI 首轮接入、用户管理、个人信息、站内消息、`parse_results.apply_status`、人工处理流程优化、接口级 RBAC 已完成本地开发和验证。
 
-当前阶段：阶段 2 基础业务开发（后端业务 API、前端工作台页面和 DeepSeek AI 接入已完成首轮开发）。
+本轮目标不是部署生产环境，而是把前后端、数据库结构和开发文档统一到同一条实现方向上。
 
-本次任务已完成：在既有项目底座上补齐邮件报修核心业务服务、API、前端页面和 DeepSeek AI 能力。后端已实现认证依赖、统一响应、邮件、工单、人工复核、解析结果、回复、基础资料、通知、AI 日志和系统信息等接口；前端已替换占位页面，形成邮件中心、工单工作台、人工复核工作台、回复审核、基础资料、AI 日志和系统配置等业务页面。DeepSeek 仅在后端通过环境变量读取密钥，支持 JSON 输出解析、AI 解析候选、追问草稿生成和失败回退。
+## 2. 当前完成内容
 
-## 3. 全量任务树
-
-- 后端：FastAPI 工程、配置、统一响应、ORM model、API 层、Service 层、AI Provider、认证与审计辅助。
-- 数据库：一期 26 张业务表 ORM 和 Alembic 初始迁移保持不变；本阶段只做只读连接与结构核验，不执行迁移、seed 或 db_smoke。
-- 前端：React + TypeScript + Ant Design 控制台已从骨架推进到业务页面与 API client 联调阶段。
-- 部署：Docker Compose、Nginx、GitHub Actions、部署脚本保持已有状态；本阶段不部署。
-- 测试：后端静态编译、单元测试、前端 typecheck/build、只读数据库结构比对和只读接口 smoke 已完成。
-- 文档：README、AI 进度文档同步当前开发进度和安全约束。
-
-## 4. 模块完成度
-
-| 模块 | 状态 | 备注 |
+| 模块 | 状态 | 说明 |
 | --- | --- | --- |
-| 项目骨架 | 已完成 | 根目录、后端、前端、部署骨架已创建 |
-| 后端 API 底座 | 已完成 | 已提供认证、邮件、工单、人工复核、回复、基础资料、通知、AI 日志、系统信息等 API |
-| 数据库 ORM | 已完成 | 已按一期最终版 26 张表实现 |
-| Alembic 迁移 | 已完成 | 已生成 `0f2ae6ba263f_create_initial_schema.py` 并在远程 `repair_system_dev` 执行成功 |
-| 前端控制台 | 已完成 | 已完成业务页面、共享组件、API client 和类型定义对齐 |
-| Docker/Nginx/CI | 已完成 | 已落基础配置；MySQL Compose 当前使用 root 账号和 `repair_system_dev` |
-| DeepSeek AI 接入 | 已完成 | 已新增 Provider 抽象、JSON 输出解析、AI 解析候选、追问草稿和失败回退 |
-| 种子数据 | 已保留 | 本阶段未执行 seed；远端当前可读基础数据包含流程状态、流程流转、角色和回复模板 |
-| Git 分支提交 | 进行中 | 当前准备将白名单开发内容提交到 `codex-dev` 分支 |
+| 后端 API | 已完成首轮 | 认证、用户、邮件、工单、人工复核、解析结果、回复、基础资料、通知、AI 日志、系统信息均已接入 `/api/v1`。 |
+| 后端 RBAC | 已完成首轮 | `users` 仅 admin；人工任务分配仅 supervisor/admin；回复审核仅 supervisor/admin；基础资料导入仅 admin；AI 日志和系统信息仅 supervisor/admin。 |
+| 数据库 ORM | 已完成首轮 | 26 张业务表 + `alembic_version`；最新迁移为 `9d2b7c4f1a30`。 |
+| `parse_results` | 已修复 | 已新增 `apply_status`、`applied_by_user_id`、`applied_at`，保留旧 `accepted/accepted_by_user_id/accepted_at` 兼容字段。 |
+| 角色体系 | 已统一 | 仅保留 `admin`、`supervisor`、`operator`，不再沿用 `viewer`。 |
+| 用户能力 | 已完成首轮 | 后端支持用户列表、新增、编辑、启停、角色分配、重置密码、物理删除；前端已实现用户管理页。 |
+| 个人信息 | 已完成首轮 | 支持查看/编辑个人资料和修改当前用户密码。 |
+| 站内消息 | 已完成首轮 | 支持消息列表、未读筛选、详情抽屉、标记已读。 |
+| DeepSeek AI | 已完成首轮 | Provider 抽象、JSON 输出校验、解析候选、追问草稿、AI 日志摘要、JSONL 定位和失败回退。 |
+| 前端角色感知 | 已完成首轮 | 菜单和高危操作按钮按角色隐藏；后端 RBAC 作为最终安全边界。 |
+| 远程新库验证 | 已完成 | `repair_system_codex_dev_test` 已迁移到 `9d2b7c4f1a30`，保留临时管理员 `codex_admin_validation`，验证用户已新增、展示、删除。 |
 
-## 5. 数据库完成度
+## 3. AI 接入设计
 
-一期范围为 26 张业务表。本阶段未修改数据库结构；远程开发库只读核验结果为 ORM 26 张业务表与数据库字段完全一致，数据库额外表仅 `alembic_version`。当前可读基础数据包含 8 个流程状态、16 条流程流转、4 个角色和 3 个基础回复模板；`users` 当前为空，真实登录验收需要后续按合规流程初始化用户。
+当前 AI Provider 仅在后端执行，不允许前端直连 DeepSeek。
 
-当前数据库连接决策：开发阶段直接使用 root 账号，开发库为 `repair_system_dev`。真实 root 密码只允许保存在远程服务器 `.env`、本地私有 `.env` 和用户自己的密码管理器或离线安全记录，不进入仓库文档。
+默认配置：
 
-数据库实现差异：`oss_objects.object_key` 在数据库最终版文档中为 `VARCHAR(700)`，但与 `bucket VARCHAR(128)` 组成 `utf8mb4` 联合唯一键时超过 MySQL 3072 字节索引上限；当前 ORM 和迁移调整为 `VARCHAR(640)`。
+```text
+AI_PROVIDER=deepseek
+AI_BASE_URL=https://api.deepseek.com
+AI_MODEL=deepseek-v4-flash
+AI_PROMPT_VERSION=deepseek-v4-json-v1
+```
 
-## 6. API 完成度
+安全约束：
 
-当前已实现 `/health` 和 `/api/v1` 下的主要业务接口：认证、邮件列表/详情/入库/重解析、工单列表/详情/字段编辑/明细编辑/状态流转/SN 校验/解析结果/邮件时间线/附件/字段证据、人工复核任务列表/详情/领取/释放/处理/重解析、解析结果采纳、回复草稿/审核/拒绝、基础资料查询与导入占位、通知、AI 日志和系统信息。真实 IMAP/SMTP/OSS 仍保持占位或配置预留。
+- `AI_API_KEY` 只从运行环境读取。
+- 不把 API key 写入源码、文档、测试快照、构建产物或 Git 可追踪文件。
+- AI 调用日志不记录 key。
+- 完整 prompt/input/output 写入私有 JSONL；数据库只保存摘要、模型、耗时、状态、关键结构化结果和 JSONL 定位。
+- AI 失败不阻断邮件入库、重解析或草稿生成。
 
-## 7. 前端页面完成度
+## 4. 业务闭环
 
-当前已完成登录页、首页看板、邮件中心、工单中心、人工复核、回复审核、基础资料、AI 日志和系统配置页面；前端类型与 API client 已对齐后端响应结构。页面已具备基础查看和操作入口，后续需要结合真实数据继续做交互细节和异常态打磨。
+当前闭环能力：
 
-## 8. 测试与验收进度
+1. 手工邮件入库或既有邮件查询。
+2. 规则解析和 DeepSeek AI 生成解析候选。
+3. 工单字段、明细、附件、邮件时间线、字段证据、状态日志展示。
+4. 工单字段编辑、明细编辑、SN 校验。
+5. 解析候选采纳、部分应用状态保留、拒绝候选。
+6. 人工复核任务查询、领取、释放、分配/转派、处理、重解析。
+7. 追问草稿生成，失败时回退模板。
+8. 回复草稿编辑，主管审核通过或拒绝。
+9. 站内通知推送到指定用户或角色。
 
-本阶段已完成以下验证：后端 `python -m compileall app` 通过；`pytest` 7 passed；前端 Node 20 下 `npm run typecheck` 和 `npm run build` 通过；本地经 SSH 隧道只读连接远端 MySQL 成功；ORM 与数据库业务表字段差异为 0；主要只读 GET 接口 smoke 均返回 `200` / `success=true`。本阶段未执行迁移、seed、db_smoke 或任何数据库写入。
+## 5. 数据库状态
 
-## 9. 当前阻塞项
+当前 ORM 和迁移覆盖 26 张业务表：
 
-- 真实 IMAP/SMTP/OSS 尚未联调，AI key 只允许通过私有运行环境提供。
-- 远端当前 `users` 表为空，真实登录验收需要后续按合规方式初始化用户。
-- 当前业务数据较少，工作台页面仍需结合真实邮件、工单、附件和解析结果继续做场景回归。
+```text
+users, roles, user_roles,
+oss_objects, email_threads, emails, email_attachments, email_ticket_links,
+repair_tickets, repair_ticket_items,
+workflow_statuses, workflow_transitions, ticket_status_logs, field_audit_logs,
+parse_results, sn_validation_results, sn_assets, board_cards,
+reply_templates, reply_records, manual_review_tasks, notification_events,
+ai_call_logs, operation_logs, system_event_logs, job_run_logs
+```
 
-## 10. 下一步开发约束
+`parse_results` 当前应用状态字段：
 
-- 每次开发前先读取本文件和 README。
-- 不允许把真实密码、邮箱凭据、OSS key、AI key 写入仓库。
-- 迁移前必须确认远程 Docker MySQL 和备份策略。
-- 自动回复必须保持 `AUTO_SEND_ENABLED=false` 默认值。
-- DeepSeek 调用只在后端发生，前端不得接触 API key。
-- 本阶段提交只包含业务源码和必要进度文档，不提交本地隐私配置、隧道脚本、日志、部署方案文档或未纳入白名单的方案文档。
+- `apply_status`
+- `applied_by_user_id`
+- `applied_at`
+- 兼容字段：`accepted`、`accepted_by_user_id`、`accepted_at`
+
+远程新库验证事实：
+
+- 库名：`repair_system_codex_dev_test`
+- 迁移版本：`9d2b7c4f1a30`
+- 保留用户：临时管理员 `codex_admin_validation`
+- 验证用户：已从前端删除，数据库中不再保留
+
+真实 MySQL root 口令不写入文档，以容器环境和私有配置为准。
+
+## 6. API 与权限
+
+当前接口级 RBAC 方向：
+
+- `users`：仅 `admin`。
+- `manual-review`：列表、详情、领取、释放、处理、重解析允许 `operator/supervisor/admin`；分配/转派仅 `supervisor/admin`。
+- `replies`：草稿和编辑允许 `operator/supervisor/admin`；审核通过/拒绝仅 `supervisor/admin`。
+- `master-data`：查询允许 `supervisor/admin`；导入仅 `admin`。
+- `ai-logs`、`system`：允许 `supervisor/admin`。
+- 邮件、工单基础查看和必要处理接口仍以登录态为主。
+- 工单状态流转仅 `supervisor/admin`。
+- operator 人工任务列表禁止 `scope=all`，也禁止查看他人 `assigned_user_id`。
+
+行级工单/邮件隔离尚未实现，原因是当前模型缺少明确业务归属字段。本项进入后续设计。
+
+## 7. 前端页面
+
+当前页面清单：
+
+- `/login`：登录。
+- `/`：首页看板。
+- `/emails`：邮件中心。
+- `/tickets`：工单中心与详情工作台。
+- `/manual-review`：人工复核工作台。
+- `/replies`：回复审核。
+- `/master-data`：SN 和板卡基础资料。
+- `/users`：用户管理，仅 admin 展示入口。
+- `/profile`：个人信息。
+- `/notifications`：站内消息。
+- `/ai-logs`：AI 日志，仅 supervisor/admin 展示入口。
+- `/system`：系统配置，仅 supervisor/admin 展示入口。
+
+## 8. 验证结果
+
+本次本地验证：
+
+- 后端 `python -m compileall app` 通过。
+- 后端 `pytest` 通过，结果为 `32 passed`。
+- 前端 `npm run typecheck` 通过。
+- 前端 `npm run build` 通过，仅有 Vite 大 chunk 警告。
+
+本次未执行：
+
+- 新的数据库迁移执行。
+- seed。
+- db_smoke。
+- 远程数据库写入。
+- Git commit/push。
+- 部署。
+
+## 9. 当前限制与下一步
+
+当前限制：
+
+- 真实 IMAP、SMTP、OSS 未联调。
+- 自动发送默认关闭，回复仍需人工审核。
+- 工单/邮件行级数据权限未建模。
+- 前端缺少完整 Playwright/E2E 回归。
+- 真实 DeepSeek 调用仅能在私有环境变量配置后手动验收。
+
+下一步建议：
+
+1. 为核心 API 补更细的 `response_model` 和错误码目录。
+2. 增加服务层业务闭环测试，覆盖邮件入库、解析、工单生成、复核、回复审核。
+3. 设计行级数据权限字段和规则，不直接在现有模型上硬编码。
+4. 补前端 E2E，覆盖 admin/supervisor/operator 三类用户。
+5. 将 IMAP/SMTP/OSS 联调作为独立阶段执行。

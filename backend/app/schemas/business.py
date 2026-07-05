@@ -78,15 +78,19 @@ class TicketItemsPatchRequest(BaseModel):
 
 
 class ParseResultApplyRequest(BaseModel):
+    action: Literal["apply", "partial_apply", "reject"] = "apply"
     reason: str | None = Field(default=None, max_length=500)
 
 
 class ManualTaskAssignRequest(BaseModel):
-    assigned_user_id: int
+    assigned_user_id: int | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class ManualTaskResolveRequest(BaseModel):
     resolution: str = Field(min_length=1)
+    resolution_type: str | None = Field(default=None, max_length=50)
+    result_payload: dict[str, Any] | None = None
     next_action: Literal[
         "transition_ready_for_export",
         "generate_followup",
@@ -156,6 +160,48 @@ class BoardCardImportRequest(BaseModel):
     items: list[BoardCardImportItem]
     source_file_name: str | None = Field(default=None, max_length=255)
     source_file_hash: str | None = Field(default=None, max_length=64)
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+    real_name: str = Field(min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    department: str | None = Field(default=None, max_length=100)
+    status: Literal["active", "disabled"] = "active"
+    roles: list[Literal["admin", "supervisor", "operator"]] = Field(default_factory=list)
+
+
+class UserUpdateRequest(BaseModel):
+    real_name: str | None = Field(default=None, min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    department: str | None = Field(default=None, max_length=100)
+
+
+class UserStatusRequest(BaseModel):
+    status: Literal["active", "disabled"]
+
+
+class UserRolesRequest(BaseModel):
+    roles: list[Literal["admin", "supervisor", "operator"]] = Field(default_factory=list)
+
+
+class UserResetPasswordRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
+class ProfileUpdateRequest(BaseModel):
+    real_name: str | None = Field(default=None, min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    department: str | None = Field(default=None, max_length=100)
+
+
+class PasswordChangeRequest(BaseModel):
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 class ModelDumpMixin(BaseModel):

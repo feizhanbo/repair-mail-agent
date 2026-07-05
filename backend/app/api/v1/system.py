@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
@@ -19,7 +19,7 @@ router = APIRouter()
 @router.get("/info")
 async def system_info(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
     del current_user
     statuses = (await session.execute(select(WorkflowStatus).order_by(WorkflowStatus.sort_order, WorkflowStatus.id))).scalars().all()

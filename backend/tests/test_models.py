@@ -35,3 +35,10 @@ def test_phase_one_table_names() -> None:
         "job_run_logs",
     }
 
+
+def test_parse_result_apply_status_columns() -> None:
+    columns = Base.metadata.tables["parse_results"].columns
+    assert "apply_status" in columns
+    assert "applied_by_user_id" in columns
+    assert "applied_at" in columns
+

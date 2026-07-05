@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import page
 from app.models import AiCallLog
@@ -40,7 +40,7 @@ AI_LOG_FIELDS = (
 @router.get("")
 async def list_ai_logs(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ticket_id: int | None = None,

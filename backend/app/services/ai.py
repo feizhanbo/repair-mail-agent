@@ -324,6 +324,7 @@ async def create_ai_parse_candidate(
             "prompt_version": settings.AI_PROMPT_VERSION,
             "mode": mode,
         },
+        apply_status="pending",
     )
     session.add(parse_result)
     await session.flush()

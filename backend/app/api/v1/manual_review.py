@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import ManualTaskAssignRequest, ManualTaskReparseRequest, ManualTaskResolveRequest
@@ -17,14 +17,19 @@ router = APIRouter()
 @router.get("/tasks")
 async def list_tasks(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status: str | None = None,
     task_type: str | None = None,
     assigned_user_id: int | None = None,
+    scope: str | None = Query(None, pattern="^(mine|unassigned|claimed|all)$"),
 ) -> dict:
-    del current_user
+    if not any(role in current_user.roles for role in ("admin", "supervisor")):
+        if scope == "all" or (assigned_user_id is not None and assigned_user_id != current_user.id):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+        if scope is None and assigned_user_id is None:
+            scope = "mine"
     items, total = await manual_review_service.list_tasks(
         session,
         page=page_no,
@@ -32,6 +37,8 @@ async def list_tasks(
         task_status=status,
         task_type=task_type,
         assigned_user_id=assigned_user_id,
+        current_user_id=current_user.id,
+        scope=scope,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
 
@@ -40,7 +47,7 @@ async def list_tasks(
 async def get_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     del current_user
     return ok(await manual_review_service.get_task_detail(session, task_id))
@@ -50,7 +57,7 @@ async def get_task(
 async def claim_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await manual_review_service.claim_task(session, task_id=task_id, user_id=current_user.id)
     await session.commit()
@@ -62,13 +69,14 @@ async def assign_task(
     task_id: int,
     payload: ManualTaskAssignRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
     result = await manual_review_service.assign_task(
         session,
         task_id=task_id,
         assigned_user_id=payload.assigned_user_id,
         operator_user_id=current_user.id,
+        reason=payload.reason,
     )
     await session.commit()
     return ok(result, "manual task assigned")
@@ -78,7 +86,7 @@ async def assign_task(
 async def release_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await manual_review_service.release_task(session, task_id=task_id, user_id=current_user.id)
     await session.commit()
@@ -90,14 +98,16 @@ async def resolve_task(
     task_id: int,
     payload: ManualTaskResolveRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await manual_review_service.resolve_task(
         session,
         task_id=task_id,
         user_id=current_user.id,
         resolution=payload.resolution,
+        resolution_type=payload.resolution_type,
         next_action=payload.next_action,
+        result_payload=payload.result_payload,
     )
     await session.commit()
     return ok(result, "manual task resolved")
@@ -108,7 +118,7 @@ async def reparse_task(
     task_id: int,
     payload: ManualTaskReparseRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await manual_review_service.reparse_task(
         session,

@@ -12,9 +12,10 @@ from app.core.database import get_session
 from app.core.response import ok
 from app.core.security import create_access_token, verify_password
 from app.models import Role, User, UserRole
-from app.schemas.business import LoginRequest
+from app.schemas.business import LoginRequest, PasswordChangeRequest, ProfileUpdateRequest
 from app.services.audit import log_operation
 from app.services.common import utcnow
+from app.services import users as user_service
 
 router = APIRouter()
 
@@ -53,6 +54,9 @@ async def login(payload: LoginRequest, session: Annotated[AsyncSession, Depends(
                 "username": user.username,
                 "real_name": user.real_name,
                 "email": user.email,
+                "phone": user.phone,
+                "department": user.department,
+                "status": user.status,
                 "roles": roles,
             },
         }
@@ -68,8 +72,36 @@ async def me(current_user: Annotated[CurrentUser, Depends(get_current_user)]) ->
                 "username": current_user.username,
                 "real_name": current_user.real_name,
                 "email": current_user.email,
+                "phone": current_user.phone,
+                "department": current_user.department,
+                "status": current_user.status,
             },
             "roles": current_user.roles,
         }
     )
+
+
+@router.patch("/me/profile")
+async def update_profile(
+    payload: ProfileUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    result = await user_service.update_profile(session, user_id=current_user.id, values=payload.model_dump(exclude_unset=True))
+    return ok(result, "profile updated")
+
+
+@router.patch("/me/password")
+async def change_password(
+    payload: PasswordChangeRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    result = await user_service.change_password(
+        session,
+        user_id=current_user.id,
+        old_password=payload.old_password,
+        new_password=payload.new_password,
+    )
+    return ok(result, "password changed")
 

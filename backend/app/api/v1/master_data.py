@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import BoardCardImportRequest, SnAssetImportRequest
@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/sn-assets")
 async def list_sn_assets(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
@@ -38,7 +38,7 @@ async def list_sn_assets(
 async def import_sn_assets(
     payload: SnAssetImportRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     result = await master_data_service.import_sn_assets(
         session,
@@ -54,7 +54,7 @@ async def import_sn_assets(
 @router.get("/board-cards")
 async def list_board_cards(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
@@ -69,7 +69,7 @@ async def list_board_cards(
 async def import_board_cards(
     payload: BoardCardImportRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     result = await master_data_service.import_board_cards(
         session,

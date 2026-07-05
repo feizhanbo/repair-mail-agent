@@ -3,13 +3,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type { ReplyRecord } from '../types/api';
 import { compactText, formatTime } from '../utils/format';
+import { hasAnyRole } from '../utils/roles';
 
 type ReplyFilters = {
   review_status?: string;
@@ -29,6 +31,17 @@ export default function RepliesPage() {
   const [selected, setSelected] = useState<ReplyRecord | null>(null);
   const [draftOpen, setDraftOpen] = useState(false);
   const queryClient = useQueryClient();
+  const canReviewReplies = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor']);
+  const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
+  const confirmAction = (title: string, onOk: () => void) => {
+    Modal.confirm({
+      title,
+      content: '该操作会更新回复审核状态。',
+      okText: '确认',
+      cancelText: '取消',
+      onOk,
+    });
+  };
   const repliesQuery = useQuery({
     queryKey: ['replies', filters, page],
     queryFn: () => api.replies({ ...filters, page, page_size: 20 }),
@@ -41,6 +54,7 @@ export default function RepliesPage() {
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
       void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
     },
+    onError: handleMutationError,
   });
   const approveMutation = useMutation({
     mutationFn: (id: number) => api.approveReply(id),
@@ -49,6 +63,7 @@ export default function RepliesPage() {
       setSelected(null);
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
     },
+    onError: handleMutationError,
   });
   const rejectMutation = useMutation({
     mutationFn: ({ id, reason }: { id: number; reason: string }) => api.rejectReply(id, reason),
@@ -57,6 +72,7 @@ export default function RepliesPage() {
       setSelected(null);
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
     },
+    onError: handleMutationError,
   });
 
   const columns: ColumnsType<ReplyRecord> = [
@@ -67,12 +83,12 @@ export default function RepliesPage() {
     { title: '发送', dataIndex: 'send_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
     { title: '轮次', dataIndex: 'followup_round', width: 80 },
     { title: '创建时间', dataIndex: 'created_at', width: 160, render: formatTime },
-    { title: '操作', width: 90, render: (_, record) => <Button type="link" size="small" onClick={() => setSelected(record)}>审核</Button> },
+    { title: '操作', width: 90, render: (_, record) => <Button type="link" size="small" onClick={() => setSelected(record)}>{canReviewReplies ? '审核' : '详情'}</Button> },
   ];
 
   return (
     <div className="page-stack">
-      <PageTitle title="自动回复审核" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setDraftOpen(true)} />} />
+      <PageTitle title="自动回复审核" extra={canReviewReplies ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setDraftOpen(true)} /> : null} />
       <SectionPanel>
         <Form<ReplyFilters> layout="inline" className="filter-bar" onFinish={(values) => { setPage(1); setFilters(values); }}>
           <Form.Item name="ticket_id">
@@ -97,6 +113,7 @@ export default function RepliesPage() {
           columns={columns}
           dataSource={repliesQuery.data?.items ?? []}
           loading={repliesQuery.isFetching}
+          locale={{ emptyText: repliesQuery.isError ? '回复记录加载失败' : '暂无回复记录' }}
           pagination={{ current: page, pageSize: 20, total: repliesQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>
@@ -106,10 +123,10 @@ export default function RepliesPage() {
         open={Boolean(selected)}
         onClose={() => setSelected(null)}
         extra={
-          selected ? (
+          selected && canReviewReplies ? (
             <Space>
-              <Button danger onClick={() => rejectMutation.mutate({ id: selected.id, reason: '人工驳回' })}>驳回</Button>
-              <Button type="primary" onClick={() => approveMutation.mutate(selected.id)}>通过</Button>
+              <Button danger onClick={() => confirmAction('确认驳回该回复？', () => rejectMutation.mutate({ id: selected.id, reason: '人工驳回' }))}>驳回</Button>
+              <Button type="primary" onClick={() => confirmAction('确认审核通过该回复？', () => approveMutation.mutate(selected.id))}>通过</Button>
             </Space>
           ) : null
         }

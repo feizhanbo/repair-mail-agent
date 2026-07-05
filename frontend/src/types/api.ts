@@ -14,6 +14,8 @@ export type PageData<T> = {
 
 export type JsonRecord = Record<string, unknown>;
 
+export type RoleCode = 'admin' | 'supervisor' | 'operator';
+
 export type LoginRequest = {
   username: string;
   password: string;
@@ -24,7 +26,10 @@ export type CurrentUser = {
   username: string;
   real_name: string;
   email?: string | null;
-  roles: string[];
+  phone?: string | null;
+  department?: string | null;
+  status?: string;
+  roles: RoleCode[];
 };
 
 export type LoginResponse = {
@@ -119,6 +124,9 @@ export type ParseResult = {
   confidence_score?: number | string | null;
   field_confidences?: JsonRecord | null;
   evidence?: JsonRecord | null;
+  apply_status: string;
+  applied_by_user_id?: number | null;
+  applied_at?: string | null;
   accepted: boolean;
   accepted_by_user_id?: number | null;
   accepted_at?: string | null;
@@ -293,6 +301,38 @@ export type ManualTask = {
   updated_at?: string;
 };
 
+export type UserAccount = {
+  id: number;
+  username: string;
+  real_name: string;
+  email?: string | null;
+  phone?: string | null;
+  department?: string | null;
+  status: string;
+  roles: RoleCode[];
+  last_login_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type UserCreateRequest = {
+  username: string;
+  password: string;
+  real_name: string;
+  email?: string | null;
+  phone?: string | null;
+  department?: string | null;
+  status: 'active' | 'disabled';
+  roles: RoleCode[];
+};
+
+export type UserUpdateRequest = {
+  real_name?: string;
+  email?: string | null;
+  phone?: string | null;
+  department?: string | null;
+};
+
 export type ManualTaskDetail = {
   task: ManualTask;
   ticket_context: TicketDetail;
@@ -380,7 +420,14 @@ export type NotificationEvent = {
   title: string;
   content?: string | null;
   priority: string;
+  recipient_user_id?: number | null;
+  recipient_role_code?: string | null;
+  delivery_channel?: string;
   delivery_status: string;
+  read_at?: string | null;
+  metadata?: JsonRecord | null;
+  metadata_json?: JsonRecord | null;
+  delivered_at?: string | null;
   created_at?: string;
 };
 

@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import ReplyDraftRequest, ReplyRejectRequest, ReplyUpdateRequest
@@ -41,7 +41,7 @@ async def create_draft(
     ticket_id: int,
     payload: ReplyDraftRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await reply_service.create_reply_draft(
         session,
@@ -61,7 +61,7 @@ async def update_reply(
     reply_id: int,
     payload: ReplyUpdateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await reply_service.update_reply(session, reply_id=reply_id, user_id=current_user.id, values=payload.model_dump(exclude_unset=True))
     await session.commit()
@@ -72,7 +72,7 @@ async def update_reply(
 async def approve_send(
     reply_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
     result = await reply_service.approve_reply(session, reply_id=reply_id, user_id=current_user.id)
     await session.commit()
@@ -84,7 +84,7 @@ async def reject_reply(
     reply_id: int,
     payload: ReplyRejectRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
     result = await reply_service.reject_reply(session, reply_id=reply_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()
