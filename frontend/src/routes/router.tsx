@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom';
 import AppLayout from '../layouts/AppLayout';
 import AiLogsPage from '../pages/AiLogsPage';
 import Dashboard from '../pages/Dashboard';
+import DbBrowser from '../pages/DbBrowser';
 import EmailsPage from '../pages/EmailsPage';
 import Login from '../pages/Login';
 import ManualReviewPage from '../pages/ManualReviewPage';
@@ -29,6 +30,7 @@ const router = createBrowserRouter([
       { path: 'replies', element: <RepliesPage /> },
       { path: 'master-data', element: <MasterDataPage /> },
       { path: 'users', element: <UsersPage /> },
+      { path: 'db-browser', element: <DbBrowser /> },
       { path: 'profile', element: <ProfilePage /> },
       { path: 'notifications', element: <NotificationsPage /> },
       { path: 'ai-logs', element: <AiLogsPage /> },

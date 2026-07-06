@@ -14,6 +14,33 @@ export type PageData<T> = {
 
 export type JsonRecord = Record<string, unknown>;
 
+export type DatabaseColumnInfo = {
+  name: string;
+  type: string;
+  nullable: boolean;
+  default?: string | null;
+  comment: string;
+};
+
+export type DatabaseTableInfo = {
+  table_name: string;
+  table_comment: string;
+  columns: DatabaseColumnInfo[];
+};
+
+export type DatabaseTablesResponse = {
+  tables: DatabaseTableInfo[];
+  total: number;
+};
+
+export type DatabaseRowsResponse = {
+  rows: JsonRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+  columns: string[];
+};
+
 export type RoleCode = 'admin' | 'supervisor' | 'operator';
 
 export type LoginRequest = {

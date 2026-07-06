@@ -5,6 +5,8 @@ import type {
   ApiResponse,
   BoardCard,
   CurrentUser,
+  DatabaseRowsResponse,
+  DatabaseTablesResponse,
   DashboardSummary,
   EmailDetail,
   EmailIngestRequest,
@@ -121,4 +123,7 @@ export const api = {
   notifications: (params: Record<string, unknown>) => getData<PageData<NotificationEvent>>('/notifications', { params }),
   markNotificationRead: (id: number) => postData<NotificationEvent>(`/notifications/${id}/read`),
   systemInfo: () => getData<SystemInfo>('/system/info'),
+  dbTables: () => getData<DatabaseTablesResponse>('/db-browser/tables'),
+  dbRows: (tableName: string, params: { page?: number; page_size?: number }) =>
+    getData<DatabaseRowsResponse>(`/db-browser/tables/${encodeURIComponent(tableName)}/rows`, { params }),
 };

@@ -56,6 +56,7 @@ export default function AppLayout() {
     ...(canSupervise ? [{ key: '/replies', icon: <SafetyCertificateOutlined />, label: '自动回复审核' }] : []),
     ...(canSupervise ? [{ key: '/master-data', icon: <DatabaseOutlined />, label: '基础资料' }] : []),
     ...(canAdmin ? [{ key: '/users', icon: <UserOutlined />, label: '用户管理' }] : []),
+    ...(canAdmin ? [{ key: '/db-browser', icon: <DatabaseOutlined />, label: '数据库浏览' }] : []),
     ...baseMenuItems.slice(4),
     ...(canSupervise ? [{ key: '/ai-logs', icon: <RobotOutlined />, label: 'AI 日志' }] : []),
     ...(canSupervise ? [{ key: '/system', icon: <SettingOutlined />, label: '系统配置' }] : []),

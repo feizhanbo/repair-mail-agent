@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     SMTP_USER: str = "repair@example.com"
     SMTP_PASSWORD: str = ""
 
-    OSS_ENDPOINT: str = "https://oss-cn-hangzhou.aliyuncs.com"
-    OSS_BUCKET: str = "repair-mail-agent"
+    OSS_ENDPOINT: str = "https://oss-cn-shanghai.aliyuncs.com"
+    OSS_BUCKET: str = "acco-repair-mail-file"
     OSS_ACCESS_KEY: str = ""
     OSS_SECRET_KEY: str = ""
 

@@ -65,6 +65,7 @@ def test_expected_business_routes_are_registered() -> None:
     assert "GET /api/v1/users" in routes
     assert "DELETE /api/v1/users/{user_id}" in routes
     assert "PATCH /api/v1/auth/me/profile" in routes
+    assert "GET /api/v1/db-browser/tables" in routes
 
 
 def test_ticket_detail_success_contract(monkeypatch) -> None:
