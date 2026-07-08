@@ -18,8 +18,11 @@ import type {
   ManualTaskReparseResponse,
   NotificationEvent,
   PageData,
+  ReplyTemplate,
   ReplyRecord,
   SnAsset,
+  StatisticsSummary,
+  SystemConfig,
   SystemInfo,
   Ticket,
   TicketDetail,
@@ -33,15 +36,64 @@ export const apiClient = axios.create({
   timeout: 15000,
 });
 
+function friendlyServerMessage(status?: number, code?: string): string {
+  const messages: Record<string, string> = {
+    AUTH_FORBIDDEN: '当前账号没有权限执行此操作',
+    REQUEST_VALIDATION_ERROR: '请检查输入内容是否完整、格式是否正确',
+    INTERNAL_SERVER_ERROR: '系统暂时无法处理请求，请稍后再试',
+    USER_CANNOT_DELETE_SELF: '不能删除当前登录账号',
+    USER_HAS_REFERENCES: '该用户仍有关联业务数据，不能删除',
+    USER_USERNAME_EXISTS: '账号已存在，请更换账号',
+    USER_EMAIL_EXISTS: '邮箱已被使用，请更换邮箱',
+    USER_OLD_PASSWORD_INVALID: '原密码不正确',
+    TICKET_NOT_FOUND: '工单不存在或已被删除',
+    TICKET_VERSION_CONFLICT: '工单已被其他人更新，请刷新后重试',
+    WORKFLOW_TRANSITION_NOT_ALLOWED: '当前状态不支持此操作',
+    WORKFLOW_STATUS_NOT_FOUND: '目标状态不可用，请联系管理员',
+    TICKET_ALREADY_CLOSED: '工单已关闭，不能继续操作',
+    EMAIL_NOT_FOUND: '邮件不存在或已被删除',
+    MANUAL_TASK_NOT_FOUND: '复核任务不存在或已被处理',
+    MANUAL_TASK_NOT_CLAIMABLE: '当前任务不能领取',
+    MANUAL_TASK_NOT_RELEASABLE: '当前任务不能释放',
+    MANUAL_TASK_ASSIGNED_TO_OTHER: '任务已分配给其他处理人',
+    MANUAL_TASK_CLAIMED_BY_OTHER: '任务已被其他处理人领取',
+    MANUAL_TASK_ALREADY_RESOLVED: '任务已完成，请刷新列表',
+    MANUAL_TASK_NEXT_ACTION_INVALID: '请选择有效的后续动作',
+    REPLY_NOT_FOUND: '回复记录不存在或已被删除',
+    REPLY_ALREADY_APPROVED: '回复已审核通过，不能再修改',
+    REPLY_TEMPLATE_NOT_FOUND: '未找到可用回复话术，请联系管理员配置',
+    FOLLOWUP_LIMIT_EXCEEDED: '追问次数已达到上限，请转人工处理',
+    CSV_HEADER_REQUIRED: '导入文件缺少表头，请下载模板后重新填写',
+    CSV_VALIDATION_FAILED: '导入文件内容有误，请检查模板字段和日期格式',
+    XLSX_HEADER_REQUIRED: '导入文件缺少表头，请下载模板后重新填写',
+    XLSX_VALIDATION_FAILED: '导入文件内容有误，请检查模板字段和日期格式',
+    XLSX_INVALID_FILE: '导入文件无法读取，请上传 .xlsx 格式文件',
+  };
+  if (code && messages[code]) return messages[code];
+  if (code?.startsWith('ROLE_NOT_ALLOWED')) return '选择的角色不可用';
+  if (code?.startsWith('ROLE_NOT_INITIALIZED')) return '角色配置未初始化，请联系管理员';
+  if (code?.startsWith('TICKET_FIELD_NOT_ALLOWED')) return '该工单字段暂不支持修改';
+  if (code?.startsWith('TICKET_ITEM_FIELD_NOT_ALLOWED')) return '该工单明细字段暂不支持修改';
+  if (code?.startsWith('REPLY_FIELD_NOT_ALLOWED')) return '该回复字段暂不支持修改';
+  if (status === 400) return '提交内容不符合当前业务规则，请检查后重试';
+  if (status === 401) return '登录状态已失效，请重新登录';
+  if (status === 403) return '当前账号没有权限执行此操作';
+  if (status === 404) return '数据不存在或已被删除';
+  if (status === 409) return '数据状态已变化，请刷新后重试';
+  if (status === 422) return '请检查输入内容是否完整、格式是否正确';
+  if (status && status >= 500) return '系统暂时无法处理请求，请稍后再试';
+  return '操作失败，请稍后重试';
+}
+
 export function apiErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
-    const payload = error.response?.data as { message?: string; detail?: string } | undefined;
-    if (payload?.message) return payload.message;
-    if (payload?.detail) return payload.detail;
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试';
     if (!error.response) return '网络连接失败，请检查后端服务';
+    const payload = error.response.data as { message?: string; detail?: string } | undefined;
+    const code = typeof payload?.message === 'string' ? payload.message : typeof payload?.detail === 'string' ? payload.detail : undefined;
+    return friendlyServerMessage(error.response.status, code);
   }
-  return '操作失败，请稍后重试';
+  return friendlyServerMessage();
 }
 
 apiClient.interceptors.request.use((config) => {
@@ -95,6 +147,7 @@ export const api = {
   ingestEmail: (body: EmailIngestRequest) => postData('/emails/ingest', body),
   reparseEmail: (id: number, body = { mode: 'field_extract' as const }) => postData(`/emails/${id}/reparse`, body),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
+  exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
   ticketDetail: (id: number) => getData<TicketDetail>(`/tickets/${id}`),
   patchTicketFields: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/fields`, body),
   patchTicketItems: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/items`, body),
@@ -117,12 +170,33 @@ export const api = {
   rejectReply: (id: number, reason: string) => postData(`/replies/${id}/reject`, { reason }),
   snAssets: (params: Record<string, unknown>) => getData<PageData<SnAsset>>('/master-data/sn-assets', { params }),
   importSnAssets: (body: Record<string, unknown>) => postData('/master-data/sn-assets/import', body),
+  snAssetsTemplate: () => apiClient.get<Blob, Blob>('/master-data/sn-assets/template', { responseType: 'blob' }),
+  exportSnAssets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/master-data/sn-assets/export', { params, responseType: 'blob' }),
+  importSnAssetsFile: (file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return postData('/master-data/sn-assets/import-file', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   boardCards: (params: Record<string, unknown>) => getData<PageData<BoardCard>>('/master-data/board-cards', { params }),
   importBoardCards: (body: Record<string, unknown>) => postData('/master-data/board-cards/import', body),
+  boardCardsTemplate: () => apiClient.get<Blob, Blob>('/master-data/board-cards/template', { responseType: 'blob' }),
+  exportBoardCards: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/master-data/board-cards/export', { params, responseType: 'blob' }),
+  importBoardCardsFile: (file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return postData('/master-data/board-cards/import-file', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   aiLogs: (params: Record<string, unknown>) => getData<PageData<AiLog>>('/ai-logs', { params }),
   notifications: (params: Record<string, unknown>) => getData<PageData<NotificationEvent>>('/notifications', { params }),
   markNotificationRead: (id: number) => postData<NotificationEvent>(`/notifications/${id}/read`),
   systemInfo: () => getData<SystemInfo>('/system/info'),
+  systemConfig: () => getData<SystemConfig>('/system/config'),
+  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'reply_send_mode' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
+    patchData<SystemConfig>('/system/config', body),
+  replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
+  updateReplyTemplate: (id: number, body: Partial<Pick<ReplyTemplate, 'template_name' | 'subject_template' | 'body_template' | 'enabled'>>) =>
+    patchData<ReplyTemplate>(`/system/reply-templates/${id}`, body),
+  statistics: (params: Record<string, unknown>) => getData<StatisticsSummary>('/statistics/summary', { params }),
   dbTables: () => getData<DatabaseTablesResponse>('/db-browser/tables'),
   dbRows: (tableName: string, params: { page?: number; page_size?: number }) =>
     getData<DatabaseRowsResponse>(`/db-browser/tables/${encodeURIComponent(tableName)}/rows`, { params }),

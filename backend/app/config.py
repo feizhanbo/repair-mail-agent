@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -39,8 +43,11 @@ class Settings(BaseSettings):
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
 
     AUTO_SEND_ENABLED: bool = False
+    REPLY_SEND_MODE: str = "human_review"
+    AUTO_SEND_MIN_CONFIDENCE: float = 0.85
     MAX_FOLLOW_UP: int = 3
     CONFIDENCE_THRESHOLD: float = 0.7
+    RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")
 
     DEFAULT_ADMIN_USERNAME: str = "admin"
     DEFAULT_ADMIN_PASSWORD: str = "change-me-admin"

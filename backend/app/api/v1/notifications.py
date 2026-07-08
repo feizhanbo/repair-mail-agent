@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
@@ -44,17 +45,35 @@ async def list_notifications(
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     delivery_status: str | None = None,
+    event_type: str | None = None,
+    priority: str | None = None,
+    target_type: str | None = None,
+    keyword: str | None = None,
+    created_start: date | None = None,
+    created_end: date | None = None,
 ) -> dict:
     statement = select(NotificationEvent).where(
         or_(
             NotificationEvent.recipient_user_id == current_user.id,
             NotificationEvent.recipient_role_code.in_(current_user.roles),
-            NotificationEvent.recipient_user_id.is_(None),
-            NotificationEvent.recipient_role_code.is_(None),
+            and_(NotificationEvent.recipient_user_id.is_(None), NotificationEvent.recipient_role_code.is_(None)),
         )
     )
     if delivery_status:
         statement = statement.where(NotificationEvent.delivery_status == delivery_status)
+    if event_type:
+        statement = statement.where(NotificationEvent.event_type == event_type)
+    if priority:
+        statement = statement.where(NotificationEvent.priority == priority)
+    if target_type:
+        statement = statement.where(NotificationEvent.target_type == target_type)
+    if created_start:
+        statement = statement.where(NotificationEvent.created_at >= created_start)
+    if created_end:
+        statement = statement.where(NotificationEvent.created_at <= created_end)
+    if keyword:
+        like = f"%{keyword}%"
+        statement = statement.where(or_(NotificationEvent.title.like(like), NotificationEvent.content.like(like)))
     statement = statement.order_by(NotificationEvent.created_at.desc(), NotificationEvent.id.desc())
     rows, total = await paginate_scalars(session, statement, page_no, page_size)
     return page([model_to_dict(row, NOTIFICATION_FIELDS) for row in rows], total=total, page_no=page_no, page_size=page_size)

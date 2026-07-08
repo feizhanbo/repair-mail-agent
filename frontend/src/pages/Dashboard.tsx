@@ -9,6 +9,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { Col, Row, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -26,6 +27,7 @@ const columns: ColumnsType<JobRunLog> = [
 ];
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const summaryQuery = useQuery({
     queryKey: ['dashboard-summary'],
     queryFn: api.dashboard,
@@ -33,12 +35,12 @@ export default function Dashboard() {
   });
   const summary = summaryQuery.data;
   const metrics = [
-    { label: '待解析邮件', value: summary?.pending_parse ?? 0, icon: <MailOutlined />, tone: 'blue' },
-    { label: '人工复核工单', value: summary?.manual_review ?? 0, icon: <TeamOutlined />, tone: 'orange' },
-    { label: '待客户补充', value: summary?.need_customer_info ?? 0, icon: <ClockCircleOutlined />, tone: 'gold' },
-    { label: '可导出工单', value: summary?.ready_for_export ?? 0, icon: <CheckCircleOutlined />, tone: 'green' },
-    { label: '异常工单', value: summary?.error ?? 0, icon: <AlertOutlined />, tone: 'red' },
-    { label: 'AI 低置信度', value: summary?.ai_low_confidence ?? 0, icon: <RobotOutlined />, tone: 'cyan' },
+    { label: '待解析邮件', value: summary?.pending_parse ?? 0, icon: <MailOutlined />, tone: 'blue', path: '/emails' },
+    { label: '人工复核工单', value: summary?.manual_review ?? 0, icon: <TeamOutlined />, tone: 'orange', path: '/manual-review' },
+    { label: '待客户补充', value: summary?.need_customer_info ?? 0, icon: <ClockCircleOutlined />, tone: 'gold', path: '/tickets' },
+    { label: '可导出工单', value: summary?.ready_for_export ?? 0, icon: <CheckCircleOutlined />, tone: 'green', path: '/tickets' },
+    { label: '异常工单', value: summary?.error ?? 0, icon: <AlertOutlined />, tone: 'red', path: '/tickets' },
+    { label: 'AI 低置信度', value: summary?.ai_low_confidence ?? 0, icon: <RobotOutlined />, tone: 'cyan', path: '/ai-logs' },
   ];
 
   return (
@@ -47,7 +49,15 @@ export default function Dashboard() {
       <Row gutter={[12, 12]}>
         {metrics.map((metric) => (
           <Col key={metric.label} xs={24} sm={12} md={8} xl={4}>
-            <div className={`metric-card metric-${metric.tone}`}>
+            <div
+              className={`metric-card metric-${metric.tone}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => navigate(metric.path)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') navigate(metric.path);
+              }}
+            >
               <span className="metric-icon">{metric.icon}</span>
               <Typography.Text type="secondary">{metric.label}</Typography.Text>
               <div className="metric-value">{metric.value}</div>

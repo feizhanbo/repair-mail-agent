@@ -22,9 +22,9 @@ class CurrentUser:
     real_name: str
     email: str | None
     phone: str | None
-    department: str | None
     status: str
     roles: list[str]
+    department: str | None = None
 
 
 async def get_current_user(
@@ -60,7 +60,6 @@ async def get_current_user(
         real_name=user.real_name,
         email=user.email,
         phone=user.phone,
-        department=user.department,
         status=user.status,
         roles=roles,
     )

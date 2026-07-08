@@ -1,21 +1,34 @@
 from __future__ import annotations
 
 import json
+import re
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
-from app.models import AiCallLog, Email, EmailAttachment, ParseResult, RepairTicket
+from app.models import AiCallLog, Email, EmailAttachment, ParseResult, RepairTicket, SnAsset
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.parser import clean_email_body
 
 AI_EXTRACT_SYSTEM_PROMPT = """
 你是邮件报修自动化系统的结构化解析助手。你只能输出 JSON 对象。
 根据输入邮件和附件提取报修意图、工单字段、报修明细、缺失字段、冲突字段、字段置信度和证据片段。
+不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
+""".strip()
+
+AI_EXTRACT_SYSTEM_PROMPT = """
+你是邮件报修系统的结构化解析助手，只能输出 JSON 对象。
+所有邮件都必须由你判断最终类型；规则解析只作为候选上下文，不能直接决定结果。
+请输出 intent_type, extracted_fields, extracted_items, missing_fields, conflict_fields, confidence_score,
+field_confidences, evidence, confidence_reasons, manual_review_direction, original_evidence。
+置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
+如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
 不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
 """.strip()
 
@@ -266,6 +279,100 @@ def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) ->
     }
 
 
+def _valid_email(value: str | None) -> bool:
+    parsed = parseaddr(value or "")[1]
+    return bool(parsed and "@" in parsed and "." in parsed.rsplit("@", 1)[-1])
+
+
+def _valid_phone(value: str | None) -> bool:
+    if not value:
+        return True
+    digits = re.sub(r"\D", "", value)
+    return 6 <= len(digits) <= 20
+
+
+def _intent_requires_business_fields(intent_type: str | None) -> bool:
+    return intent_type in {"new_repair", "customer_reply", "internal_forward", "unknown"}
+
+
+async def _enrich_ai_quality(
+    session: AsyncSession,
+    *,
+    parsed: AiExtractResponse,
+    email: Email,
+) -> AiExtractResponse:
+    fields = dict(parsed.extracted_fields or {})
+    missing = dict(parsed.missing_fields or {})
+    conflicts = dict(parsed.conflict_fields or {})
+    evidence = dict(parsed.evidence or {})
+    confidence_reasons = list(parsed.confidence_reasons or [])
+    manual_directions: list[str] = []
+
+    if not fields.get("contact_email") and _valid_email(email.from_address):
+        fields["contact_email"] = parseaddr(email.from_address)[1] or email.from_address
+        confidence_reasons.append("未抽取到联系邮箱，已使用来信地址作为候选联系邮箱。")
+
+    if not parsed.intent_type or parsed.intent_type == "unknown":
+        conflicts.setdefault("intent_type", "邮件类型不明确，需要人工确认是否为新报修、客户补充或无关邮件。")
+        manual_directions.append("确认邮件类型和是否需要进入报修流程。")
+
+    if _intent_requires_business_fields(parsed.intent_type):
+        if not fields.get("contact_email"):
+            missing.setdefault("contact_email", "缺少可用于回复客户的邮箱地址。")
+        elif not _valid_email(str(fields.get("contact_email"))):
+            conflicts.setdefault("contact_email", "联系邮箱格式异常。")
+        if fields.get("contact_phone") and not _valid_phone(str(fields.get("contact_phone"))):
+            conflicts.setdefault("contact_phone", "联系电话格式异常。")
+        if not fields.get("problem_description"):
+            missing.setdefault("problem_description", "缺少明确的故障描述。")
+
+        items = parsed.extracted_items or []
+        item_sns = [str(item.get("sn") or "").strip().upper() for item in items if isinstance(item, dict) and item.get("sn")]
+        if not item_sns:
+            missing.setdefault("sn", "缺少设备 SN，无法校验资产。")
+        else:
+            invalid_sns: list[str] = []
+            for sn in item_sns:
+                asset = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
+                if asset is None:
+                    invalid_sns.append(f"{sn}: 资产库不存在")
+                elif asset.asset_status != "valid":
+                    invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
+            if invalid_sns:
+                conflicts.setdefault("sn", "；".join(invalid_sns))
+
+    if missing:
+        manual_directions.append("补齐缺失字段：" + "、".join(sorted(missing.keys())))
+    if conflicts:
+        manual_directions.append("核对冲突或异常字段：" + "、".join(sorted(conflicts.keys())))
+
+    evidence["confidence_basis"] = {
+        "sn_valid": "sn" not in conflicts and "sn" not in missing,
+        "email_valid": "contact_email" not in conflicts and "contact_email" not in missing,
+        "phone_valid": "contact_phone" not in conflicts,
+        "intent_clear": parsed.intent_type not in {None, "", "unknown"},
+        "has_missing_fields": bool(missing),
+        "has_conflict_fields": bool(conflicts),
+        "threshold": settings.CONFIDENCE_THRESHOLD,
+    }
+    if confidence_reasons:
+        evidence["confidence_reasons"] = confidence_reasons
+    if parsed.original_evidence:
+        evidence["original_evidence"] = parsed.original_evidence
+    if parsed.manual_review_direction:
+        manual_directions.insert(0, parsed.manual_review_direction)
+    if manual_directions:
+        evidence["manual_review_direction"] = "；".join(manual_directions)
+
+    parsed.extracted_fields = fields
+    parsed.missing_fields = missing
+    parsed.conflict_fields = conflicts
+    parsed.evidence = evidence
+    parsed.confidence_reasons = confidence_reasons
+    parsed.manual_review_direction = evidence.get("manual_review_direction")
+    return parsed
+
+
 async def create_ai_parse_candidate(
     session: AsyncSession,
     *,
@@ -284,7 +391,8 @@ async def create_ai_parse_candidate(
             "role": "user",
             "content": (
                 "请输出 JSON，字段为 intent_type, extracted_fields, extracted_items, missing_fields, "
-                "conflict_fields, confidence_score, field_confidences, evidence。\n"
+                "conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
+                "manual_review_direction, original_evidence。\n"
                 f"{_safe_json(input_payload)}"
             ),
         },
@@ -301,6 +409,7 @@ async def create_ai_parse_candidate(
     )
     if not isinstance(parsed, AiExtractResponse) or ai_log is None:
         return None
+    parsed = await _enrich_ai_quality(session, parsed=parsed, email=email)
 
     parse_result = ParseResult(
         email_id=email.id,
@@ -396,5 +505,7 @@ async def generate_ai_reply_draft(
         "subject": parsed.subject.strip(),
         "body": parsed.body.strip(),
         "missing_fields": parsed.missing_fields or missing_fields,
+        "confidence_score": parsed.confidence_score,
+        "risk_level": parsed.risk_level,
         "ai_call_log": ai_log,
     }

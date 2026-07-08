@@ -34,6 +34,7 @@ export const parseStatusLabels: Record<string, string> = {
 export const reviewStatusLabels: Record<string, string> = {
   pending: '待审核',
   approved: '已通过',
+  auto_approved: '自动通过',
   rejected: '已驳回',
 };
 

@@ -28,12 +28,24 @@ body {
 .brand-block {
   display: grid;
   gap: 8px;
+  place-items: center start;
+  min-height: 64px;
   padding: 18px 18px 12px;
 }
 
 .brand-block h4 {
   margin: 0;
   font-size: 16px;
+}
+
+.brand-mark {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #1677ff;
+  background: #e6f4ff;
+  border-radius: 6px;
 }
 
 .app-header {
@@ -100,6 +112,22 @@ body {
   background: #fff;
   border: 1px solid #d9d9d9;
   border-radius: 8px;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s,
+    transform 0.2s;
+}
+
+.metric-card[role="button"] {
+  cursor: pointer;
+}
+
+.metric-card[role="button"]:hover,
+.metric-card[role="button"]:focus-visible {
+  border-color: #91caff;
+  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.12);
+  outline: none;
+  transform: translateY(-1px);
 }
 
 .metric-card::before {
@@ -239,6 +267,37 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.notification-center-panel .ant-tabs-nav {
+  margin-bottom: 0;
+}
+
+.notification-row {
+  padding-inline: 4px;
+}
+
+.notification-row.is-read {
+  opacity: 0.72;
+}
+
+.notification-icon {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  color: #1677ff;
+  background: #e6f4ff;
+  border-radius: 50%;
+}
+
+.notification-description {
+  display: grid;
+  gap: 4px;
+}
+
+.notification-description .ant-typography {
+  margin-bottom: 0;
 }
 
 .json-block {

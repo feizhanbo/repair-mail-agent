@@ -46,6 +46,7 @@ async def create_manual_task_if_missing(
     if existing is not None:
         return existing
 
+    sticky_assignee = assigned_user_id or ticket.assigned_user_id
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
@@ -54,7 +55,7 @@ async def create_manual_task_if_missing(
         status="pending",
         description=f"工单 {ticket.ticket_no} 需要人工复核。",
         trigger_reason=trigger_reason,
-        assigned_user_id=assigned_user_id,
+        assigned_user_id=sticky_assignee,
     )
     session.add(task)
     await session.flush()
@@ -66,10 +67,23 @@ async def create_manual_task_if_missing(
         title="新的人工复核任务",
         content=trigger_reason or f"工单 {ticket.ticket_no} 需要人工处理。",
         priority=priority,
-        recipient_user_id=assigned_user_id,
-        recipient_role_code=None if assigned_user_id else "operator",
+        recipient_user_id=None,
+        recipient_role_code=None,
         metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
     )
+    if sticky_assignee:
+        await create_notification(
+            session,
+            event_type="manual_review_assigned",
+            target_type="manual_review_task",
+            target_id=task.id,
+            title="人工复核任务已分配给你",
+            content=trigger_reason or f"工单 {ticket.ticket_no} 需要你处理。",
+            priority=priority,
+            recipient_user_id=sticky_assignee,
+            recipient_role_code=None,
+            metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
+        )
     return task
 
 

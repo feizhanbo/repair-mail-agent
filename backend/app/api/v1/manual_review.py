@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
@@ -22,23 +23,26 @@ async def list_tasks(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status: str | None = None,
     task_type: str | None = None,
+    priority: str | None = None,
     assigned_user_id: int | None = None,
     scope: str | None = Query(None, pattern="^(mine|unassigned|claimed|all)$"),
+    created_start: date | None = None,
+    created_end: date | None = None,
 ) -> dict:
-    if not any(role in current_user.roles for role in ("admin", "supervisor")):
-        if scope == "all" or (assigned_user_id is not None and assigned_user_id != current_user.id):
-            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
-        if scope is None and assigned_user_id is None:
-            scope = "mine"
+    if scope is None:
+        scope = "all"
     items, total = await manual_review_service.list_tasks(
         session,
         page=page_no,
         page_size=page_size,
         task_status=status,
         task_type=task_type,
+        priority=priority,
         assigned_user_id=assigned_user_id,
         current_user_id=current_user.id,
         scope=scope,
+        created_start=created_start,
+        created_end=created_end,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
 

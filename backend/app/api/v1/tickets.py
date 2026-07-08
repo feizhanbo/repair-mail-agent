@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
 from app.schemas.business import ParseResultApplyRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
+from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
 from app.services.workflow import transition_ticket
 
@@ -25,10 +28,80 @@ async def list_tickets(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status_code: str | None = None,
     keyword: str | None = None,
+    ticket_no: str | None = None,
+    customer: str | None = None,
+    contact: str | None = None,
+    sn: str | None = None,
+    assigned_user_id: int | None = None,
+    request_date_start: date | None = None,
+    request_date_end: date | None = None,
 ) -> dict:
     del current_user
-    items, total = await ticket_service.list_tickets(session, page=page_no, page_size=page_size, status_code=status_code, keyword=keyword)
+    items, total = await ticket_service.list_tickets(
+        session,
+        page=page_no,
+        page_size=page_size,
+        status_code=status_code,
+        keyword=keyword,
+        ticket_no=ticket_no,
+        customer=customer,
+        contact=contact,
+        sn=sn,
+        assigned_user_id=assigned_user_id,
+        request_date_start=request_date_start,
+        request_date_end=request_date_end,
+    )
     return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.get("/export")
+async def export_tickets(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    status_code: str | None = None,
+    keyword: str | None = None,
+    ticket_no: str | None = None,
+    customer: str | None = None,
+    contact: str | None = None,
+    sn: str | None = None,
+    assigned_user_id: int | None = None,
+    request_date_start: date | None = None,
+    request_date_end: date | None = None,
+) -> Response:
+    del current_user
+    rows = await ticket_service.export_tickets(
+        session,
+        status_code=status_code,
+        keyword=keyword,
+        ticket_no=ticket_no,
+        customer=customer,
+        contact=contact,
+        sn=sn,
+        assigned_user_id=assigned_user_id,
+        request_date_start=request_date_start,
+        request_date_end=request_date_end,
+    )
+    fieldnames = [
+        "ticket_no",
+        "current_status_code",
+        "customer_code",
+        "customer_name",
+        "contact_person",
+        "contact_phone",
+        "contact_email",
+        "request_date",
+        "assigned_user_id",
+        "followup_count",
+        "confidence_score",
+        "created_at",
+        "updated_at",
+    ]
+    content = xlsx_bytes(rows, fieldnames)
+    return Response(
+        content=content,
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="tickets-export.xlsx"'},
+    )
 
 
 @router.get("/{ticket_id}")

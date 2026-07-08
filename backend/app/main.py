@@ -9,10 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
+from app.services.runtime_config import read_runtime_config
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    read_runtime_config()
     yield
 
 

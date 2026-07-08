@@ -1,6 +1,6 @@
 import { PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, message } from 'antd';
+import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
@@ -9,19 +9,24 @@ import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import type { EmailIngestRequest, EmailItem, ParseResult } from '../types/api';
+import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 
 type EmailFilters = {
-  keyword?: string;
+  subject?: string;
+  from_address?: string;
+  message_id?: string;
   parse_status?: string;
   intent_type?: string;
+  date_range?: unknown;
 };
 
 export default function EmailsPage() {
-  const [filters, setFilters] = useState<EmailFilters>({});
+  const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [ingestOpen, setIngestOpen] = useState(false);
+  const [filterForm] = Form.useForm<EmailFilters>();
   const queryClient = useQueryClient();
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const emailsQuery = useQuery({
@@ -89,9 +94,24 @@ export default function EmailsPage() {
     <div className="page-stack">
       <PageTitle title="邮件中心" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setIngestOpen(true)} />} />
       <SectionPanel>
-        <Form<EmailFilters> layout="inline" className="filter-bar" onFinish={(values) => { setPage(1); setFilters(values); }}>
-          <Form.Item name="keyword">
-            <Input allowClear prefix={<SearchOutlined />} placeholder="主题、发件人、正文" />
+        <Form<EmailFilters>
+          form={filterForm}
+          layout="inline"
+          className="filter-bar"
+          onFinish={(values) => {
+            setPage(1);
+            setSelectedId(null);
+            setFilters(filtersWithDateRange(values, 'date_range', 'received_start', 'received_end'));
+          }}
+        >
+          <Form.Item name="subject">
+            <Input allowClear prefix={<SearchOutlined />} placeholder="主题" />
+          </Form.Item>
+          <Form.Item name="from_address">
+            <Input allowClear placeholder="发件人" />
+          </Form.Item>
+          <Form.Item name="message_id">
+            <Input allowClear placeholder="Message-ID" />
           </Form.Item>
           <Form.Item name="intent_type">
             <Select
@@ -119,7 +139,22 @@ export default function EmailsPage() {
               ]}
             />
           </Form.Item>
-          <Button htmlType="submit" type="primary">筛选</Button>
+          <Form.Item name="date_range">
+            <DatePicker.RangePicker allowClear />
+          </Form.Item>
+          <Space>
+            <Button htmlType="submit" type="primary">筛选</Button>
+            <Button
+              onClick={() => {
+                filterForm.resetFields();
+                setPage(1);
+                setSelectedId(null);
+                setFilters({});
+              }}
+            >
+              重置
+            </Button>
+          </Space>
         </Form>
         <Table<EmailItem>
           rowKey="id"

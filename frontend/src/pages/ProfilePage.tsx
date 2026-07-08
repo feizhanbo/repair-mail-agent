@@ -11,7 +11,6 @@ type ProfileForm = {
   real_name?: string;
   email?: string;
   phone?: string;
-  department?: string;
 };
 
 type PasswordForm = {
@@ -45,7 +44,6 @@ export default function ProfilePage() {
         real_name: user.real_name,
         email: user.email ?? undefined,
         phone: user.phone ?? undefined,
-        department: user.department ?? undefined,
       });
     }
   }, [profileForm, user]);
@@ -59,7 +57,6 @@ export default function ProfilePage() {
           <Descriptions.Item label="姓名">{user?.real_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="邮箱">{user?.email || '-'}</Descriptions.Item>
           <Descriptions.Item label="电话">{user?.phone || '-'}</Descriptions.Item>
-          <Descriptions.Item label="部门">{user?.department || '-'}</Descriptions.Item>
           <Descriptions.Item label="状态">{user?.status || '-'}</Descriptions.Item>
           <Descriptions.Item label="角色" span={2}>
             <Space wrap>{roles.map((role) => <Tag key={role} color="blue">{roleLabels[role] ?? role}</Tag>)}</Space>
@@ -77,7 +74,6 @@ export default function ProfilePage() {
             <Form.Item label="姓名" name="real_name"><Input /></Form.Item>
             <Form.Item label="邮箱" name="email"><Input /></Form.Item>
             <Form.Item label="电话" name="phone"><Input /></Form.Item>
-            <Form.Item label="部门" name="department"><Input /></Form.Item>
             <Button type="primary" htmlType="submit" loading={profileMutation.isPending}>保存资料</Button>
           </Form>
         </SectionPanel>

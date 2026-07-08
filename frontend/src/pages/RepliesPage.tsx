@@ -31,7 +31,9 @@ export default function RepliesPage() {
   const [selected, setSelected] = useState<ReplyRecord | null>(null);
   const [draftOpen, setDraftOpen] = useState(false);
   const queryClient = useQueryClient();
-  const canReviewReplies = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor']);
+  const currentRoles = useAuthStore((state) => state.user?.roles);
+  const canDraftReplies = hasAnyRole(currentRoles, ['admin', 'supervisor', 'operator']);
+  const canReviewReplies = hasAnyRole(currentRoles, ['admin', 'supervisor']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
@@ -88,7 +90,7 @@ export default function RepliesPage() {
 
   return (
     <div className="page-stack">
-      <PageTitle title="自动回复审核" extra={canReviewReplies ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setDraftOpen(true)} /> : null} />
+      <PageTitle title="回复管理" extra={canDraftReplies ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setDraftOpen(true)} /> : null} />
       <SectionPanel>
         <Form<ReplyFilters> layout="inline" className="filter-bar" onFinish={(values) => { setPage(1); setFilters(values); }}>
           <Form.Item name="ticket_id">

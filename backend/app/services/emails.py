@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -13,7 +14,8 @@ from app.services.ai import create_ai_parse_candidate
 from app.services.audit import log_operation
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, utcnow
 from app.services.parser import classify_email, clean_email_body, extract_fields
-from app.services.tickets import EMAIL_FIELDS, apply_parse_result, serialize_email, serialize_parse_result
+from app.services.replies import create_reply_draft
+from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result
 
 
 async def list_emails(
@@ -24,12 +26,27 @@ async def list_emails(
     parse_status: str | None = None,
     intent_type: str | None = None,
     keyword: str | None = None,
+    subject: str | None = None,
+    from_address: str | None = None,
+    message_id: str | None = None,
+    received_start: date | None = None,
+    received_end: date | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     statement = select(Email)
     if parse_status:
         statement = statement.where(Email.parse_status == parse_status)
     if intent_type:
         statement = statement.where(Email.intent_type == intent_type)
+    if subject:
+        statement = statement.where(Email.subject.like(f"%{subject}%"))
+    if from_address:
+        statement = statement.where(Email.from_address.like(f"%{from_address}%"))
+    if message_id:
+        statement = statement.where(Email.message_id.like(f"%{message_id}%"))
+    if received_start:
+        statement = statement.where(Email.received_at >= received_start)
+    if received_end:
+        statement = statement.where(Email.received_at <= received_end)
     if keyword:
         like = f"%{keyword}%"
         statement = statement.where(or_(Email.subject.like(like), Email.from_address.like(like), Email.clean_body.like(like)))
@@ -197,9 +214,71 @@ async def ingest_email(
         after_data={"intent_type": intent_type, "classification_confidence": confidence},
     )
     result: dict[str, Any] = {"duplicate": False, "email": serialize_email(email), "classification": {"confidence": confidence, "reason": reason}}
-    if auto_parse and intent_type != "irrelevant":
-        result["parse"] = await reparse_email(session, email_id=email.id, user_id=user_id, reason="邮件入库后规则解析。")
+    if auto_parse:
+        result["parse"] = await reparse_email(session, email_id=email.id, user_id=user_id, reason="邮件入库后规则预解析并提交 AI 判断。")
     return result
+
+
+def _parse_requires_manual(parse_result: ParseResult | None) -> bool:
+    if parse_result is None:
+        return True
+    confidence = float(parse_result.confidence_score or 0)
+    return (
+        parse_result.intent_type in {None, "", "unknown"}
+        or confidence < settings.CONFIDENCE_THRESHOLD
+        or bool(parse_result.missing_fields)
+        or bool(parse_result.conflict_fields)
+    )
+
+
+def _manual_reason(parse_result: ParseResult | None) -> str:
+    if parse_result is None:
+        return "AI 未返回有效解析结果，需要人工根据原始邮件确认。"
+    evidence = parse_result.evidence or {}
+    direction = evidence.get("manual_review_direction")
+    if isinstance(direction, str) and direction.strip():
+        return direction.strip()
+    reasons: list[str] = []
+    if parse_result.intent_type in {None, "", "unknown"}:
+        reasons.append("邮件类型不明确")
+    if parse_result.confidence_score is None or float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:
+        reasons.append(f"AI 置信度低于阈值 {settings.CONFIDENCE_THRESHOLD}")
+    if parse_result.missing_fields:
+        reasons.append("存在缺失字段：" + "、".join(sorted(parse_result.missing_fields.keys())))
+    if parse_result.conflict_fields:
+        reasons.append("存在冲突或异常字段：" + "、".join(sorted(parse_result.conflict_fields.keys())))
+    return "；".join(reasons) or "需要人工复核 AI 解析结果。"
+
+
+def _reply_type_for_parse(parse_result: ParseResult | None) -> str:
+    if parse_result and parse_result.conflict_fields and "sn" in parse_result.conflict_fields:
+        return "sn_invalid"
+    if parse_result and parse_result.missing_fields:
+        return "missing_fields"
+    return "receipt"
+
+
+async def _try_create_reply_draft(
+    session: AsyncSession,
+    *,
+    ticket_id: int | None,
+    user_id: int | None,
+    email_id: int,
+    parse_result: ParseResult | None,
+) -> dict[str, Any] | None:
+    if ticket_id is None:
+        return None
+    try:
+        return await create_reply_draft(
+            session,
+            ticket_id=ticket_id,
+            user_id=user_id,
+            reply_type=_reply_type_for_parse(parse_result),
+            related_email_id=email_id,
+            missing_fields=parse_result.missing_fields if parse_result else None,
+        )
+    except HTTPException:
+        return None
 
 
 async def reparse_email(
@@ -244,7 +323,7 @@ async def reparse_email(
     )
     session.add(parse_result)
     await session.flush()
-    email.parse_status = "parsed" if intent_type != "irrelevant" else "skipped"
+    email.parse_status = "parsing"
     await log_operation(
         session,
         user_id=user_id,
@@ -311,6 +390,159 @@ async def reparse_email(
         "applied": applied,
         "ai_parse_result": serialize_parse_result(ai_result["parse_result"]) if ai_result else None,
         "ai_applied": ai_applied,
+    }
+
+
+async def reparse_email(
+    session: AsyncSession,
+    *,
+    email_id: int,
+    user_id: int | None = None,
+    mode: str = "field_extract",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    del mode
+    email = await session.get(Email, email_id)
+    if email is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+
+    body = clean_email_body(email)
+    intent_type, classification_confidence, classification_reason = classify_email(email, body)
+    extracted = extract_fields(email)
+    email.clean_body = extracted["body"]
+    email.latest_reply_segment = extracted["body"]
+    email.intent_type = intent_type
+    email.parse_status = "parsing"
+
+    rule_parse = ParseResult(
+        email_id=email.id,
+        ticket_id=None,
+        parser_type="rule",
+        parser_version="basic-v1",
+        intent_type=intent_type,
+        extracted_fields=extracted["fields"],
+        extracted_items={"items": extracted["items"]},
+        missing_fields=extracted["missing_fields"],
+        conflict_fields=extracted["conflict_fields"],
+        confidence_score=min(float(extracted["confidence_score"]), classification_confidence),
+        field_confidences=extracted["field_confidences"],
+        evidence={
+            **extracted["evidence"],
+            "classification": {
+                "intent_type": intent_type,
+                "confidence": classification_confidence,
+                "reason": classification_reason,
+            },
+            "mode": "rule_precheck",
+            "candidate_only": True,
+        },
+        apply_status="candidate_only",
+    )
+    session.add(rule_parse)
+    await session.flush()
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="email_reparsed",
+        target_type="email",
+        target_id=email.id,
+        description=reason,
+        after_data={"parse_result_id": rule_parse.id, "mode": "llm_required"},
+    )
+
+    attachments = (
+        await session.execute(select(EmailAttachment).where(EmailAttachment.email_id == email.id).order_by(EmailAttachment.created_at.desc()))
+    ).scalars().all()
+    thread = await session.get(EmailThread, email.thread_id) if email.thread_id else None
+    ai_result = await create_ai_parse_candidate(
+        session,
+        email=email,
+        attachments=list(attachments),
+        mode="classification_and_extract",
+        ticket_id=thread.ticket_id if thread else None,
+        rule_context={
+            "parse_result_id": rule_parse.id,
+            "intent_type": rule_parse.intent_type,
+            "confidence_score": float(rule_parse.confidence_score or 0),
+            "missing_fields": rule_parse.missing_fields,
+            "conflict_fields": rule_parse.conflict_fields,
+            "evidence": rule_parse.evidence,
+        },
+    )
+
+    ai_parse = ai_result["parse_result"] if ai_result else None
+    ai_applied: dict[str, Any] | None = None
+    manual_ticket: dict[str, Any] | None = None
+    draft_result: dict[str, Any] | None = None
+
+    if isinstance(ai_parse, ParseResult):
+        email.intent_type = ai_parse.intent_type or email.intent_type
+        if ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse):
+            ai_parse.apply_status = "auto_skipped"
+            email.parse_status = "skipped"
+        elif _parse_requires_manual(ai_parse):
+            ticket = await ensure_manual_review_ticket_from_parse_result(
+                session,
+                email=email,
+                parse_result=ai_parse,
+                reason=_manual_reason(ai_parse),
+                task_type="ai_review_required",
+            )
+            email.parse_status = "needs_manual"
+            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": _manual_reason(ai_parse)}
+            draft_result = await _try_create_reply_draft(
+                session,
+                ticket_id=ticket.id,
+                user_id=user_id,
+                email_id=email.id,
+                parse_result=ai_parse,
+            )
+        else:
+            ai_applied = await apply_parse_result(
+                session,
+                parse_result_id=ai_parse.id,
+                user_id=user_id,
+                reason=reason or "AI 结构化解析结果自动采纳。",
+                apply_status="auto_applied",
+            )
+            email.parse_status = "parsed"
+            ticket_id = (
+                ai_applied.get("ticket", {}).get("id")
+                if isinstance(ai_applied, dict) and isinstance(ai_applied.get("ticket"), dict)
+                else ai_parse.ticket_id
+            )
+            draft_result = await _try_create_reply_draft(
+                session,
+                ticket_id=ticket_id,
+                user_id=user_id,
+                email_id=email.id,
+                parse_result=ai_parse,
+            )
+    else:
+        ticket = await ensure_manual_review_ticket_from_parse_result(
+            session,
+            email=email,
+            parse_result=rule_parse,
+            reason="AI 未配置或未返回有效结果，规则解析仅作为候选，需要人工复核。",
+            task_type="ai_unavailable",
+        )
+        email.parse_status = "needs_manual"
+        manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": "AI 未配置或未返回有效结果。"}
+        draft_result = await _try_create_reply_draft(
+            session,
+            ticket_id=ticket.id,
+            user_id=user_id,
+            email_id=email.id,
+            parse_result=rule_parse,
+        )
+
+    return {
+        "parse_result": serialize_parse_result(rule_parse),
+        "applied": None,
+        "ai_parse_result": serialize_parse_result(ai_parse) if isinstance(ai_parse, ParseResult) else None,
+        "ai_applied": ai_applied,
+        "manual_ticket": manual_ticket,
+        "draft_result": draft_result,
     }
 
 

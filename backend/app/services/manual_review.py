@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -52,17 +53,26 @@ async def list_tasks(
     page_size: int = 20,
     task_status: str | None = None,
     task_type: str | None = None,
+    priority: str | None = None,
     assigned_user_id: int | None = None,
     current_user_id: int | None = None,
     scope: str | None = None,
+    created_start: date | None = None,
+    created_end: date | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     statement = select(ManualReviewTask)
     if task_status:
         statement = statement.where(ManualReviewTask.status == task_status)
     if task_type:
         statement = statement.where(ManualReviewTask.task_type == task_type)
+    if priority:
+        statement = statement.where(ManualReviewTask.priority == priority)
     if assigned_user_id:
         statement = statement.where(ManualReviewTask.assigned_user_id == assigned_user_id)
+    if created_start:
+        statement = statement.where(ManualReviewTask.created_at >= created_start)
+    if created_end:
+        statement = statement.where(ManualReviewTask.created_at <= created_end)
     if scope == "mine" and current_user_id:
         statement = statement.where(
             (ManualReviewTask.assigned_user_id == current_user_id)
@@ -91,6 +101,10 @@ async def claim_task(session: AsyncSession, *, task_id: int, user_id: int) -> di
     task.status = "claimed"
     task.claimed_by_user_id = user_id
     task.claimed_at = utcnow()
+    task.assigned_user_id = task.assigned_user_id or user_id
+    ticket = await get_ticket(session, task.ticket_id)
+    if ticket.assigned_user_id is None:
+        ticket.assigned_user_id = user_id
     await log_operation(
         session,
         user_id=user_id,
@@ -118,6 +132,8 @@ async def assign_task(
         "status": task.status,
     }
     task.assigned_user_id = assigned_user_id
+    ticket = await get_ticket(session, task.ticket_id)
+    ticket.assigned_user_id = assigned_user_id
     if assigned_user_id is None:
         task.status = "pending"
         task.claimed_by_user_id = None

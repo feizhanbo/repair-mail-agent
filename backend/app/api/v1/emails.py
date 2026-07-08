@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -23,6 +24,11 @@ async def list_emails(
     parse_status: str | None = None,
     intent_type: str | None = None,
     keyword: str | None = None,
+    subject: str | None = None,
+    from_address: str | None = None,
+    message_id: str | None = None,
+    received_start: date | None = None,
+    received_end: date | None = None,
 ) -> dict:
     del current_user
     items, total = await email_service.list_emails(
@@ -32,6 +38,11 @@ async def list_emails(
         parse_status=parse_status,
         intent_type=intent_type,
         keyword=keyword,
+        subject=subject,
+        from_address=from_address,
+        message_id=message_id,
+        received_start=received_start,
+        received_end=received_end,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
 

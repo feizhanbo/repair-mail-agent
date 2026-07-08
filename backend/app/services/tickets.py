@@ -5,7 +5,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -27,7 +27,7 @@ from app.models import (
 )
 from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
-from app.services.workflow import transition_ticket
+from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 TICKET_FIELDS = (
     "id",
@@ -193,10 +193,67 @@ async def list_tickets(
     page_size: int = 20,
     status_code: str | None = None,
     keyword: str | None = None,
+    ticket_no: str | None = None,
+    customer: str | None = None,
+    contact: str | None = None,
+    sn: str | None = None,
+    assigned_user_id: int | None = None,
+    request_date_start: date | None = None,
+    request_date_end: date | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    statement = _ticket_filter_statement(
+        status_code=status_code,
+        keyword=keyword,
+        ticket_no=ticket_no,
+        customer=customer,
+        contact=contact,
+        sn=sn,
+        assigned_user_id=assigned_user_id,
+        request_date_start=request_date_start,
+        request_date_end=request_date_end,
+    )
+    statement = statement.order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
+    tickets, total = await paginate_scalars(session, statement, page, page_size)
+    return [serialize_ticket(ticket) for ticket in tickets], total
+
+
+def _ticket_filter_statement(
+    *,
+    status_code: str | None = None,
+    keyword: str | None = None,
+    ticket_no: str | None = None,
+    customer: str | None = None,
+    contact: str | None = None,
+    sn: str | None = None,
+    assigned_user_id: int | None = None,
+    request_date_start: date | None = None,
+    request_date_end: date | None = None,
+):
     statement = select(RepairTicket)
     if status_code:
         statement = statement.where(RepairTicket.current_status_code == status_code)
+    if ticket_no:
+        statement = statement.where(RepairTicket.ticket_no.like(f"%{ticket_no}%"))
+    if customer:
+        like = f"%{customer}%"
+        statement = statement.where(or_(RepairTicket.customer_code.like(like), RepairTicket.customer_name.like(like)))
+    if contact:
+        like = f"%{contact}%"
+        statement = statement.where(
+            or_(RepairTicket.contact_person.like(like), RepairTicket.contact_phone.like(like), RepairTicket.contact_email.like(like))
+        )
+    if assigned_user_id:
+        statement = statement.where(RepairTicket.assigned_user_id == assigned_user_id)
+    if request_date_start:
+        statement = statement.where(RepairTicket.request_date >= request_date_start)
+    if request_date_end:
+        statement = statement.where(RepairTicket.request_date <= request_date_end)
+    if sn:
+        statement = statement.where(
+            RepairTicket.id.in_(
+                select(RepairTicketItem.ticket_id).where(RepairTicketItem.sn.like(f"%{sn.strip().upper()}%"))
+            )
+        )
     if keyword:
         like = f"%{keyword}%"
         statement = statement.where(
@@ -204,13 +261,40 @@ async def list_tickets(
                 RepairTicket.ticket_no.like(like),
                 RepairTicket.customer_code.like(like),
                 RepairTicket.customer_name.like(like),
+                RepairTicket.contact_person.like(like),
                 RepairTicket.contact_email.like(like),
                 RepairTicket.problem_description.like(like),
             )
         )
-    statement = statement.order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
-    tickets, total = await paginate_scalars(session, statement, page, page_size)
-    return [serialize_ticket(ticket) for ticket in tickets], total
+    return statement
+
+
+async def export_tickets(
+    session: AsyncSession,
+    *,
+    status_code: str | None = None,
+    keyword: str | None = None,
+    ticket_no: str | None = None,
+    customer: str | None = None,
+    contact: str | None = None,
+    sn: str | None = None,
+    assigned_user_id: int | None = None,
+    request_date_start: date | None = None,
+    request_date_end: date | None = None,
+) -> list[dict[str, Any]]:
+    statement = _ticket_filter_statement(
+        status_code=status_code,
+        keyword=keyword,
+        ticket_no=ticket_no,
+        customer=customer,
+        contact=contact,
+        sn=sn,
+        assigned_user_id=assigned_user_id,
+        request_date_start=request_date_start,
+        request_date_end=request_date_end,
+    ).order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
+    rows = (await session.execute(statement)).scalars().all()
+    return [serialize_ticket(ticket) for ticket in rows]
 
 
 async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, Any]:
@@ -540,6 +624,120 @@ async def create_ticket_from_parse_result(session: AsyncSession, email: Email, p
     return ticket
 
 
+async def _existing_ticket_for_email(session: AsyncSession, email: Email, parse_result: ParseResult | None = None) -> RepairTicket | None:
+    if parse_result and parse_result.ticket_id:
+        ticket = await session.get(RepairTicket, parse_result.ticket_id)
+        if ticket:
+            return ticket
+    if email.thread_id:
+        thread = await session.get(EmailThread, email.thread_id)
+        if thread and thread.ticket_id:
+            ticket = await session.get(RepairTicket, thread.ticket_id)
+            if ticket:
+                return ticket
+    link = await session.scalar(
+        select(EmailTicketLink).where(EmailTicketLink.email_id == email.id).order_by(EmailTicketLink.created_at.desc(), EmailTicketLink.id.desc())
+    )
+    if link:
+        return await session.get(RepairTicket, link.ticket_id)
+    return None
+
+
+async def _link_email_to_ticket(
+    session: AsyncSession,
+    *,
+    email: Email,
+    ticket: RepairTicket,
+    link_type: str,
+    link_reason: str,
+) -> None:
+    existing = await session.scalar(select(EmailTicketLink).where(EmailTicketLink.email_id == email.id, EmailTicketLink.ticket_id == ticket.id))
+    if existing is None:
+        session.add(EmailTicketLink(email_id=email.id, ticket_id=ticket.id, link_type=link_type, link_reason=link_reason))
+    if email.thread_id:
+        thread = await session.get(EmailThread, email.thread_id)
+        if thread:
+            thread.ticket_id = ticket.id
+
+
+async def ensure_manual_review_ticket_from_parse_result(
+    session: AsyncSession,
+    *,
+    email: Email,
+    parse_result: ParseResult,
+    reason: str,
+    task_type: str = "manual_review_required",
+) -> RepairTicket:
+    ticket = await _existing_ticket_for_email(session, email, parse_result)
+    fields = parse_result.extracted_fields or {}
+    if ticket is None:
+        ticket = RepairTicket(
+            ticket_no=f"RMA{utcnow():%Y%m%d%H%M%S%f}",
+            current_status_code="manual_review",
+            source_email_id=email.id,
+            thread_id=email.thread_id,
+            customer_code=fields.get("customer_code"),
+            customer_name=fields.get("customer_name"),
+            contact_person=fields.get("contact_person"),
+            contact_phone=fields.get("contact_phone"),
+            contact_email=fields.get("contact_email") or email.from_address,
+            problem_description=fields.get("problem_description"),
+            missing_fields=parse_result.missing_fields,
+            conflict_fields=parse_result.conflict_fields,
+            confidence_score=parse_result.confidence_score,
+            max_followup_count=settings.MAX_FOLLOW_UP,
+        )
+        session.add(ticket)
+        await session.flush()
+        session.add(
+            TicketStatusLog(
+                ticket_id=ticket.id,
+                from_status_code=None,
+                to_status_code="manual_review",
+                trigger_event="manual_review_required",
+                reason=reason,
+                operator_type="system",
+                metadata_json={"email_id": email.id, "parse_result_id": parse_result.id},
+            )
+        )
+    else:
+        ticket.missing_fields = parse_result.missing_fields
+        ticket.conflict_fields = parse_result.conflict_fields
+        ticket.confidence_score = parse_result.confidence_score
+        if ticket.current_status_code not in {"manual_review", "closed"}:
+            await transition_ticket(
+                session,
+                ticket=ticket,
+                to_status_code="manual_review",
+                trigger_event="manual_review_required",
+                operator_type="system",
+                reason=reason,
+                metadata={"email_id": email.id, "parse_result_id": parse_result.id},
+            )
+    parse_result.ticket_id = ticket.id
+    parse_result.apply_status = "needs_manual_review"
+    parse_result.error_message = reason
+    await _link_email_to_ticket(session, email=email, ticket=ticket, link_type="related", link_reason=reason)
+    await create_manual_task_if_missing(
+        session,
+        ticket=ticket,
+        task_type=task_type,
+        trigger_reason=reason,
+        priority="high" if parse_result.conflict_fields else "normal",
+        email_id=email.id,
+        assigned_user_id=ticket.assigned_user_id,
+    )
+    await log_operation(
+        session,
+        operation_type="manual_review_ticket_created",
+        target_type="repair_ticket",
+        target_id=ticket.id,
+        description=reason,
+        after_data={"email_id": email.id, "parse_result_id": parse_result.id, "task_type": task_type},
+    )
+    return ticket
+
+
 async def _create_items_from_parse_result(
     session: AsyncSession,
     ticket: RepairTicket,
@@ -635,9 +833,18 @@ async def apply_parse_result(
     email = await session.get(Email, parse_result.email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
-    ticket = await session.get(RepairTicket, parse_result.ticket_id) if parse_result.ticket_id else None
+    ticket = await _existing_ticket_for_email(session, email, parse_result)
     if ticket is None:
         ticket = await create_ticket_from_parse_result(session, email, parse_result)
+    else:
+        parse_result.ticket_id = ticket.id
+        await _link_email_to_ticket(
+            session,
+            email=email,
+            ticket=ticket,
+            link_type="related" if ticket.source_email_id != email.id else "source",
+            link_reason=reason or "解析结果关联到同回复链工单",
+        )
 
     fields = parse_result.extracted_fields or {}
     changed: dict[str, Any] = {}
@@ -687,6 +894,17 @@ async def apply_parse_result(
         after_data={"ticket_id": ticket.id, "changed_fields": changed, "apply_status": result_status, "action": action},
     )
 
+    if ticket.current_status_code == "auto_replied" and parse_result.intent_type == "customer_reply":
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="parsed",
+            trigger_event="customer_reply_received",
+            user_id=user_id,
+            operator_type="user" if user_id else "system",
+            reason="客户已回复补充信息，重新进入解析校验流程。",
+            metadata={"parse_result_id": parse_result.id, "email_id": email.id},
+        )
     if ticket.current_status_code == "new_email":
         if parse_result.confidence_score is not None and float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:
             await transition_ticket(

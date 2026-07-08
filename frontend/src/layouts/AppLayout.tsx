@@ -1,10 +1,13 @@
 import {
   BellOutlined,
+  BarChartOutlined,
   DashboardOutlined,
   DatabaseOutlined,
   LogoutOutlined,
   MailOutlined,
   MessageOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   ProfileOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
@@ -13,7 +16,8 @@ import {
   UserOutlined,
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Badge, Button, Layout, Menu, Space, Tag, Typography } from 'antd';
+import { Badge, Button, Layout, Menu, Space, Typography } from 'antd';
+import { useState } from 'react';
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuthStore } from '../stores/authStore';
@@ -38,6 +42,7 @@ export default function AppLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { token, user, clearSession } = useAuthStore();
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('repair_mail_sidebar_collapsed') === 'true');
   const notificationsQuery = useQuery({
     queryKey: ['notifications', 'pending'],
     queryFn: () => api.notifications({ page: 1, page_size: 20, delivery_status: 'pending' }),
@@ -51,9 +56,15 @@ export default function AppLayout() {
 
   const canAdmin = hasRole(user?.roles, 'admin');
   const canSupervise = hasAnyRole(user?.roles, ['admin', 'supervisor']);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    localStorage.setItem('repair_mail_sidebar_collapsed', String(next));
+  };
   const menuItems = [
     ...baseMenuItems.slice(0, 4),
-    ...(canSupervise ? [{ key: '/replies', icon: <SafetyCertificateOutlined />, label: '自动回复审核' }] : []),
+    { key: '/replies', icon: <SafetyCertificateOutlined />, label: '回复管理' },
+    ...(canSupervise ? [{ key: '/statistics', icon: <BarChartOutlined />, label: '统计分析' }] : []),
     ...(canSupervise ? [{ key: '/master-data', icon: <DatabaseOutlined />, label: '基础资料' }] : []),
     ...(canAdmin ? [{ key: '/users', icon: <UserOutlined />, label: '用户管理' }] : []),
     ...(canAdmin ? [{ key: '/db-browser', icon: <DatabaseOutlined />, label: '数据库浏览' }] : []),
@@ -64,10 +75,13 @@ export default function AppLayout() {
 
   return (
     <Layout className="app-shell">
-      <Sider width={232} theme="light" className="app-sider">
+      <Sider width={232} theme="light" className="app-sider" collapsible collapsed={collapsed} trigger={null}>
         <div className="brand-block">
-          <Typography.Title level={4}>邮件报修自动化系统</Typography.Title>
-          <Tag color="blue">一期试运行</Tag>
+          {collapsed ? (
+            <Typography.Text strong className="brand-mark">修</Typography.Text>
+          ) : (
+            <Typography.Title level={4}>邮件报修系统</Typography.Title>
+          )}
         </div>
         <Menu
           mode="inline"
@@ -78,11 +92,15 @@ export default function AppLayout() {
       </Sider>
       <Layout>
         <Header className="app-header">
-          <Typography.Text strong>repair-mail-agent</Typography.Text>
+          <Button
+            aria-label="折叠侧边栏"
+            icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            type="text"
+            onClick={toggleCollapsed}
+          />
           <Space size="middle">
-            <Tag color="green">dev</Tag>
             <Badge count={notificationsQuery.data?.total ?? 0} size="small">
-              <Button aria-label="通知" icon={<BellOutlined />} shape="circle" onClick={() => navigate('/notifications')} />
+              <Button aria-label="通知中心" icon={<BellOutlined />} shape="circle" onClick={() => navigate('/notification-center')} />
             </Badge>
             <Button type="text" onClick={() => navigate('/profile')}>{user?.real_name ?? user?.username}</Button>
             <Button aria-label="退出" icon={<LogoutOutlined />} shape="circle" onClick={clearSession} />

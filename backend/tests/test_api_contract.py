@@ -1,25 +1,51 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import date
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import CurrentUser, get_current_user
+from app.config import settings
 from app.core.database import get_session
 from app.main import app
 from app.services import manual_review as manual_review_service
+from app.services import master_data as master_data_service
 from app.services import replies as reply_service
 from app.services import tickets as ticket_service
 from app.services import users as user_service
 
 
+class FakeScalarResult:
+    def all(self) -> list:
+        return []
+
+
+class FakeExecuteResult:
+    def all(self) -> list:
+        return []
+
+    def scalars(self) -> FakeScalarResult:
+        return FakeScalarResult()
+
+
 class FakeSession:
     def __init__(self) -> None:
         self.committed = False
+        self.executed = []
+        self.scalar_statements = []
 
     async def commit(self) -> None:
         self.committed = True
+
+    async def execute(self, statement) -> FakeExecuteResult:
+        self.executed.append(statement)
+        return FakeExecuteResult()
+
+    async def scalar(self, statement) -> int:
+        self.scalar_statements.append(statement)
+        return 0
 
 
 def make_current_user(*, roles: list[str] | None = None, user_id: int = 7) -> CurrentUser:
@@ -62,10 +88,22 @@ def test_expected_business_routes_are_registered() -> None:
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes
     assert "GET /api/v1/ai-logs" in routes
     assert "GET /api/v1/system/info" in routes
+    assert "GET /api/v1/system/config" in routes
+    assert "PATCH /api/v1/system/config" in routes
+    assert "GET /api/v1/system/reply-templates" in routes
+    assert "PATCH /api/v1/system/reply-templates/{template_id}" in routes
+    assert "GET /api/v1/statistics/summary" in routes
     assert "GET /api/v1/users" in routes
     assert "DELETE /api/v1/users/{user_id}" in routes
     assert "PATCH /api/v1/auth/me/profile" in routes
     assert "GET /api/v1/db-browser/tables" in routes
+    assert "GET /api/v1/master-data/sn-assets/template" in routes
+    assert "GET /api/v1/master-data/sn-assets/export" in routes
+    assert "POST /api/v1/master-data/sn-assets/import-file" in routes
+    assert "GET /api/v1/master-data/board-cards/template" in routes
+    assert "GET /api/v1/master-data/board-cards/export" in routes
+    assert "POST /api/v1/master-data/board-cards/import-file" in routes
+    assert "GET /api/v1/tickets/export" in routes
 
 
 def test_ticket_detail_success_contract(monkeypatch) -> None:
@@ -100,6 +138,62 @@ def test_ticket_list_page_contract(monkeypatch) -> None:
     assert response.status_code == 200
     assert payload["success"] is True
     assert payload["data"] == {"items": [{"id": 1, "ticket_no": "RMA001"}], "total": 11, "page": 2, "page_size": 5}
+
+
+def test_ticket_structured_filters_are_forwarded(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_list(_session, **kwargs):
+        seen.update(kwargs)
+        return ([], 0)
+
+    monkeypatch.setattr(ticket_service, "list_tickets", fake_list)
+
+    with make_client() as client:
+        response = client.get(
+            "/api/v1/tickets",
+            params={
+                "ticket_no": "RMA",
+                "customer": "Acme",
+                "contact": "alice@example.local",
+                "sn": "SN001",
+                "assigned_user_id": 9,
+                "status_code": "manual_review",
+                "request_date_start": "2026-07-01",
+                "request_date_end": "2026-07-07",
+                "keyword": "compat",
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["ticket_no"] == "RMA"
+    assert seen["customer"] == "Acme"
+    assert seen["contact"] == "alice@example.local"
+    assert seen["sn"] == "SN001"
+    assert seen["assigned_user_id"] == 9
+    assert seen["status_code"] == "manual_review"
+    assert seen["keyword"] == "compat"
+    assert seen["request_date_start"] == date(2026, 7, 1)
+    assert seen["request_date_end"] == date(2026, 7, 7)
+
+
+def test_ticket_export_returns_xlsx_blob(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_export(_session, **kwargs):
+        seen.update(kwargs)
+        return [{"ticket_no": "RMA001", "current_status_code": "ready_for_export"}]
+
+    monkeypatch.setattr(ticket_service, "export_tickets", fake_export)
+
+    with make_client() as client:
+        response = client.get("/api/v1/tickets/export", params={"status_code": "ready_for_export", "customer": "Acme"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert response.content.startswith(b"PK")
+    assert seen["status_code"] == "ready_for_export"
+    assert seen["customer"] == "Acme"
 
 
 def test_http_exception_uses_unified_error_contract(monkeypatch) -> None:
@@ -259,6 +353,39 @@ def test_operator_cannot_assign_manual_task() -> None:
     assert payload["message"] == "AUTH_FORBIDDEN"
 
 
+def test_manual_task_structured_filters_are_forwarded(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_list(_session, **kwargs):
+        seen.update(kwargs)
+        return ([], 0)
+
+    monkeypatch.setattr(manual_review_service, "list_tasks", fake_list)
+
+    with make_client(roles=["supervisor"]) as client:
+        response = client.get(
+            "/api/v1/manual-review/tasks",
+            params={
+                "status": "pending",
+                "task_type": "missing_fields",
+                "priority": "high",
+                "assigned_user_id": 8,
+                "scope": "all",
+                "created_start": "2026-07-01",
+                "created_end": "2026-07-07",
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["task_status"] == "pending"
+    assert seen["task_type"] == "missing_fields"
+    assert seen["priority"] == "high"
+    assert seen["assigned_user_id"] == 8
+    assert seen["scope"] == "all"
+    assert seen["created_start"] == date(2026, 7, 1)
+    assert seen["created_end"] == date(2026, 7, 7)
+
+
 def test_supervisor_can_assign_manual_task(monkeypatch) -> None:
     session = FakeSession()
 
@@ -279,10 +406,89 @@ def test_supervisor_can_assign_manual_task(monkeypatch) -> None:
     assert session.committed is True
 
 
-def test_operator_cannot_query_all_manual_tasks() -> None:
+def test_operator_can_query_all_manual_tasks() -> None:
     with make_client(roles=["operator"]) as client:
         response = client.get("/api/v1/manual-review/tasks?scope=all")
 
     payload = response.json()
+    assert response.status_code == 200
+    assert payload["success"] is True
+
+
+def test_operator_cannot_patch_system_config() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.patch("/api/v1/system/config", json={"auto_send_enabled": True})
+
+    payload = response.json()
     assert response.status_code == 403
     assert payload["message"] == "AUTH_FORBIDDEN"
+
+
+def test_supervisor_can_patch_system_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "RUNTIME_CONFIG_PATH", str(tmp_path / "runtime_config.json"))
+    monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", False)
+    monkeypatch.setattr(settings, "CONFIDENCE_THRESHOLD", 0.8)
+    monkeypatch.setattr(settings, "MAX_FOLLOW_UP", 2)
+
+    with make_client(roles=["supervisor"]) as client:
+        response = client.patch(
+            "/api/v1/system/config",
+            json={"auto_send_enabled": True, "reply_send_mode": "auto_send", "auto_send_min_confidence": 0.88, "confidence_threshold": 0.91, "max_follow_up": 3},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["auto_send_enabled"] is True
+    assert payload["data"]["reply_send_mode"] == "auto_send"
+    assert payload["data"]["auto_send_min_confidence"] == 0.88
+    assert payload["data"]["confidence_threshold"] == 0.91
+    assert payload["data"]["max_follow_up"] == 3
+
+
+def test_operator_cannot_query_statistics_summary() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.get("/api/v1/statistics/summary")
+
+    payload = response.json()
+    assert response.status_code == 403
+    assert payload["message"] == "AUTH_FORBIDDEN"
+
+
+def test_supervisor_statistics_summary_empty_contract() -> None:
+    with make_client(roles=["supervisor"]) as client:
+        response = client.get("/api/v1/statistics/summary", params={"period": "week", "start_date": "2026-07-01", "end_date": "2026-07-07"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["period"] == "week"
+    assert payload["data"]["start_date"] == "2026-07-01"
+    assert payload["data"]["end_date"] == "2026-07-07"
+    assert payload["data"]["email_count"] == 0
+    assert payload["data"]["ticket_count"] == 0
+    assert payload["data"]["ai_success_rate"] == 0
+    assert len(payload["data"]["trend"]) == 7
+    assert payload["data"]["trend"][0]["date"] == "2026-07-01"
+    assert payload["data"]["manual_intervention_rate"] == 0
+
+
+def test_master_data_filter_params_are_forwarded(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_list(_session, **kwargs):
+        seen.update(kwargs)
+        return ([], 0)
+
+    monkeypatch.setattr(master_data_service, "list_sn_assets", fake_list)
+
+    with make_client(roles=["supervisor"]) as client:
+        response = client.get(
+            "/api/v1/master-data/sn-assets",
+            params={"sn": "SN", "customer": "Acme", "material": "MAT", "asset_status": "valid", "keyword": "compat"},
+        )
+
+    assert response.status_code == 200
+    assert seen["sn"] == "SN"
+    assert seen["customer"] == "Acme"
+    assert seen["material"] == "MAT"
+    assert seen["asset_status"] == "valid"
+    assert seen["keyword"] == "compat"

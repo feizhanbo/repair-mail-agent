@@ -4,16 +4,16 @@
 
 ## 当前实现基线
 
-更新日期：2026-07-05
+更新日期：2026-07-08
 
-- 后端已实现认证、用户管理、邮件、工单、人工复核、解析结果、回复、基础资料、通知、AI 日志、系统信息等 API。
-- 前端已实现登录、首页看板、邮件中心、工单中心、人工复核、回复审核、基础资料、用户管理、个人信息、站内消息、AI 日志、系统配置等页面。
+- 后端已实现认证、用户管理、邮件、工单、人工复核、解析结果、回复、基础资料、通知、AI 日志、系统信息、统计分析等 API。
+- 前端已实现登录、首页看板、邮件中心、工单中心、人工复核、回复管理、统计分析、基础资料、用户管理、个人信息、通知中心、站内消息、AI 日志、系统配置等页面。
 - 数据库 ORM 当前为 26 张业务表，额外由 Alembic 管理 `alembic_version`；最新迁移版本为 `9d2b7c4f1a30`。
 - `parse_results` 已落地 `apply_status`、`applied_by_user_id`、`applied_at`，用于表达 `pending`、`auto_applied`、`manually_applied`、`partially_applied`、`rejected`。
 - 角色体系统一为 `admin`、`supervisor`、`operator`，不再保留 `viewer` 方向。
 - 后端已补接口级 RBAC：高危接口由后端拦截，前端角色隐藏只作为交互优化，不作为安全边界。
-- DeepSeek 只在后端通过环境变量读取密钥，前端不接触 API key；AI 失败时回退规则解析或模板草稿。
-- 自动发信默认关闭，`AUTO_SEND_ENABLED=false`；真实 IMAP、SMTP、OSS 仍未做正式联调。
+- DeepSeek 只在后端通过环境变量读取密钥，前端不接触 API key；当前邮件解析以“规则预解析 + LLM 必审”为准，AI 失败时保留规则候选并转人工复核。
+- 自动发送默认关闭，配置文件默认 `reply_send_mode=human_review`、`AUTO_SEND_ENABLED=false`；系统会生成回复草稿，人工确认后进入发送流程；真实 IMAP、SMTP、OSS 仍未做正式联调。
 
 远程新库验证记录：
 
@@ -28,7 +28,9 @@
 ```text
 邮件接收/手工入库
 -> 原文归档与回复链识别
--> 规则解析 + DeepSeek AI 增强解析候选
+-> 规则预解析生成候选和 LLM 上下文
+-> DeepSeek AI 判断邮件类型、字段有效性、异常情况和置信度
+-> 高置信无冲突时自动应用到工单；否则进入人工复核
 -> 工单生成/字段修正/明细修正
 -> SN 校验
 -> 解析候选采纳或拒绝
@@ -52,9 +54,9 @@
 | --- | --- | --- |
 | 系统管理员 | `admin` | 用户管理、角色分配、系统配置、基础资料导入、全部业务兜底操作。 |
 | 主管 | `supervisor` | 查看业务数据、人工任务分配/转派/释放、回复审核、AI 日志、系统配置、工单状态流转。 |
-| 一般操作员 | `operator` | 处理本人可见或已领取任务，修正字段、SN 校验、采纳解析、生成追问、提交回复草稿。 |
+| 一般操作员 | `operator` | 查看统一人工任务池，主动领取未分配任务，处理本人已领取/被分配任务，修正字段、SN 校验、采纳解析、生成追问、提交回复草稿。 |
 
-当前限制：工单/邮件行级归属字段尚未完整建模，因此邮件和工单基础查看接口暂按登录态开放；operator 在人工任务接口禁止 `scope=all`，也不能查看或指定他人 `assigned_user_id`。
+当前限制：工单/邮件行级归属字段尚未完整建模，因此邮件和工单基础查看接口暂按登录态开放；人工任务当前按统一任务池展示，任务分配/转派仍由后端限制为 supervisor/admin。
 
 ## 项目结构
 
@@ -89,6 +91,8 @@ repair-mail-agent/
 - `AI_MAX_INPUT_CHARS`
 - `AI_PROMPT_VERSION`
 - `AUTO_SEND_ENABLED`
+- `REPLY_SEND_MODE`
+- `AUTO_SEND_MIN_CONFIDENCE`
 - `MAX_FOLLOW_UP`
 - `CONFIDENCE_THRESHOLD`
 
@@ -161,14 +165,14 @@ npm run build
 本次本地验证结果：
 
 - 后端项目虚拟环境下 `python -m compileall app` 通过。
-- 后端 `pytest` 通过，结果为 `32 passed`。
+- 后端 `pytest` 通过，结果为 `45 passed`。
 - 前端 Codex Node 24.14.0 环境下 `npm run typecheck` 通过。
 - 前端 `npm run build` 通过，仅有 Vite 大 chunk 警告。
 
 ## 已知限制
 
 - 真实 IMAP、SMTP、OSS 未正式联调。
-- 自动发送仍默认关闭，回复必须先走人工审核。
+- 当前测试配置默认人工确认模式，系统会生成回复草稿，人工确认后进入发送流程；生产自动发送需通过 `reply_send_mode=auto_send` 和 `AUTO_SEND_ENABLED=true` 等配置开启，并满足 AI 置信度、收件人和风险条件。
 - 工单/邮件行级数据权限尚未建模，本轮只落接口级角色权限。
 - 远程新库验证只记录结果；除用户确认外，不对业务库执行迁移、seed、db_smoke 或写入型验证。
 - 前端仍需补浏览器级 E2E，覆盖登录、用户管理、工单详情、人工复核、回复审核。

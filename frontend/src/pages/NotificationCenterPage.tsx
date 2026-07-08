@@ -1,0 +1,120 @@
+import {
+  BellOutlined,
+  CheckCircleOutlined,
+  FileTextOutlined,
+  MailOutlined,
+  MessageOutlined,
+  RobotOutlined,
+} from '@ant-design/icons';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Badge, Button, Empty, List, Space, Tabs, Tag, Typography, message } from 'antd';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api, apiErrorMessage } from '../api/client';
+import PageTitle from '../components/PageTitle';
+import SectionPanel from '../components/SectionPanel';
+import type { NotificationEvent } from '../types/api';
+import { formatTime } from '../utils/format';
+
+function eventIcon(eventType: string) {
+  if (eventType.includes('email')) return <MailOutlined />;
+  if (eventType.includes('ticket')) return <FileTextOutlined />;
+  if (eventType.includes('ai')) return <RobotOutlined />;
+  if (eventType.includes('reply')) return <MessageOutlined />;
+  if (eventType.includes('review')) return <CheckCircleOutlined />;
+  return <BellOutlined />;
+}
+
+function targetPath(record: NotificationEvent) {
+  if (record.target_type === 'manual_review_task') return '/manual-review';
+  if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') return '/tickets';
+  if (record.target_type === 'reply') return '/replies';
+  return '/notifications';
+}
+
+export default function NotificationCenterPage() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'read'>('all');
+  const params = { page: 1, page_size: 50, delivery_status: activeTab === 'all' ? undefined : activeTab };
+  const query = useQuery({
+    queryKey: ['notification-center', params],
+    queryFn: () => api.notifications(params),
+  });
+  const readMutation = useMutation({
+    mutationFn: (id: number) => api.markNotificationRead(id),
+    onSuccess: () => {
+      message.success('已标记为已读');
+      void queryClient.invalidateQueries({ queryKey: ['notification-center'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const list = query.data?.items ?? [];
+  const unread = list.filter((item) => item.delivery_status !== 'read').length;
+
+  return (
+    <div className="page-stack">
+      <PageTitle
+        title="通知中心"
+        extra={(
+          <Badge count={unread} size="small">
+            <Button onClick={() => navigate('/notifications')}>查看站内消息</Button>
+          </Badge>
+        )}
+      />
+      <SectionPanel className="notification-center-panel">
+        <Tabs
+          activeKey={activeTab}
+          onChange={(value) => setActiveTab(value as 'all' | 'pending' | 'read')}
+          items={[
+            { key: 'all', label: '全部通知' },
+            { key: 'pending', label: '未读' },
+            { key: 'read', label: '已读' },
+          ]}
+        />
+        {list.length ? (
+          <List
+            loading={query.isFetching}
+            dataSource={list}
+            renderItem={(item) => (
+              <List.Item
+                className={item.delivery_status === 'read' ? 'notification-row is-read' : 'notification-row'}
+                actions={[
+                  <Button key="detail" type="link" onClick={() => navigate(targetPath(item))}>跳转</Button>,
+                  <Button
+                    key="read"
+                    type="link"
+                    disabled={item.delivery_status === 'read'}
+                    onClick={() => readMutation.mutate(item.id)}
+                  >
+                    已读
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  avatar={<span className="notification-icon">{eventIcon(item.event_type)}</span>}
+                  title={(
+                    <Space wrap>
+                      <Typography.Text strong>{item.title}</Typography.Text>
+                      <Tag color={item.priority === 'high' ? 'orange' : 'blue'}>{item.priority}</Tag>
+                      <Tag>{item.event_type}</Tag>
+                    </Space>
+                  )}
+                  description={(
+                    <div className="notification-description">
+                      <Typography.Paragraph ellipsis={{ rows: 2 }}>{item.content || '-'}</Typography.Paragraph>
+                      <Typography.Text type="secondary">{formatTime(item.created_at)}</Typography.Text>
+                    </div>
+                  )}
+                />
+              </List.Item>
+            )}
+          />
+        ) : (
+          <Empty description={query.isFetching ? '加载中' : '暂无通知'} />
+        )}
+      </SectionPanel>
+    </div>
+  );
+}

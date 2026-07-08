@@ -54,7 +54,6 @@ export type CurrentUser = {
   real_name: string;
   email?: string | null;
   phone?: string | null;
-  department?: string | null;
   status?: string;
   roles: RoleCode[];
 };
@@ -84,6 +83,13 @@ export type DashboardSummary = {
   pending_parse: number;
   manual_review: number;
   manual_review_tasks: number;
+  task_pool_total?: number;
+  need_manual_processing?: number;
+  current_user_pending_tasks?: number;
+  in_progress_tasks?: number;
+  all_in_progress_tasks?: number;
+  completed_exportable?: number;
+  resolved_manual_tasks?: number;
   need_customer_info: number;
   auto_replied: number;
   error: number;
@@ -334,7 +340,6 @@ export type UserAccount = {
   real_name: string;
   email?: string | null;
   phone?: string | null;
-  department?: string | null;
   status: string;
   roles: RoleCode[];
   last_login_at?: string | null;
@@ -348,7 +353,6 @@ export type UserCreateRequest = {
   real_name: string;
   email?: string | null;
   phone?: string | null;
-  department?: string | null;
   status: 'active' | 'disabled';
   roles: RoleCode[];
 };
@@ -357,7 +361,6 @@ export type UserUpdateRequest = {
   real_name?: string;
   email?: string | null;
   phone?: string | null;
-  department?: string | null;
 };
 
 export type ManualTaskDetail = {
@@ -483,9 +486,71 @@ export type SystemInfo = {
   app: string;
   env: string;
   auto_send_enabled: boolean;
+  reply_send_mode: 'human_review' | 'auto_send';
+  auto_send_min_confidence: number;
   max_follow_up: number;
   confidence_threshold: number;
+  environment_note?: string;
   integrations: JsonRecord;
   workflow_statuses: WorkflowStatus[];
   workflow_transitions: WorkflowTransition[];
+};
+
+export type SystemConfig = {
+  auto_send_enabled: boolean;
+  reply_send_mode: 'human_review' | 'auto_send';
+  auto_send_min_confidence: number;
+  max_follow_up: number;
+  confidence_threshold: number;
+  environment_note?: string;
+  integrations: JsonRecord;
+};
+
+export type ReplyTemplate = {
+  id: number;
+  template_code: string;
+  template_name: string;
+  template_type: string;
+  language: string;
+  version: string;
+  subject_template?: string | null;
+  body_template: string;
+  enabled: boolean;
+  created_by_user_id?: number | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type StatisticsTrendItem = {
+  date: string;
+  emails: number;
+  tickets: number;
+  completed: number;
+};
+
+export type UserProcessingStat = {
+  user_id: number;
+  real_name: string;
+  username: string;
+  resolved_count: number;
+};
+
+export type StatisticsSummary = {
+  period: 'week' | 'month' | 'year';
+  start_date: string;
+  end_date: string;
+  email_count: number;
+  ticket_count: number;
+  completed_count: number;
+  reparse_count: number;
+  ai_success_rate: number;
+  auto_reply_rate: number;
+  manual_intervention_rate: number;
+  task_pool_total: number;
+  need_customer_info: number;
+  error_ticket_count: number;
+  ready_for_export: number;
+  status_distribution: { status_code: string; count: number }[];
+  user_processing: UserProcessingStat[];
+  trend: StatisticsTrendItem[];
 };

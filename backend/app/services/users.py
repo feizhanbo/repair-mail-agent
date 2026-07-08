@@ -35,7 +35,6 @@ USER_FIELDS = (
     "real_name",
     "email",
     "phone",
-    "department",
     "status",
     "last_login_at",
     "created_at",
@@ -106,17 +105,38 @@ async def list_users(
     page_size: int = 20,
     status_filter: str | None = None,
     keyword: str | None = None,
+    username: str | None = None,
+    real_name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    role: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     statement = select(User)
     if status_filter:
         statement = statement.where(User.status == status_filter)
+    if username:
+        statement = statement.where(User.username.like(f"%{username}%"))
+    if real_name:
+        statement = statement.where(User.real_name.like(f"%{real_name}%"))
+    if email:
+        statement = statement.where(User.email.like(f"%{email}%"))
+    if phone:
+        statement = statement.where(User.phone.like(f"%{phone}%"))
+    if role:
+        statement = statement.where(
+            User.id.in_(
+                select(UserRole.user_id)
+                .join(Role, Role.id == UserRole.role_id)
+                .where(Role.role_code == role)
+            )
+        )
     if keyword:
         like = f"%{keyword}%"
         statement = statement.where(
             (User.username.like(like))
             | (User.real_name.like(like))
             | (User.email.like(like))
-            | (User.department.like(like))
+            | (User.phone.like(like))
         )
     statement = statement.order_by(User.updated_at.desc(), User.id.desc())
     users, total = await paginate_scalars(session, statement, page, page_size)

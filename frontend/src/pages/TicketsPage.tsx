@@ -1,5 +1,6 @@
 import {
   CheckCircleOutlined,
+  DownloadOutlined,
   EditOutlined,
   FileAddOutlined,
   MailOutlined,
@@ -8,6 +9,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  DatePicker,
   Descriptions,
   Drawer,
   Empty,
@@ -44,13 +46,20 @@ import type {
   TicketDetail,
   TicketLine,
 } from '../types/api';
+import { compactFilters, filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
+import { saveBlob } from '../utils/download';
 import { hasAnyRole } from '../utils/roles';
 import { ticketStatusLabels } from '../utils/status';
 
 type TicketFilters = {
-  keyword?: string;
+  ticket_no?: string;
+  customer?: string;
+  contact?: string;
+  sn?: string;
+  assigned_user_id?: string;
   status_code?: string;
+  date_range?: unknown;
 };
 
 type TransitionForm = {
@@ -99,13 +108,14 @@ const lockOptions = [
 ];
 
 export default function TicketsPage() {
-  const [filters, setFilters] = useState<TicketFilters>({});
+  const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [transitionOpen, setTransitionOpen] = useState(false);
   const [fieldOpen, setFieldOpen] = useState(false);
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
+  const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
   const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
@@ -205,6 +215,11 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
+  const exportMutation = useMutation({
+    mutationFn: () => api.exportTickets(compactFilters(filters)),
+    onSuccess: (blob) => saveBlob(blob, 'tickets-export.xlsx'),
+    onError: handleMutationError,
+  });
 
   const openItemEditor = (item?: TicketLine) => {
     setEditingItem(item ?? null);
@@ -224,11 +239,39 @@ export default function TicketsPage() {
 
   return (
     <div className="page-stack">
-      <PageTitle title="工单中心" />
+      <PageTitle
+        title="工单中心"
+        extra={(
+          <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
+            导出
+          </Button>
+        )}
+      />
       <SectionPanel>
-        <Form<TicketFilters> layout="inline" className="filter-bar" onFinish={(values) => { setPage(1); setFilters(values); }}>
-          <Form.Item name="keyword">
-            <Input allowClear prefix={<SearchOutlined />} placeholder="工单号、客户、联系人" />
+        <Form<TicketFilters>
+          form={filterForm}
+          layout="inline"
+          className="filter-bar"
+          onFinish={(values) => {
+            setPage(1);
+            setSelectedId(null);
+            setFilters(filtersWithDateRange(values, 'date_range', 'request_date_start', 'request_date_end'));
+          }}
+        >
+          <Form.Item name="ticket_no">
+            <Input allowClear prefix={<SearchOutlined />} placeholder="工单号" />
+          </Form.Item>
+          <Form.Item name="customer">
+            <Input allowClear placeholder="客户" />
+          </Form.Item>
+          <Form.Item name="contact">
+            <Input allowClear placeholder="联系人" />
+          </Form.Item>
+          <Form.Item name="sn">
+            <Input allowClear placeholder="SN" />
+          </Form.Item>
+          <Form.Item name="assigned_user_id">
+            <Input allowClear type="number" placeholder="处理人 ID" />
           </Form.Item>
           <Form.Item name="status_code">
             <Select
@@ -238,7 +281,22 @@ export default function TicketsPage() {
               options={Object.entries(ticketStatusLabels).map(([value, label]) => ({ value, label }))}
             />
           </Form.Item>
-          <Button htmlType="submit" type="primary">筛选</Button>
+          <Form.Item name="date_range">
+            <DatePicker.RangePicker allowClear />
+          </Form.Item>
+          <Space>
+            <Button htmlType="submit" type="primary">筛选</Button>
+            <Button
+              onClick={() => {
+                filterForm.resetFields();
+                setPage(1);
+                setSelectedId(null);
+                setFilters({});
+              }}
+            >
+              重置
+            </Button>
+          </Space>
         </Form>
         <Table<Ticket>
           rowKey="id"

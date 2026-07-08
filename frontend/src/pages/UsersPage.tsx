@@ -7,21 +7,32 @@ import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import type { RoleCode, UserAccount, UserCreateRequest } from '../types/api';
+import { compactFilters } from '../utils/filters';
 import { formatTime } from '../utils/format';
 import { roleLabels, roleOptions } from '../utils/roles';
 
 type UserForm = UserCreateRequest;
 
+type UserFilters = {
+  username?: string;
+  real_name?: string;
+  email?: string;
+  phone?: string;
+  role?: RoleCode;
+  status?: string;
+};
+
 export default function UsersPage() {
   const [page, setPage] = useState(1);
-  const [keyword, setKeyword] = useState<string>();
+  const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<UserAccount | null>(null);
   const [form] = Form.useForm<UserForm>();
+  const [filterForm] = Form.useForm<UserFilters>();
   const queryClient = useQueryClient();
   const usersQuery = useQuery({
-    queryKey: ['users', page, keyword],
-    queryFn: () => api.users({ page, page_size: 20, keyword }),
+    queryKey: ['users', page, filters],
+    queryFn: () => api.users({ ...filters, page, page_size: 20 }),
   });
   const refreshUsers = () => void queryClient.invalidateQueries({ queryKey: ['users'] });
   const handleError = (error: unknown) => message.error(apiErrorMessage(error));
@@ -85,7 +96,6 @@ export default function UsersPage() {
       real_name: record.real_name,
       email: record.email ?? undefined,
       phone: record.phone ?? undefined,
-      department: record.department ?? undefined,
       status: record.status as 'active' | 'disabled',
       roles: record.roles,
     });
@@ -95,7 +105,6 @@ export default function UsersPage() {
   const columns: ColumnsType<UserAccount> = [
     { title: '账号', dataIndex: 'username', width: 150 },
     { title: '姓名', dataIndex: 'real_name', width: 140 },
-    { title: '部门', dataIndex: 'department', width: 140, render: (value?: string) => value || '-' },
     { title: '邮箱', dataIndex: 'email', ellipsis: true, render: (value?: string) => value || '-' },
     {
       title: '角色',
@@ -167,17 +176,46 @@ export default function UsersPage() {
         extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增用户</Button>}
       />
       <SectionPanel>
-        <Space className="filter-bar">
-          <Input.Search
-            allowClear
-            placeholder="账号、姓名、邮箱、部门"
-            onSearch={(value) => {
-              setKeyword(value || undefined);
-              setPage(1);
-            }}
-            style={{ width: 280 }}
-          />
-        </Space>
+        <Form<UserFilters>
+          form={filterForm}
+          layout="inline"
+          className="filter-bar"
+          onFinish={(values) => {
+            setPage(1);
+            setFilters(compactFilters(values));
+          }}
+        >
+          <Form.Item name="username">
+            <Input allowClear placeholder="账号" />
+          </Form.Item>
+          <Form.Item name="real_name">
+            <Input allowClear placeholder="姓名" />
+          </Form.Item>
+          <Form.Item name="email">
+            <Input allowClear placeholder="邮箱" />
+          </Form.Item>
+          <Form.Item name="phone">
+            <Input allowClear placeholder="电话" />
+          </Form.Item>
+          <Form.Item name="role">
+            <Select allowClear placeholder="角色" style={{ width: 130 }} options={roleOptions} />
+          </Form.Item>
+          <Form.Item name="status">
+            <Select allowClear placeholder="状态" style={{ width: 120 }} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '禁用' }]} />
+          </Form.Item>
+          <Space>
+            <Button htmlType="submit" type="primary">筛选</Button>
+            <Button
+              onClick={() => {
+                filterForm.resetFields();
+                setPage(1);
+                setFilters({});
+              }}
+            >
+              重置
+            </Button>
+          </Space>
+        </Form>
         <Table<UserAccount>
           rowKey="id"
           columns={columns}
@@ -209,9 +247,6 @@ export default function UsersPage() {
             <Input />
           </Form.Item>
           <Form.Item label="电话" name="phone">
-            <Input />
-          </Form.Item>
-          <Form.Item label="部门" name="department">
             <Input />
           </Form.Item>
           <Form.Item label="状态" name="status" rules={[{ required: true }]}>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -47,6 +48,11 @@ async def list_ai_logs(
     email_id: int | None = None,
     call_type: str | None = None,
     status: str | None = None,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    prompt_version: str | None = None,
+    created_start: date | None = None,
+    created_end: date | None = None,
 ) -> dict:
     del current_user
     statement = select(AiCallLog)
@@ -58,6 +64,16 @@ async def list_ai_logs(
         statement = statement.where(AiCallLog.call_type == call_type)
     if status:
         statement = statement.where(AiCallLog.status == status)
+    if provider_name:
+        statement = statement.where(AiCallLog.provider_name == provider_name)
+    if model_name:
+        statement = statement.where(AiCallLog.model_name == model_name)
+    if prompt_version:
+        statement = statement.where(AiCallLog.prompt_version == prompt_version)
+    if created_start:
+        statement = statement.where(AiCallLog.created_at >= created_start)
+    if created_end:
+        statement = statement.where(AiCallLog.created_at <= created_end)
     statement = statement.order_by(AiCallLog.created_at.desc(), AiCallLog.id.desc())
     rows, total = await paginate_scalars(session, statement, page_no, page_size)
     return page([model_to_dict(row, AI_LOG_FIELDS) for row in rows], total=total, page_no=page_no, page_size=page_size)

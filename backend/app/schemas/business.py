@@ -162,13 +162,27 @@ class BoardCardImportRequest(BaseModel):
     source_file_hash: str | None = Field(default=None, max_length=64)
 
 
+class SystemConfigUpdateRequest(BaseModel):
+    auto_send_enabled: bool | None = None
+    reply_send_mode: Literal["human_review", "auto_send"] | None = None
+    auto_send_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence_threshold: float | None = Field(default=None, ge=0, le=1)
+    max_follow_up: int | None = Field(default=None, ge=1, le=10)
+
+
+class ReplyTemplateUpdateRequest(BaseModel):
+    template_name: str | None = Field(default=None, min_length=1, max_length=100)
+    subject_template: str | None = Field(default=None, max_length=500)
+    body_template: str | None = Field(default=None, min_length=1)
+    enabled: bool | None = None
+
+
 class UserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
     real_name: str = Field(min_length=1, max_length=64)
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=50)
-    department: str | None = Field(default=None, max_length=100)
     status: Literal["active", "disabled"] = "active"
     roles: list[Literal["admin", "supervisor", "operator"]] = Field(default_factory=list)
 
@@ -177,7 +191,6 @@ class UserUpdateRequest(BaseModel):
     real_name: str | None = Field(default=None, min_length=1, max_length=64)
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=50)
-    department: str | None = Field(default=None, max_length=100)
 
 
 class UserStatusRequest(BaseModel):
@@ -196,7 +209,6 @@ class ProfileUpdateRequest(BaseModel):
     real_name: str | None = Field(default=None, min_length=1, max_length=64)
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=50)
-    department: str | None = Field(default=None, max_length=100)
 
 
 class PasswordChangeRequest(BaseModel):

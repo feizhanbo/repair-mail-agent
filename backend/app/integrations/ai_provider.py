@@ -23,6 +23,9 @@ class AiExtractResponse(BaseModel):
     confidence_score: float = Field(default=0, ge=0, le=1)
     field_confidences: dict[str, float] = Field(default_factory=dict)
     evidence: dict[str, Any] = Field(default_factory=dict)
+    confidence_reasons: list[str] = Field(default_factory=list)
+    manual_review_direction: str | None = None
+    original_evidence: list[str] = Field(default_factory=list)
 
 
 class AiReplyDraftResponse(BaseModel):

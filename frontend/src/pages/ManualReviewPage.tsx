@@ -9,6 +9,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  DatePicker,
   Descriptions,
   Empty,
   Form,
@@ -42,6 +43,7 @@ import type {
   TicketLine,
   UserAccount,
 } from '../types/api';
+import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 import { hasAnyRole } from '../utils/roles';
 
@@ -49,6 +51,9 @@ type TaskFilters = {
   status?: string;
   task_type?: string;
   scope?: string;
+  priority?: string;
+  assigned_user_id?: string;
+  date_range?: unknown;
 };
 
 type ResolveForm = {
@@ -112,6 +117,12 @@ const taskScopeOptions = [
   { value: 'all', label: '全部任务' },
 ];
 
+const taskPriorityOptions = [
+  { value: 'high', label: '高' },
+  { value: 'normal', label: '普通' },
+  { value: 'low', label: '低' },
+];
+
 const resolutionTypeOptions = [
   { value: 'field_fixed', label: '字段已修正' },
   { value: 'sn_checked', label: 'SN 已核验' },
@@ -127,7 +138,7 @@ const lockOptions = [
 ];
 
 export default function ManualReviewPage() {
-  const [filters, setFilters] = useState<TaskFilters>({});
+  const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [resolveOpen, setResolveOpen] = useState(false);
@@ -135,10 +146,11 @@ export default function ManualReviewPage() {
   const [fieldOpen, setFieldOpen] = useState(false);
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
+  const [filterForm] = Form.useForm<TaskFilters>();
   const queryClient = useQueryClient();
   const currentUserRoles = useAuthStore((state) => state.user?.roles);
   const canAssignTasks = hasAnyRole(currentUserRoles, ['admin', 'supervisor']);
-  const visibleTaskScopeOptions = canAssignTasks ? taskScopeOptions : taskScopeOptions.filter((item) => item.value !== 'all');
+  const visibleTaskScopeOptions = taskScopeOptions;
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
@@ -331,24 +343,57 @@ export default function ManualReviewPage() {
       <div className="manual-workbench-grid">
         <SectionPanel className="task-queue-panel">
           <Form<TaskFilters>
+            form={filterForm}
             layout="vertical"
             className="compact-filter"
             onFinish={(values) => {
               setPage(1);
-              setFilters(values);
               setSelectedId(null);
+              setFilters(filtersWithDateRange(values, 'date_range', 'created_start', 'created_end'));
             }}
           >
             <Form.Item name="status" label="任务状态">
               <Select allowClear options={taskStatusOptions} />
             </Form.Item>
-            <Form.Item name="scope" label="任务范围" initialValue="mine">
+            <Form.Item name="scope" label="任务范围">
               <Select allowClear options={visibleTaskScopeOptions} />
             </Form.Item>
             <Form.Item name="task_type" label="任务类型">
               <Input allowClear prefix={<SearchOutlined />} />
             </Form.Item>
-            <Button htmlType="submit" type="primary" block>筛选</Button>
+            <Form.Item name="priority" label="优先级">
+              <Select allowClear options={taskPriorityOptions} />
+            </Form.Item>
+            {canAssignTasks ? (
+              <Form.Item name="assigned_user_id" label="处理人">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  options={(usersQuery.data?.items ?? []).map((user: UserAccount) => ({
+                    value: String(user.id),
+                    label: `${user.real_name}（${user.username}）`,
+                  }))}
+                />
+              </Form.Item>
+            ) : null}
+            <Form.Item name="date_range" label="创建日期">
+              <DatePicker.RangePicker allowClear style={{ width: '100%' }} />
+            </Form.Item>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Button htmlType="submit" type="primary" block>筛选</Button>
+              <Button
+                block
+                onClick={() => {
+                  filterForm.resetFields();
+                  setPage(1);
+                  setSelectedId(null);
+                  setFilters({});
+                }}
+              >
+                重置
+              </Button>
+            </Space>
           </Form>
           <Table<ManualTask>
             rowKey="id"

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Descriptions, Drawer, Select, Space, Table, Tag, message } from 'antd';
+import { Button, DatePicker, Descriptions, Drawer, Form, Input, Select, Space, Table, Tag, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -8,17 +8,28 @@ import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import type { NotificationEvent } from '../types/api';
+import { filtersWithDateRange } from '../utils/filters';
 import { formatTime } from '../utils/format';
+
+type NotificationFilters = {
+  delivery_status?: string;
+  event_type?: string;
+  priority?: string;
+  target_type?: string;
+  keyword?: string;
+  date_range?: unknown;
+};
 
 export default function NotificationsPage() {
   const [page, setPage] = useState(1);
-  const [deliveryStatus, setDeliveryStatus] = useState<string | undefined>('pending');
+  const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [selected, setSelected] = useState<NotificationEvent | null>(null);
+  const [filterForm] = Form.useForm<NotificationFilters>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const query = useQuery({
-    queryKey: ['notifications-page', page, deliveryStatus],
-    queryFn: () => api.notifications({ page, page_size: 20, delivery_status: deliveryStatus }),
+    queryKey: ['notifications-page', page, filters],
+    queryFn: () => api.notifications({ ...filters, page, page_size: 20 }),
   });
   const readMutation = useMutation({
     mutationFn: (id: number) => api.markNotificationRead(id),
@@ -59,19 +70,58 @@ export default function NotificationsPage() {
     <div className="page-stack">
       <PageTitle title="站内消息" />
       <SectionPanel>
-        <Space className="filter-bar">
-          <Select
-            allowClear
-            value={deliveryStatus}
-            style={{ width: 160 }}
-            options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
-            onChange={(value) => {
-              setDeliveryStatus(value);
-              setPage(1);
-            }}
-            placeholder="消息状态"
-          />
-        </Space>
+        <Form<NotificationFilters>
+          form={filterForm}
+          layout="inline"
+          className="filter-bar"
+          onFinish={(values) => {
+            setPage(1);
+            setSelected(null);
+            setFilters(filtersWithDateRange(values, 'date_range', 'created_start', 'created_end'));
+          }}
+        >
+          <Form.Item name="delivery_status">
+            <Select
+              allowClear
+              style={{ width: 140 }}
+              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
+              placeholder="消息状态"
+            />
+          </Form.Item>
+          <Form.Item name="event_type">
+            <Input allowClear placeholder="事件类型" />
+          </Form.Item>
+          <Form.Item name="priority">
+            <Select
+              allowClear
+              style={{ width: 120 }}
+              placeholder="优先级"
+              options={[{ value: 'high', label: '高' }, { value: 'normal', label: '普通' }, { value: 'low', label: '低' }]}
+            />
+          </Form.Item>
+          <Form.Item name="target_type">
+            <Input allowClear placeholder="目标类型" />
+          </Form.Item>
+          <Form.Item name="keyword">
+            <Input allowClear placeholder="标题/内容" />
+          </Form.Item>
+          <Form.Item name="date_range">
+            <DatePicker.RangePicker allowClear />
+          </Form.Item>
+          <Space>
+            <Button htmlType="submit" type="primary">筛选</Button>
+            <Button
+              onClick={() => {
+                filterForm.resetFields();
+                setPage(1);
+                setSelected(null);
+                setFilters({});
+              }}
+            >
+              重置
+            </Button>
+          </Space>
+        </Form>
         <Table<NotificationEvent>
           rowKey="id"
           columns={columns}

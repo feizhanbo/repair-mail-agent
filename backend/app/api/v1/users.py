@@ -22,6 +22,11 @@ async def list_users(
     page_size: int = Query(20, ge=1, le=100),
     status_filter: str | None = Query(None, alias="status"),
     keyword: str | None = None,
+    username: str | None = None,
+    real_name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    role: str | None = None,
 ) -> dict:
     del current_user
     items, total = await user_service.list_users(
@@ -30,6 +35,11 @@ async def list_users(
         page_size=page_size,
         status_filter=status_filter,
         keyword=keyword,
+        username=username,
+        real_name=real_name,
+        email=email,
+        phone=phone,
+        role=role,
     )
     return page(items, total, page_no, page_size)
 
