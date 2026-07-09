@@ -46,6 +46,8 @@ function friendlyServerMessage(status?: number, code?: string): string {
     USER_USERNAME_EXISTS: '账号已存在，请更换账号',
     USER_EMAIL_EXISTS: '邮箱已被使用，请更换邮箱',
     USER_OLD_PASSWORD_INVALID: '原密码不正确',
+    USER_PASSWORD_REQUIRED: '请输入新密码',
+    USER_PASSWORD_TOO_LONG: '密码过长，请使用 72 字节以内的密码',
     TICKET_NOT_FOUND: '工单不存在或已被删除',
     TICKET_VERSION_CONFLICT: '工单已被其他人更新，请刷新后重试',
     WORKFLOW_TRANSITION_NOT_ALLOWED: '当前状态不支持此操作',
@@ -63,6 +65,10 @@ function friendlyServerMessage(status?: number, code?: string): string {
     REPLY_ALREADY_APPROVED: '回复已审核通过，不能再修改',
     REPLY_TEMPLATE_NOT_FOUND: '未找到可用回复话术，请联系管理员配置',
     FOLLOWUP_LIMIT_EXCEEDED: '追问次数已达到上限，请转人工处理',
+    REPLY_TEMPLATE_ALREADY_EXISTS: '话术编码和版本已存在，请更换编码或版本',
+    REPLY_TEMPLATE_IN_USE: '该话术已有回复记录使用，请停用而不是删除',
+    EXPORT_SELECTION_REQUIRED: '请先选择要导出的数据',
+    EXPORT_SELECTION_EMPTY: '未找到可导出的已选数据',
     CSV_HEADER_REQUIRED: '导入文件缺少表头，请下载模板后重新填写',
     CSV_VALIDATION_FAILED: '导入文件内容有误，请检查模板字段和日期格式',
     XLSX_HEADER_REQUIRED: '导入文件缺少表头，请下载模板后重新填写',
@@ -148,6 +154,7 @@ export const api = {
   reparseEmail: (id: number, body = { mode: 'field_extract' as const }) => postData(`/emails/${id}/reparse`, body),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
+  exportSelectedTickets: (ids: number[]) => apiClient.post<Blob, Blob>('/tickets/export-selected', { ids }, { responseType: 'blob' }),
   ticketDetail: (id: number) => getData<TicketDetail>(`/tickets/${id}`),
   patchTicketFields: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/fields`, body),
   patchTicketItems: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/items`, body),
@@ -172,6 +179,7 @@ export const api = {
   importSnAssets: (body: Record<string, unknown>) => postData('/master-data/sn-assets/import', body),
   snAssetsTemplate: () => apiClient.get<Blob, Blob>('/master-data/sn-assets/template', { responseType: 'blob' }),
   exportSnAssets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/master-data/sn-assets/export', { params, responseType: 'blob' }),
+  exportSelectedSnAssets: (ids: number[]) => apiClient.post<Blob, Blob>('/master-data/sn-assets/export-selected', { ids }, { responseType: 'blob' }),
   importSnAssetsFile: (file: File) => {
     const body = new FormData();
     body.append('file', file);
@@ -181,6 +189,7 @@ export const api = {
   importBoardCards: (body: Record<string, unknown>) => postData('/master-data/board-cards/import', body),
   boardCardsTemplate: () => apiClient.get<Blob, Blob>('/master-data/board-cards/template', { responseType: 'blob' }),
   exportBoardCards: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/master-data/board-cards/export', { params, responseType: 'blob' }),
+  exportSelectedBoardCards: (ids: number[]) => apiClient.post<Blob, Blob>('/master-data/board-cards/export-selected', { ids }, { responseType: 'blob' }),
   importBoardCardsFile: (file: File) => {
     const body = new FormData();
     body.append('file', file);
@@ -194,8 +203,11 @@ export const api = {
   updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'reply_send_mode' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
     patchData<SystemConfig>('/system/config', body),
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
+  createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>
+    postData<ReplyTemplate>('/system/reply-templates', body),
   updateReplyTemplate: (id: number, body: Partial<Pick<ReplyTemplate, 'template_name' | 'subject_template' | 'body_template' | 'enabled'>>) =>
     patchData<ReplyTemplate>(`/system/reply-templates/${id}`, body),
+  deleteReplyTemplate: (id: number) => apiClient.delete<ApiResponse<{ deleted: boolean; template: ReplyTemplate }>, ApiResponse<{ deleted: boolean; template: ReplyTemplate }>>(`/system/reply-templates/${id}`).then((response) => response.data),
   statistics: (params: Record<string, unknown>) => getData<StatisticsSummary>('/statistics/summary', { params }),
   dbTables: () => getData<DatabaseTablesResponse>('/db-browser/tables'),
   dbRows: (tableName: string, params: { page?: number; page_size?: number }) =>

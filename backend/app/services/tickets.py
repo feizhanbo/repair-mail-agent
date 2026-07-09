@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
+from app.services.master_data import xlsx_workbook_bytes
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 TICKET_FIELDS = (
@@ -295,6 +296,51 @@ async def export_tickets(
     ).order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
     rows = (await session.execute(statement)).scalars().all()
     return [serialize_ticket(ticket) for ticket in rows]
+
+
+def _ticket_export_rows(ticket: RepairTicket, items: list[RepairTicketItem]) -> list[dict[str, Any]]:
+    rows = [
+        {"section": "工单", "field": "工单号", "value": ticket.ticket_no},
+        {"section": "工单", "field": "状态", "value": ticket.current_status_code},
+        {"section": "客户", "field": "客户编码", "value": ticket.customer_code},
+        {"section": "客户", "field": "客户名称", "value": ticket.customer_name},
+        {"section": "联系人", "field": "联系人", "value": ticket.contact_person},
+        {"section": "联系人", "field": "电话", "value": ticket.contact_phone},
+        {"section": "联系人", "field": "邮箱", "value": ticket.contact_email},
+        {"section": "处理", "field": "处理人ID", "value": ticket.assigned_user_id},
+        {"section": "处理", "field": "请求日期", "value": ticket.request_date},
+        {"section": "处理", "field": "置信度", "value": ticket.confidence_score},
+        {"section": "处理", "field": "追问次数", "value": ticket.followup_count},
+        {"section": "内容", "field": "故障描述", "value": ticket.problem_description},
+        {"section": "内容", "field": "缺失字段", "value": json.dumps(to_plain(ticket.missing_fields), ensure_ascii=False) if ticket.missing_fields else ""},
+        {"section": "内容", "field": "冲突字段", "value": json.dumps(to_plain(ticket.conflict_fields), ensure_ascii=False) if ticket.conflict_fields else ""},
+    ]
+    for item in items:
+        rows.extend(
+            [
+                {"section": f"明细{item.line_no}", "field": "SN", "value": item.sn},
+                {"section": f"明细{item.line_no}", "field": "物料编码", "value": item.material_code},
+                {"section": f"明细{item.line_no}", "field": "物料名称", "value": item.material_name},
+                {"section": f"明细{item.line_no}", "field": "故障现象", "value": item.fault_description},
+                {"section": f"明细{item.line_no}", "field": "数量", "value": item.quantity},
+            ]
+        )
+    return rows
+
+
+async def export_tickets_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
+    if not ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
+    tickets = (await session.execute(select(RepairTicket).where(RepairTicket.id.in_(ids)).order_by(RepairTicket.id))).scalars().all()
+    if not tickets:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXPORT_SELECTION_EMPTY")
+    sheets: list[tuple[str, list[dict[str, Any]], list[str]]] = []
+    for ticket in tickets:
+        items = (
+            await session.execute(select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket.id).order_by(RepairTicketItem.line_no))
+        ).scalars().all()
+        sheets.append((ticket.ticket_no, _ticket_export_rows(ticket, list(items)), ["section", "field", "value"]))
+    return xlsx_workbook_bytes(sheets)
 
 
 async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, Any]:

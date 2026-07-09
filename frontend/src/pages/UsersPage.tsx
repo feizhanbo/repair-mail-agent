@@ -22,13 +22,20 @@ type UserFilters = {
   status?: string;
 };
 
+type ResetPasswordForm = {
+  password: string;
+  confirm_password: string;
+};
+
 export default function UsersPage() {
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<UserAccount | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserAccount | null>(null);
   const [form] = Form.useForm<UserForm>();
   const [filterForm] = Form.useForm<UserFilters>();
+  const [resetPasswordForm] = Form.useForm<ResetPasswordForm>();
   const queryClient = useQueryClient();
   const usersQuery = useQuery({
     queryKey: ['users', page, filters],
@@ -69,6 +76,8 @@ export default function UsersPage() {
     mutationFn: ({ id, password }: { id: number; password: string }) => api.resetUserPassword(id, password),
     onSuccess: () => {
       message.success('密码已重置');
+      setResetTarget(null);
+      resetPasswordForm.resetFields();
       refreshUsers();
     },
     onError: handleError,
@@ -132,19 +141,8 @@ export default function UsersPage() {
             size="small"
             icon={<KeyOutlined />}
             onClick={() => {
-              let password = '';
-              Modal.confirm({
-                title: '重置密码',
-                content: <Input.Password placeholder="输入新密码" onChange={(event) => { password = event.target.value; }} />,
-                onOk: () => {
-                  const nextPassword = password.trim();
-                  if (!nextPassword) {
-                    message.error('请输入新密码');
-                    return Promise.reject(new Error('password required'));
-                  }
-                  return resetPasswordMutation.mutateAsync({ id: record.id, password: nextPassword });
-                },
-              });
+              setResetTarget(record);
+              resetPasswordForm.resetFields();
             }}
           >
             重置
@@ -258,6 +256,49 @@ export default function UsersPage() {
           <Button type="primary" htmlType="submit" loading={saveMutation.isPending}>保存</Button>
         </Form>
       </Drawer>
+      <Modal
+        title="重置密码"
+        open={Boolean(resetTarget)}
+        onCancel={() => setResetTarget(null)}
+        footer={null}
+        destroyOnClose
+      >
+        <Form<ResetPasswordForm>
+          form={resetPasswordForm}
+          layout="vertical"
+          onFinish={(values) => {
+            if (!resetTarget) return;
+            resetPasswordMutation.mutate({ id: resetTarget.id, password: values.password });
+          }}
+        >
+          <Form.Item label="用户">
+            <Input value={resetTarget ? `${resetTarget.real_name} (${resetTarget.username})` : ''} disabled />
+          </Form.Item>
+          <Form.Item label="新密码" name="password" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少 6 位' }]}>
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item
+            label="确认密码"
+            name="confirm_password"
+            dependencies={['password']}
+            rules={[
+              { required: true, message: '请再次输入新密码' },
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (!value || getFieldValue('password') === value) return Promise.resolve();
+                  return Promise.reject(new Error('两次输入的密码不一致'));
+                },
+              }),
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+          <Space>
+            <Button type="primary" htmlType="submit" loading={resetPasswordMutation.isPending}>确认重置</Button>
+            <Button onClick={() => setResetTarget(null)}>取消</Button>
+          </Space>
+        </Form>
+      </Modal>
     </div>
   );
 }

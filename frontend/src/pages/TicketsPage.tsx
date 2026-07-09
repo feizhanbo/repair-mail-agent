@@ -26,7 +26,7 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useState, type Key } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
@@ -46,7 +46,7 @@ import type {
   TicketDetail,
   TicketLine,
 } from '../types/api';
-import { compactFilters, filtersWithDateRange } from '../utils/filters';
+import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
 import { hasAnyRole } from '../utils/roles';
@@ -110,6 +110,7 @@ const lockOptions = [
 export default function TicketsPage() {
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
+  const [selectedTicketKeys, setSelectedTicketKeys] = useState<Key[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [transitionOpen, setTransitionOpen] = useState(false);
   const [fieldOpen, setFieldOpen] = useState(false);
@@ -216,8 +217,8 @@ export default function TicketsPage() {
     onError: handleMutationError,
   });
   const exportMutation = useMutation({
-    mutationFn: () => api.exportTickets(compactFilters(filters)),
-    onSuccess: (blob) => saveBlob(blob, 'tickets-export.xlsx'),
+    mutationFn: () => api.exportSelectedTickets(selectedTicketKeys.map(Number)),
+    onSuccess: (blob) => saveBlob(blob, 'tickets-selected-export.xlsx'),
     onError: handleMutationError,
   });
 
@@ -242,8 +243,8 @@ export default function TicketsPage() {
       <PageTitle
         title="工单中心"
         extra={(
-          <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
-            导出
+          <Button icon={<DownloadOutlined />} disabled={!selectedTicketKeys.length} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
+            导出已选{selectedTicketKeys.length ? `(${selectedTicketKeys.length})` : ''}
           </Button>
         )}
       />
@@ -255,6 +256,7 @@ export default function TicketsPage() {
           onFinish={(values) => {
             setPage(1);
             setSelectedId(null);
+            setSelectedTicketKeys([]);
             setFilters(filtersWithDateRange(values, 'date_range', 'request_date_start', 'request_date_end'));
           }}
         >
@@ -291,6 +293,7 @@ export default function TicketsPage() {
                 filterForm.resetFields();
                 setPage(1);
                 setSelectedId(null);
+                setSelectedTicketKeys([]);
                 setFilters({});
               }}
             >
@@ -304,7 +307,17 @@ export default function TicketsPage() {
           dataSource={ticketsQuery.data?.items ?? []}
           loading={ticketsQuery.isFetching}
           locale={{ emptyText: ticketsQuery.isError ? '工单加载失败' : '暂无工单' }}
-          pagination={{ current: page, pageSize: 20, total: ticketsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
+          rowSelection={{ selectedRowKeys: selectedTicketKeys, onChange: setSelectedTicketKeys }}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total: ticketsQuery.data?.total ?? 0,
+            onChange: (nextPage) => {
+              setPage(nextPage);
+              setSelectedTicketKeys([]);
+            },
+            showSizeChanger: false,
+          }}
         />
       </SectionPanel>
       <Drawer

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,15 +14,16 @@ from app.core.response import ok
 from app.models import AiCallLog, Email, ManualReviewTask, OperationLog, RepairTicket, ReplyRecord, User
 
 router = APIRouter()
+BUSINESS_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _default_range(period: str) -> tuple[date, date]:
-    today = datetime.utcnow().date()
+    today = datetime.now(BUSINESS_TZ).date()
     if period == "year":
-        return today - timedelta(days=365), today
+        return date(today.year, 1, 1), today
     if period == "month":
-        return today - timedelta(days=30), today
-    return today - timedelta(days=7), today
+        return date(today.year, today.month, 1), today
+    return today - timedelta(days=today.weekday()), today
 
 
 def _in_range(column, start_date: date, end_date: date):
@@ -42,7 +43,10 @@ async def statistics_summary(
     end_date: date | None = None,
 ) -> dict:
     del current_user
-    range_start, range_end = (start_date, end_date) if start_date and end_date else _default_range(period)
+    is_custom_range = bool(start_date and end_date)
+    range_start, range_end = (start_date, end_date) if is_custom_range else _default_range(period)
+    if range_start > range_end:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="STATISTICS_DATE_RANGE_INVALID")
 
     email_count = await _count(session, select(func.count()).select_from(Email).where(*_in_range(Email.created_at, range_start, range_end)))
     ticket_count = await _count(session, select(func.count()).select_from(RepairTicket).where(*_in_range(RepairTicket.created_at, range_start, range_end)))
@@ -64,14 +68,14 @@ async def statistics_summary(
         session,
         select(func.count())
         .select_from(AiCallLog)
-        .where(*_in_range(AiCallLog.created_at, range_start, range_end), AiCallLog.status.in_(("success", "low_confidence"))),
+        .where(*_in_range(AiCallLog.created_at, range_start, range_end), AiCallLog.status == "success"),
     )
     reply_total = await _count(session, select(func.count()).select_from(ReplyRecord).where(*_in_range(ReplyRecord.created_at, range_start, range_end)))
     auto_reply_total = await _count(
         session,
         select(func.count())
         .select_from(ReplyRecord)
-        .where(*_in_range(ReplyRecord.created_at, range_start, range_end), ReplyRecord.generate_source.in_(("ai", "template"))),
+        .where(*_in_range(ReplyRecord.sent_at, range_start, range_end), ReplyRecord.review_status == "auto_approved", ReplyRecord.send_status == "sent"),
     )
     manual_task_total = await _count(
         session,
@@ -107,27 +111,17 @@ async def statistics_summary(
         )
     ).all()
 
-    trend: dict[str, dict[str, int]] = defaultdict(lambda: {"emails": 0, "tickets": 0, "completed": 0})
-    day = range_start
-    while day <= range_end:
-        trend[day.isoformat()]
-        day += timedelta(days=1)
-    email_dates = (await session.execute(select(Email.created_at).where(*_in_range(Email.created_at, range_start, range_end)))).scalars().all()
-    for value in email_dates:
-        trend[value.date().isoformat()]["emails"] += 1
-    ticket_dates = (await session.execute(select(RepairTicket.created_at).where(*_in_range(RepairTicket.created_at, range_start, range_end)))).scalars().all()
-    for value in ticket_dates:
-        trend[value.date().isoformat()]["tickets"] += 1
-    completed_dates = (
-        await session.execute(
-            select(RepairTicket.updated_at).where(
-                *_in_range(RepairTicket.updated_at, range_start, range_end),
-                RepairTicket.current_status_code.in_(("ready_for_export", "closed")),
-            )
-        )
-    ).scalars().all()
-    for value in completed_dates:
-        trend[value.date().isoformat()]["completed"] += 1
+    trend = [
+        {
+            "label": "自定义区间" if is_custom_range else {"week": "本周", "month": "本月", "year": "本年"}.get(period, "自定义区间"),
+            "start_date": range_start.isoformat(),
+            "end_date": range_end.isoformat(),
+            "email_count": email_count,
+            "ticket_count": ticket_count,
+            "completed_count": completed_count,
+            "reparse_count": reparse_count,
+        }
+    ]
 
     return ok(
         {
@@ -153,6 +147,6 @@ async def statistics_summary(
                 {"user_id": row[0], "real_name": row[1], "username": row[2], "resolved_count": int(row[3] or 0)}
                 for row in user_rows
             ],
-            "trend": [{"date": key, **value} for key, value in sorted(trend.items())],
+            "trend": trend,
         }
     )

@@ -3,15 +3,15 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
-from app.models import ReplyTemplate, WorkflowStatus, WorkflowTransition
-from app.schemas.business import ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
+from app.models import ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
+from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
 from app.services.common import model_to_dict
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 
@@ -129,6 +129,25 @@ async def list_reply_templates(
     return ok([_reply_template_payload(row) for row in rows])
 
 
+@router.post("/reply-templates")
+async def create_reply_template(
+    payload: ReplyTemplateCreateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    values = payload.model_dump()
+    exists = await session.scalar(
+        select(ReplyTemplate).where(ReplyTemplate.template_code == values["template_code"], ReplyTemplate.version == values["version"])
+    )
+    if exists is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_ALREADY_EXISTS")
+    template = ReplyTemplate(**values, created_by_user_id=current_user.id)
+    session.add(template)
+    await session.commit()
+    await session.refresh(template)
+    return ok(_reply_template_payload(template), "reply template created")
+
+
 @router.patch("/reply-templates/{template_id}")
 async def update_reply_template(
     template_id: int,
@@ -146,3 +165,22 @@ async def update_reply_template(
     await session.commit()
     await session.refresh(template)
     return ok(_reply_template_payload(template), "reply template updated")
+
+
+@router.delete("/reply-templates/{template_id}")
+async def delete_reply_template(
+    template_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    del current_user
+    template = await session.get(ReplyTemplate, template_id)
+    if template is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_TEMPLATE_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(ReplyRecord).where(ReplyRecord.template_id == template.id)) or 0)
+    if references:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_IN_USE")
+    payload = _reply_template_payload(template)
+    await session.delete(template)
+    await session.commit()
+    return ok({"deleted": True, "template": payload}, "reply template deleted")

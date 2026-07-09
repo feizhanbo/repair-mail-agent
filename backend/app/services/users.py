@@ -238,6 +238,10 @@ async def update_user_status(session: AsyncSession, *, user_id: int, user_status
 
 
 async def reset_user_password(session: AsyncSession, *, user_id: int, password: str, operator_user_id: int) -> dict[str, Any]:
+    if not password.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="USER_PASSWORD_REQUIRED")
+    if len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="USER_PASSWORD_TOO_LONG")
     user = await get_user(session, user_id)
     user.password_hash = hash_password(password)
     await log_operation(

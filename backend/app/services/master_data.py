@@ -275,6 +275,41 @@ def _xlsx_with_openpyxl(rows: list[dict[str, Any]], fieldnames: list[str]) -> by
     return buffer.getvalue()
 
 
+def _sheet_title(value: str, used: set[str]) -> str:
+    title = re.sub(r"[\[\]\:\*\?\/\\]", "_", value).strip() or "sheet"
+    title = title[:31]
+    candidate = title
+    index = 2
+    while candidate in used:
+        suffix = f"_{index}"
+        candidate = f"{title[:31 - len(suffix)]}{suffix}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+def _xlsx_workbook_with_openpyxl(sheets: list[tuple[str, list[dict[str, Any]], list[str]]]) -> bytes | None:
+    try:
+        from openpyxl import Workbook  # type: ignore
+    except ModuleNotFoundError:
+        return None
+
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    used: set[str] = set()
+    for title, rows, fieldnames in sheets:
+        sheet = workbook.create_sheet(_sheet_title(title, used))
+        sheet.append(fieldnames)
+        for row in rows:
+            sheet.append([_string_value(row.get(field)) for field in fieldnames])
+        for column_cells in sheet.columns:
+            max_length = max(len(_string_value(cell.value)) for cell in column_cells)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 50)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def _column_name(index: int) -> str:
     name = ""
     while index:
@@ -340,8 +375,84 @@ def _xlsx_fallback(rows: list[dict[str, Any]], fieldnames: list[str]) -> bytes:
     return buffer.getvalue()
 
 
+def _xlsx_workbook_fallback(sheets: list[tuple[str, list[dict[str, Any]], list[str]]]) -> bytes:
+    worksheets: list[str] = []
+    sheet_entries: list[str] = []
+    relationship_entries: list[str] = []
+    content_type_entries: list[str] = []
+    used: set[str] = set()
+    for sheet_index, (title, rows, fieldnames) in enumerate(sheets, start=1):
+        def cell(row_index: int, column_index: int, value: Any) -> str:
+            text = html.escape(_string_value(value), quote=False)
+            ref = f"{_column_name(column_index)}{row_index}"
+            return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+
+        sheet_rows: list[str] = []
+        all_rows = [dict(zip(fieldnames, fieldnames))] + rows
+        for row_index, row in enumerate(all_rows, start=1):
+            cells = "".join(cell(row_index, column_index, row.get(field)) for column_index, field in enumerate(fieldnames, start=1))
+            sheet_rows.append(f'<row r="{row_index}">{cells}</row>')
+        worksheets.append(
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"<sheetData>{''.join(sheet_rows)}</sheetData>"
+            "</worksheet>"
+        )
+        sheet_name = html.escape(_sheet_title(title, used), quote=True)
+        sheet_entries.append(f'<sheet name="{sheet_name}" sheetId="{sheet_index}" r:id="rId{sheet_index}"/>')
+        relationship_entries.append(
+            f'<Relationship Id="rId{sheet_index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            f'Target="worksheets/sheet{sheet_index}.xml"/>'
+        )
+        content_type_entries.append(
+            f'<Override PartName="/xl/worksheets/sheet{sheet_index}.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"<sheets>{''.join(sheet_entries)}</sheets></workbook>"
+    )
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{''.join(relationship_entries)}</Relationships>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/></Relationships>'
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        f"{''.join(content_type_entries)}</Types>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        for index, worksheet in enumerate(worksheets, start=1):
+            archive.writestr(f"xl/worksheets/sheet{index}.xml", worksheet)
+    return buffer.getvalue()
+
+
 def xlsx_bytes(rows: list[dict[str, Any]], fieldnames: list[str]) -> bytes:
     return _xlsx_with_openpyxl(rows, fieldnames) or _xlsx_fallback(rows, fieldnames)
+
+
+def xlsx_workbook_bytes(sheets: list[tuple[str, list[dict[str, Any]], list[str]]]) -> bytes:
+    if not sheets:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
+    return _xlsx_workbook_with_openpyxl(sheets) or _xlsx_workbook_fallback(sheets)
 
 
 def _read_xlsx_with_openpyxl(content: bytes) -> list[dict[str, Any]] | None:
@@ -647,6 +758,13 @@ async def export_sn_assets(
     return xlsx_bytes([model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
 
 
+async def export_sn_assets_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
+    if not ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
+    rows = (await session.execute(select(SnAsset).where(SnAsset.id.in_(ids)).order_by(SnAsset.id))).scalars().all()
+    return xlsx_bytes([model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
+
+
 async def export_board_cards(
     session: AsyncSession,
     *,
@@ -659,4 +777,11 @@ async def export_board_cards(
         BoardCard.updated_at.desc(), BoardCard.id.desc()
     )
     rows = (await session.execute(statement)).scalars().all()
+    return xlsx_bytes([model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))
+
+
+async def export_board_cards_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
+    if not ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
+    rows = (await session.execute(select(BoardCard).where(BoardCard.id.in_(ids)).order_by(BoardCard.id))).scalars().all()
     return xlsx_bytes([model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 from collections.abc import AsyncGenerator
 from datetime import date
+from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -91,7 +93,9 @@ def test_expected_business_routes_are_registered() -> None:
     assert "GET /api/v1/system/config" in routes
     assert "PATCH /api/v1/system/config" in routes
     assert "GET /api/v1/system/reply-templates" in routes
+    assert "POST /api/v1/system/reply-templates" in routes
     assert "PATCH /api/v1/system/reply-templates/{template_id}" in routes
+    assert "DELETE /api/v1/system/reply-templates/{template_id}" in routes
     assert "GET /api/v1/statistics/summary" in routes
     assert "GET /api/v1/users" in routes
     assert "DELETE /api/v1/users/{user_id}" in routes
@@ -99,11 +103,14 @@ def test_expected_business_routes_are_registered() -> None:
     assert "GET /api/v1/db-browser/tables" in routes
     assert "GET /api/v1/master-data/sn-assets/template" in routes
     assert "GET /api/v1/master-data/sn-assets/export" in routes
+    assert "POST /api/v1/master-data/sn-assets/export-selected" in routes
     assert "POST /api/v1/master-data/sn-assets/import-file" in routes
     assert "GET /api/v1/master-data/board-cards/template" in routes
     assert "GET /api/v1/master-data/board-cards/export" in routes
+    assert "POST /api/v1/master-data/board-cards/export-selected" in routes
     assert "POST /api/v1/master-data/board-cards/import-file" in routes
     assert "GET /api/v1/tickets/export" in routes
+    assert "POST /api/v1/tickets/export-selected" in routes
 
 
 def test_ticket_detail_success_contract(monkeypatch) -> None:
@@ -196,6 +203,24 @@ def test_ticket_export_returns_xlsx_blob(monkeypatch) -> None:
     assert seen["customer"] == "Acme"
 
 
+def test_ticket_selected_export_forwards_ids(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_export(_session, *, ids: list[int]):
+        seen["ids"] = ids
+        return b"PK-ticket-selected"
+
+    monkeypatch.setattr(ticket_service, "export_tickets_selected", fake_export)
+
+    with make_client() as client:
+        response = client.post("/api/v1/tickets/export-selected", json={"ids": [3, 8]})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert response.content.startswith(b"PK")
+    assert seen["ids"] == [3, 8]
+
+
 def test_http_exception_uses_unified_error_contract(monkeypatch) -> None:
     async def fake_detail(_session, _ticket_id: int):
         raise HTTPException(status_code=404, detail="TICKET_NOT_FOUND")
@@ -267,6 +292,25 @@ def test_delete_user_success_contract(monkeypatch) -> None:
     assert payload["success"] is True
     assert payload["data"]["deleted"] is True
     assert payload["data"]["user"]["username"] == "codex_operator_validation"
+
+
+def test_admin_can_reset_user_password(monkeypatch) -> None:
+    session = FakeSession()
+    seen = {}
+
+    async def fake_reset(_session, *, user_id: int, password: str, operator_user_id: int):
+        seen.update({"user_id": user_id, "password": password, "operator_user_id": operator_user_id})
+        return {"id": user_id, "username": "operator"}
+
+    monkeypatch.setattr(user_service, "reset_user_password", fake_reset)
+
+    with make_client(session, roles=["admin"]) as client:
+        response = client.post("/api/v1/users/12/reset-password", json={"password": "new-password-123"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert seen == {"user_id": 12, "password": "new-password-123", "operator_user_id": 7}
 
 
 def test_delete_user_reference_conflict_contract(monkeypatch) -> None:
@@ -466,8 +510,16 @@ def test_supervisor_statistics_summary_empty_contract() -> None:
     assert payload["data"]["email_count"] == 0
     assert payload["data"]["ticket_count"] == 0
     assert payload["data"]["ai_success_rate"] == 0
-    assert len(payload["data"]["trend"]) == 7
-    assert payload["data"]["trend"][0]["date"] == "2026-07-01"
+    assert len(payload["data"]["trend"]) == 1
+    assert payload["data"]["trend"][0] == {
+        "label": "自定义区间",
+        "start_date": "2026-07-01",
+        "end_date": "2026-07-07",
+        "email_count": 0,
+        "ticket_count": 0,
+        "completed_count": 0,
+        "reparse_count": 0,
+    }
     assert payload["data"]["manual_intervention_rate"] == 0
 
 
@@ -492,3 +544,34 @@ def test_master_data_filter_params_are_forwarded(monkeypatch) -> None:
     assert seen["material"] == "MAT"
     assert seen["asset_status"] == "valid"
     assert seen["keyword"] == "compat"
+
+
+def test_master_data_selected_export_forwards_ids(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_export(_session, *, ids: list[int]):
+        seen["ids"] = ids
+        return b"PK-sn-selected"
+
+    monkeypatch.setattr(master_data_service, "export_sn_assets_selected", fake_export)
+
+    with make_client(roles=["supervisor"]) as client:
+        response = client.post("/api/v1/master-data/sn-assets/export-selected", json={"ids": [1, 2, 5]})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert response.content.startswith(b"PK")
+    assert seen["ids"] == [1, 2, 5]
+
+
+def test_public_business_functions_are_not_duplicated() -> None:
+    service_names = {
+        "emails.py": "reparse_email",
+        "replies.py": "approve_reply",
+    }
+    services_dir = Path(__file__).resolve().parents[1] / "app" / "services"
+
+    for filename, function_name in service_names.items():
+        tree = ast.parse((services_dir / filename).read_text(encoding="utf-8"))
+        matches = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == function_name]
+        assert len(matches) == 1

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.schemas.business import BoardCardImportRequest, SnAssetImportRequest
+from app.schemas.business import BoardCardImportRequest, IdsRequest, SnAssetImportRequest
 from app.services import master_data as master_data_service
 
 router = APIRouter()
@@ -74,6 +74,21 @@ async def export_sn_assets(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="sn-assets-export.xlsx"'},
+    )
+
+
+@router.post("/sn-assets/export-selected")
+async def export_selected_sn_assets(
+    payload: IdsRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> Response:
+    del current_user
+    content = await master_data_service.export_sn_assets_selected(session, ids=payload.ids)
+    return Response(
+        content=content,
+        media_type=master_data_service.EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="sn-assets-selected-export.xlsx"'},
     )
 
 
@@ -168,6 +183,21 @@ async def export_board_cards(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="board-cards-export.xlsx"'},
+    )
+
+
+@router.post("/board-cards/export-selected")
+async def export_selected_board_cards(
+    payload: IdsRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> Response:
+    del current_user
+    content = await master_data_service.export_board_cards_selected(session, ids=payload.ids)
+    return Response(
+        content=content,
+        media_type=master_data_service.EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="board-cards-selected-export.xlsx"'},
     )
 
 

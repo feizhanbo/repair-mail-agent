@@ -50,10 +50,13 @@ export default function StatisticsPage() {
   ];
 
   const trendColumns: ColumnsType<StatisticsTrendItem> = [
-    { title: '日期', dataIndex: 'date' },
-    { title: '邮件数', dataIndex: 'emails', width: 120 },
-    { title: '工单数', dataIndex: 'tickets', width: 120 },
-    { title: '完成数', dataIndex: 'completed', width: 120 },
+    { title: '区间', dataIndex: 'label' },
+    { title: '开始日期', dataIndex: 'start_date', width: 120 },
+    { title: '结束日期', dataIndex: 'end_date', width: 120 },
+    { title: '邮件数', dataIndex: 'email_count', width: 120 },
+    { title: '工单数', dataIndex: 'ticket_count', width: 120 },
+    { title: '完成数', dataIndex: 'completed_count', width: 120 },
+    { title: '重解析次数', dataIndex: 'reparse_count', width: 130 },
   ];
   const userColumns: ColumnsType<UserProcessingStat> = [
     { title: '处理人', dataIndex: 'real_name', render: (_, record) => `${record.real_name}（${record.username}）` },
@@ -115,13 +118,13 @@ export default function StatisticsPage() {
       </Row>
       <SectionPanel>
         <div className="section-heading">
-          <Typography.Title level={4}>趋势数据</Typography.Title>
+          <Typography.Title level={4}>区间汇总</Typography.Title>
           <Typography.Text type="secondary">
             {data ? `${data.start_date} 至 ${data.end_date}` : '-'}
           </Typography.Text>
         </div>
         <Table<StatisticsTrendItem>
-          rowKey="date"
+          rowKey={(record) => `${record.start_date}-${record.end_date}`}
           loading={query.isFetching}
           columns={trendColumns}
           dataSource={data?.trend ?? []}

@@ -12,7 +12,7 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
-from app.schemas.business import ParseResultApplyRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
+from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
 from app.services.workflow import transition_ticket
@@ -101,6 +101,21 @@ async def export_tickets(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="tickets-export.xlsx"'},
+    )
+
+
+@router.post("/export-selected")
+async def export_selected_tickets(
+    payload: IdsRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> Response:
+    del current_user
+    content = await ticket_service.export_tickets_selected(session, ids=payload.ids)
+    return Response(
+        content=content,
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="tickets-selected-export.xlsx"'},
     )
 
 

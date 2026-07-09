@@ -1,3 +1,4 @@
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -18,7 +19,11 @@ type ConfigForm = {
 };
 
 type TemplateForm = {
+  template_code: string;
   template_name: string;
+  template_type: string;
+  language: string;
+  version: string;
   subject_template?: string | null;
   body_template: string;
   enabled: boolean;
@@ -29,6 +34,7 @@ export default function SystemPage() {
   const [configForm] = Form.useForm<ConfigForm>();
   const [templateForm] = Form.useForm<TemplateForm>();
   const [editingTemplate, setEditingTemplate] = useState<ReplyTemplate | null>(null);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const systemQuery = useQuery({
     queryKey: ['system-info'],
     queryFn: api.systemInfo,
@@ -51,11 +57,36 @@ export default function SystemPage() {
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const templateMutation = useMutation({
-    mutationFn: ({ id, values }: { id: number; values: TemplateForm }) => api.updateReplyTemplate(id, values),
+    mutationFn: ({ id, values }: { id: number; values: TemplateForm }) =>
+      api.updateReplyTemplate(id, {
+        template_name: values.template_name,
+        subject_template: values.subject_template,
+        body_template: values.body_template,
+        enabled: values.enabled,
+      }),
     onSuccess: () => {
       message.success('回复话术已保存');
       setEditingTemplate(null);
+      setTemplateModalOpen(false);
       templateForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: ['system-reply-templates'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const templateCreateMutation = useMutation({
+    mutationFn: (values: TemplateForm) => api.createReplyTemplate(values),
+    onSuccess: () => {
+      message.success('回复话术已新增');
+      setTemplateModalOpen(false);
+      templateForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: ['system-reply-templates'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const templateDeleteMutation = useMutation({
+    mutationFn: (id: number) => api.deleteReplyTemplate(id),
+    onSuccess: () => {
+      message.success('回复话术已删除');
       void queryClient.invalidateQueries({ queryKey: ['system-reply-templates'] });
     },
     onError: (error) => message.error(apiErrorMessage(error)),
@@ -99,22 +130,44 @@ export default function SystemPage() {
     { title: '更新时间', dataIndex: 'updated_at', width: 160, render: formatTime },
     {
       title: '操作',
-      width: 90,
+      width: 170,
       render: (_, record) => (
-        <Button
-          size="small"
-          onClick={() => {
-            setEditingTemplate(record);
-            templateForm.setFieldsValue({
-              template_name: record.template_name,
-              subject_template: record.subject_template ?? undefined,
-              body_template: record.body_template,
-              enabled: record.enabled,
-            });
-          }}
-        >
-          编辑
-        </Button>
+        <Space>
+          <Button
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => {
+              setEditingTemplate(record);
+              templateForm.setFieldsValue({
+                template_code: record.template_code,
+                template_name: record.template_name,
+                template_type: record.template_type,
+                language: record.language,
+                version: record.version,
+                subject_template: record.subject_template ?? undefined,
+                body_template: record.body_template,
+                enabled: record.enabled,
+              });
+              setTemplateModalOpen(true);
+            }}
+          >
+            编辑
+          </Button>
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => Modal.confirm({
+              title: '确认删除该回复话术？',
+              content: '已被回复记录使用的话术不能删除，请改为停用。',
+              okText: '删除',
+              okButtonProps: { danger: true },
+              onOk: () => templateDeleteMutation.mutateAsync(record.id),
+            })}
+          >
+            删除
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -167,6 +220,18 @@ export default function SystemPage() {
       <SectionPanel>
         <div className="section-heading">
           <Typography.Title level={4}>回复话术</Typography.Title>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              setEditingTemplate(null);
+              templateForm.resetFields();
+              templateForm.setFieldsValue({ language: 'zh-CN', version: '1', enabled: true });
+              setTemplateModalOpen(true);
+            }}
+          >
+            新增话术
+          </Button>
         </div>
         <Table<ReplyTemplate>
           rowKey="id"
@@ -222,16 +287,42 @@ export default function SystemPage() {
           size="middle"
         />
       </SectionPanel>
-      <Modal title="编辑回复话术" open={Boolean(editingTemplate)} onCancel={() => setEditingTemplate(null)} footer={null} destroyOnClose>
-        {editingTemplate ? (
+      <Modal
+        title={editingTemplate ? '编辑回复话术' : '新增回复话术'}
+        open={templateModalOpen}
+        onCancel={() => {
+          setTemplateModalOpen(false);
+          setEditingTemplate(null);
+        }}
+        footer={null}
+        destroyOnClose
+      >
+        {templateModalOpen ? (
           <Form<TemplateForm>
             form={templateForm}
             layout="vertical"
-            onFinish={(values) => templateMutation.mutate({ id: editingTemplate.id, values })}
+            onFinish={(values) => {
+              if (editingTemplate) templateMutation.mutate({ id: editingTemplate.id, values });
+              else templateCreateMutation.mutate(values);
+            }}
           >
+            <Form.Item label="编码" name="template_code" rules={[{ required: true }]}>
+              <Input disabled={Boolean(editingTemplate)} />
+            </Form.Item>
             <Form.Item label="名称" name="template_name" rules={[{ required: true }]}>
               <Input />
             </Form.Item>
+            <Form.Item label="类型" name="template_type" rules={[{ required: true }]}>
+              <Input disabled={Boolean(editingTemplate)} />
+            </Form.Item>
+            <div className="two-column-grid">
+              <Form.Item label="语言" name="language" rules={[{ required: true }]}>
+                <Input disabled={Boolean(editingTemplate)} />
+              </Form.Item>
+              <Form.Item label="版本" name="version" rules={[{ required: true }]}>
+                <Input disabled={Boolean(editingTemplate)} />
+              </Form.Item>
+            </div>
             <Form.Item label="主题模板" name="subject_template">
               <Input />
             </Form.Item>
@@ -242,8 +333,11 @@ export default function SystemPage() {
               <Switch />
             </Form.Item>
             <Space>
-              <Button type="primary" htmlType="submit" loading={templateMutation.isPending}>保存</Button>
-              <Button onClick={() => setEditingTemplate(null)}>取消</Button>
+              <Button type="primary" htmlType="submit" loading={templateMutation.isPending || templateCreateMutation.isPending}>保存</Button>
+              <Button onClick={() => {
+                setTemplateModalOpen(false);
+                setEditingTemplate(null);
+              }}>取消</Button>
             </Space>
           </Form>
         ) : null}

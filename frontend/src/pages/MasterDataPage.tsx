@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Form, Input, Select, Space, Table, Tabs, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type Key } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -34,6 +34,8 @@ export default function MasterDataPage() {
   const [page, setPage] = useState(1);
   const [snFilters, setSnFilters] = useState<Record<string, unknown>>({});
   const [boardFilters, setBoardFilters] = useState<Record<string, unknown>>({});
+  const [selectedSnKeys, setSelectedSnKeys] = useState<Key[]>([]);
+  const [selectedBoardKeys, setSelectedBoardKeys] = useState<Key[]>([]);
   const [snFilterForm] = Form.useForm<SnFilters>();
   const [boardFilterForm] = Form.useForm<BoardFilters>();
   const queryClient = useQueryClient();
@@ -58,10 +60,10 @@ export default function MasterDataPage() {
   const exportMutation = useMutation({
     mutationFn: () => (
       activeTab === 'sn'
-        ? api.exportSnAssets(snFilters)
-        : api.exportBoardCards(boardFilters)
+        ? api.exportSelectedSnAssets(selectedSnKeys.map(Number))
+        : api.exportSelectedBoardCards(selectedBoardKeys.map(Number))
     ),
-    onSuccess: (blob) => saveBlob(blob, activeTab === 'sn' ? 'sn-assets-export.xlsx' : 'board-cards-export.xlsx'),
+    onSuccess: (blob) => saveBlob(blob, activeTab === 'sn' ? 'sn-assets-selected-export.xlsx' : 'board-cards-selected-export.xlsx'),
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const importFileMutation = useMutation({
@@ -104,6 +106,7 @@ export default function MasterDataPage() {
     ],
     [],
   );
+  const selectedCount = activeTab === 'sn' ? selectedSnKeys.length : selectedBoardKeys.length;
 
   return (
     <div className="page-stack">
@@ -114,8 +117,13 @@ export default function MasterDataPage() {
             <Button icon={<DownloadOutlined />} loading={templateMutation.isPending} onClick={() => templateMutation.mutate()}>
               模板
             </Button>
-            <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
-              导出
+            <Button
+              icon={<DownloadOutlined />}
+              loading={exportMutation.isPending}
+              disabled={selectedCount === 0}
+              onClick={() => exportMutation.mutate()}
+            >
+              导出已选{selectedCount ? `(${selectedCount})` : ''}
             </Button>
             {canImport ? (
               <Upload {...uploadProps}>
@@ -133,6 +141,8 @@ export default function MasterDataPage() {
           onChange={(key) => {
             setActiveTab(key as ImportKind);
             setPage(1);
+            setSelectedSnKeys([]);
+            setSelectedBoardKeys([]);
           }}
           items={[
             {
@@ -147,6 +157,7 @@ export default function MasterDataPage() {
                     onFinish={(values) => {
                       setPage(1);
                       setSnFilters(compactFilters(values));
+                      setSelectedSnKeys([]);
                     }}
                   >
                     <Form.Item name="sn">
@@ -173,6 +184,7 @@ export default function MasterDataPage() {
                           snFilterForm.resetFields();
                           setPage(1);
                           setSnFilters({});
+                          setSelectedSnKeys([]);
                         }}
                       >
                         重置
@@ -184,8 +196,21 @@ export default function MasterDataPage() {
                     columns={snColumns}
                     dataSource={snQuery.data?.items ?? []}
                     loading={snQuery.isFetching}
+                    rowSelection={{
+                      selectedRowKeys: selectedSnKeys,
+                      onChange: setSelectedSnKeys,
+                    }}
                     locale={{ emptyText: snQuery.isError ? 'SN 资产加载失败' : '暂无 SN 资产' }}
-                    pagination={{ current: page, pageSize: 20, total: snQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
+                    pagination={{
+                      current: page,
+                      pageSize: 20,
+                      total: snQuery.data?.total ?? 0,
+                      onChange: (nextPage) => {
+                        setPage(nextPage);
+                        setSelectedSnKeys([]);
+                      },
+                      showSizeChanger: false,
+                    }}
                   />
                 </div>
               ),
@@ -202,6 +227,7 @@ export default function MasterDataPage() {
                     onFinish={(values) => {
                       setPage(1);
                       setBoardFilters(compactFilters(values));
+                      setSelectedBoardKeys([]);
                     }}
                   >
                     <Form.Item name="material_code">
@@ -225,6 +251,7 @@ export default function MasterDataPage() {
                           boardFilterForm.resetFields();
                           setPage(1);
                           setBoardFilters({});
+                          setSelectedBoardKeys([]);
                         }}
                       >
                         重置
@@ -236,8 +263,21 @@ export default function MasterDataPage() {
                     columns={boardColumns}
                     dataSource={boardQuery.data?.items ?? []}
                     loading={boardQuery.isFetching}
+                    rowSelection={{
+                      selectedRowKeys: selectedBoardKeys,
+                      onChange: setSelectedBoardKeys,
+                    }}
                     locale={{ emptyText: boardQuery.isError ? '板卡规则加载失败' : '暂无板卡规则' }}
-                    pagination={{ current: page, pageSize: 20, total: boardQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
+                    pagination={{
+                      current: page,
+                      pageSize: 20,
+                      total: boardQuery.data?.total ?? 0,
+                      onChange: (nextPage) => {
+                        setPage(nextPage);
+                        setSelectedBoardKeys([]);
+                      },
+                      showSizeChanger: false,
+                    }}
                   />
                 </div>
               ),

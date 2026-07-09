@@ -5,6 +5,7 @@ import {
   MailOutlined,
   RobotOutlined,
   TeamOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import { Col, Row, Table, Typography } from 'antd';
@@ -36,7 +37,9 @@ export default function Dashboard() {
   const summary = summaryQuery.data;
   const metrics = [
     { label: '待解析邮件', value: summary?.pending_parse ?? 0, icon: <MailOutlined />, tone: 'blue', path: '/emails' },
-    { label: '人工复核工单', value: summary?.manual_review ?? 0, icon: <TeamOutlined />, tone: 'orange', path: '/manual-review' },
+    { label: '任务池总数', value: summary?.task_pool_total ?? summary?.manual_review_tasks ?? 0, icon: <TeamOutlined />, tone: 'orange', path: '/manual-review' },
+    { label: '我的待处理', value: summary?.current_user_pending_tasks ?? 0, icon: <UserOutlined />, tone: 'cyan', path: '/manual-review?scope=mine' },
+    { label: '我的处理中', value: summary?.in_progress_tasks ?? 0, icon: <ClockCircleOutlined />, tone: 'blue', path: '/manual-review?scope=mine&status=claimed' },
     { label: '待客户补充', value: summary?.need_customer_info ?? 0, icon: <ClockCircleOutlined />, tone: 'gold', path: '/tickets' },
     { label: '可导出工单', value: summary?.ready_for_export ?? 0, icon: <CheckCircleOutlined />, tone: 'green', path: '/tickets' },
     { label: '异常工单', value: summary?.error ?? 0, icon: <AlertOutlined />, tone: 'red', path: '/tickets' },

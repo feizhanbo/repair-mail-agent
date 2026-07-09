@@ -522,10 +522,13 @@ export type ReplyTemplate = {
 };
 
 export type StatisticsTrendItem = {
-  date: string;
-  emails: number;
-  tickets: number;
-  completed: number;
+  label: string;
+  start_date: string;
+  end_date: string;
+  email_count: number;
+  ticket_count: number;
+  completed_count: number;
+  reparse_count: number;
 };
 
 export type UserProcessingStat = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid, parseaddr
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email, ReplyRecord, ReplyTemplate, RepairTicket
+from app.models import Email, EmailTicketLink, ReplyRecord, ReplyTemplate, RepairTicket
 from app.services.ai import generate_ai_reply_draft
 from app.services.audit import log_operation
 from app.services.common import model_to_dict, utcnow
@@ -152,6 +153,52 @@ def _send_reply_via_smtp(reply: ReplyRecord) -> tuple[bool, str | None, str | No
     return True, message_id, None
 
 
+async def _archive_outbound_email(
+    session: AsyncSession,
+    *,
+    reply: ReplyRecord,
+    ticket: RepairTicket,
+    smtp_message_id: str,
+) -> Email:
+    existing = await session.scalar(select(Email).where(Email.message_id == smtp_message_id))
+    if existing is not None:
+        reply.outgoing_email_id = existing.id
+        return existing
+    body = reply.final_body or reply.draft_body or ""
+    email = Email(
+        thread_id=ticket.thread_id,
+        mail_direction="outbound",
+        mailbox_account=settings.SMTP_USER or "system",
+        folder_name="sent",
+        message_id=smtp_message_id,
+        message_id_hash=hashlib.sha256(smtp_message_id.encode("utf-8")).hexdigest(),
+        in_reply_to=reply.in_reply_to,
+        references_header=reply.references_header,
+        raw_headers={"generated_by": "reply_record", "reply_id": reply.id},
+        from_address=settings.SMTP_USER or "system@repair.local",
+        to_addresses=reply.to_addresses,
+        cc_addresses=reply.cc_addresses,
+        subject=reply.subject,
+        normalized_subject=reply.subject,
+        sent_at=reply.sent_at,
+        received_at=reply.sent_at,
+        text_body=body,
+        clean_body=body,
+        latest_reply_segment=body,
+        parse_status="sent",
+        intent_type="outbound_reply",
+    )
+    session.add(email)
+    await session.flush()
+    reply.outgoing_email_id = email.id
+    linked = await session.scalar(
+        select(EmailTicketLink).where(EmailTicketLink.email_id == email.id, EmailTicketLink.ticket_id == ticket.id, EmailTicketLink.link_type == "outbound")
+    )
+    if linked is None:
+        session.add(EmailTicketLink(email_id=email.id, ticket_id=ticket.id, link_type="outbound", link_reason="reply sent"))
+    return email
+
+
 async def list_replies(
     session: AsyncSession,
     *,
@@ -196,6 +243,9 @@ async def _send_reply_record(
         reply.smtp_message_id = smtp_message_id
         reply.sent_at = utcnow()
         reply.error_message = None
+        ticket = await get_ticket(session, reply.ticket_id)
+        if smtp_message_id:
+            await _archive_outbound_email(session, reply=reply, ticket=ticket, smtp_message_id=smtp_message_id)
     else:
         reply.send_status = "send_failed"
         reply.error_message = error
@@ -371,28 +421,6 @@ async def update_reply(session: AsyncSession, *, reply_id: int, user_id: int, va
             after_data=changed,
         )
     return serialize_reply(reply)
-
-
-async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -> dict[str, Any]:
-    reply = await get_reply(session, reply_id)
-    reply.review_status = "approved"
-    reply.reviewed_by_user_id = user_id
-    reply.reviewed_at = utcnow()
-    if settings.AUTO_SEND_ENABLED:
-        reply.send_status = "pending"
-        reply.error_message = "SMTP 真实发送接入预留，当前未执行外发。"
-    else:
-        reply.send_status = "send_disabled"
-        reply.error_message = "AUTO_SEND_ENABLED=false，已审核但未真实发送。"
-    await log_operation(
-        session,
-        user_id=user_id,
-        operation_type="reply_approved",
-        target_type="reply_record",
-        target_id=reply.id,
-        after_data={"send_status": reply.send_status, "auto_send_enabled": settings.AUTO_SEND_ENABLED},
-    )
-    return {"reply": serialize_reply(reply), "auto_send_enabled": settings.AUTO_SEND_ENABLED}
 
 
 async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -> dict[str, Any]:

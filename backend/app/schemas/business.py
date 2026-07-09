@@ -170,6 +170,21 @@ class SystemConfigUpdateRequest(BaseModel):
     max_follow_up: int | None = Field(default=None, ge=1, le=10)
 
 
+class IdsRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class ReplyTemplateCreateRequest(BaseModel):
+    template_code: str = Field(min_length=1, max_length=100)
+    template_name: str = Field(min_length=1, max_length=100)
+    template_type: str = Field(min_length=1, max_length=50)
+    language: str = Field(default="zh-CN", min_length=1, max_length=20)
+    version: str = Field(default="1", min_length=1, max_length=30)
+    subject_template: str | None = Field(default=None, max_length=500)
+    body_template: str = Field(min_length=1)
+    enabled: bool = True
+
+
 class ReplyTemplateUpdateRequest(BaseModel):
     template_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_template: str | None = Field(default=None, max_length=500)
