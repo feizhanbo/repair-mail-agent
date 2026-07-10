@@ -143,11 +143,16 @@ def _send_reply_via_smtp(reply: ReplyRecord) -> tuple[bool, str | None, str | No
         message["References"] = reply.references_header
     message.set_content(reply.final_body or reply.draft_body or "")
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
-            if settings.SMTP_PORT == 587:
-                smtp.starttls()
-            smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            smtp.send_message(message)
+        if settings.SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
+                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
+                if settings.SMTP_PORT == 587:
+                    smtp.starttls()
+                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                smtp.send_message(message)
     except Exception:
         return False, None, "邮件发送失败，请检查邮箱发送配置后重试。"
     return True, message_id, None
@@ -280,6 +285,7 @@ async def create_reply_draft(
     missing_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
+    await session.refresh(ticket, attribute_names=["followup_count", "max_followup_count", "missing_fields", "source_email_id", "customer_name", "customer_code", "contact_person", "contact_email", "problem_description"])
     reply_kind = _infer_reply_type(ticket, reply_type)
     if reply_kind != "receipt" and ticket.followup_count >= ticket.max_followup_count:
         await transition_ticket(
@@ -392,6 +398,7 @@ async def create_reply_draft(
             "reply_send_mode": settings.REPLY_SEND_MODE,
         },
     )
+    await session.refresh(reply)
     return {"reply": serialize_reply(reply), "auto_send_enabled": settings.AUTO_SEND_ENABLED, "reply_send_mode": settings.REPLY_SEND_MODE}
 
 
@@ -420,6 +427,8 @@ async def update_reply(session: AsyncSession, *, reply_id: int, user_id: int, va
             target_id=reply.id,
             after_data=changed,
         )
+        await session.flush()
+        await session.refresh(reply)
     return serialize_reply(reply)
 
 
@@ -443,6 +452,8 @@ async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -
             "reply_send_mode": settings.REPLY_SEND_MODE,
         },
     )
+    await session.flush()
+    await session.refresh(reply)
     return {"reply": serialize_reply(reply), "auto_send_enabled": settings.AUTO_SEND_ENABLED, "reply_send_mode": settings.REPLY_SEND_MODE}
 
 
@@ -461,4 +472,6 @@ async def reject_reply(session: AsyncSession, *, reply_id: int, user_id: int, re
         target_id=reply.id,
         description=reason,
     )
+    await session.flush()
+    await session.refresh(reply)
     return serialize_reply(reply)

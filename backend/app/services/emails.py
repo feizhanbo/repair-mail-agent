@@ -8,7 +8,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email, EmailAttachment, EmailThread, ParseResult
+from app.models import Email, EmailAttachment, EmailThread, ParseResult, RepairTicket
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.audit import log_operation
@@ -155,7 +155,9 @@ async def ingest_email(
         from_domain=from_domain,
     )
     email = Email(
+        fetch_job_run_id=payload.fetch_job_run_id,
         thread_id=thread.id,
+        raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
         mail_direction="inbound",
         mailbox_account=payload.mailbox_account,
         folder_name=payload.folder_name,
@@ -192,6 +194,7 @@ async def ingest_email(
         session.add(
             EmailAttachment(
                 email_id=email.id,
+                oss_object_id=attachment_payload.get("oss_object_id"),
                 file_name=attachment_payload.get("file_name") or "attachment",
                 content_type=attachment_payload.get("content_type"),
                 file_size=attachment_payload.get("file_size"),
@@ -213,6 +216,7 @@ async def ingest_email(
         description=reason,
         after_data={"intent_type": intent_type, "classification_confidence": confidence},
     )
+    await session.refresh(email)
     result: dict[str, Any] = {"duplicate": False, "email": serialize_email(email), "classification": {"confidence": confidence, "reason": reason}}
     if auto_parse:
         result["parse"] = await reparse_email(session, email_id=email.id, user_id=user_id, reason="邮件入库后规则预解析并提交 AI 判断。")
@@ -424,6 +428,9 @@ async def reparse_email(
             parse_result=rule_parse,
         )
 
+    if isinstance(ai_parse, ParseResult):
+        await session.refresh(ai_parse)
+    await session.refresh(rule_parse)
     return {
         "parse_result": serialize_parse_result(rule_parse),
         "applied": None,

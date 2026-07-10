@@ -91,8 +91,9 @@ async def read_notification(
     if notification.recipient_user_id not in (None, current_user.id) and notification.recipient_role_code not in current_user.roles:
         return ok({}, "notification not found")
     await mark_notification_read(session, notification)
+    payload = model_to_dict(notification, NOTIFICATION_FIELDS)
     await session.commit()
-    return ok(model_to_dict(notification, NOTIFICATION_FIELDS), "notification read")
+    return ok(payload, "notification read")
 
 
 @router.get("/stream")

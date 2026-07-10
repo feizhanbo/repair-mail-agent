@@ -12,7 +12,7 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
-from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
+from app.schemas.business import IdsRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
 from app.services.workflow import transition_ticket
@@ -202,24 +202,6 @@ async def list_parse_results(
     await ticket_service.get_ticket(session, ticket_id)
     rows = (await session.execute(select(ParseResult).where(ParseResult.ticket_id == ticket_id).order_by(ParseResult.created_at.desc()))).scalars().all()
     return ok([ticket_service.serialize_parse_result(row) for row in rows])
-
-
-@router.post("/parse-results/{parse_result_id}/apply")
-async def apply_parse_result(
-    parse_result_id: int,
-    payload: ParseResultApplyRequest,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
-) -> dict:
-    result = await ticket_service.apply_parse_result(
-        session,
-        parse_result_id=parse_result_id,
-        user_id=current_user.id,
-        reason=payload.reason,
-        action=payload.action,
-    )
-    await session.commit()
-    return ok(result, "parse result applied")
 
 
 @router.get("/{ticket_id}/email-timeline")

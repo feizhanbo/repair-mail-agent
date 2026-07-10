@@ -4,14 +4,18 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Self, TypeVar
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class AiProviderError(RuntimeError):
     """Raised when an AI provider call fails before a valid schema is returned."""
+
+    def __init__(self, message: str, raw_output: str | None = None) -> None:
+        super().__init__(message)
+        self.raw_output = raw_output
 
 
 class AiExtractResponse(BaseModel):
@@ -27,6 +31,69 @@ class AiExtractResponse(BaseModel):
     manual_review_direction: str | None = None
     original_evidence: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        fields = data.get("extracted_fields")
+        if isinstance(fields, dict):
+            if fields.get("applicant_email") and not fields.get("contact_email"):
+                fields["contact_email"] = fields["applicant_email"]
+            if fields.get("applicant_phone") and not fields.get("contact_phone"):
+                fields["contact_phone"] = fields["applicant_phone"]
+            if fields.get("applicant_name") and not fields.get("contact_person"):
+                fields["contact_person"] = fields["applicant_name"]
+            if fields.get("company") and not fields.get("customer_name"):
+                fields["customer_name"] = fields["company"]
+        elif fields is None or not isinstance(fields, dict):
+            data["extracted_fields"] = {}
+        missing = data.get("missing_fields")
+        if isinstance(missing, list):
+            data["missing_fields"] = {str(k): f"missing:{k}" for k in missing if k is not None}
+        elif missing is None or not isinstance(missing, dict):
+            data["missing_fields"] = {}
+        conflicts = data.get("conflict_fields")
+        if isinstance(conflicts, list):
+            data["conflict_fields"] = {str(k): f"conflict:{k}" for k in conflicts if k is not None}
+        elif conflicts is None or not isinstance(conflicts, dict):
+            data["conflict_fields"] = {}
+        evidence = data.get("evidence")
+        if isinstance(evidence, str):
+            data["evidence"] = {"summary": evidence}
+        elif evidence is None or not isinstance(evidence, dict):
+            data["evidence"] = {}
+        items = data.get("extracted_items")
+        if isinstance(items, dict):
+            items = [items]
+        if isinstance(items, list):
+            normalized_items: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                if row.get("item_type") and not row.get("material_name"):
+                    row["material_name"] = row["item_type"]
+                if row.get("fault_description") and not row.get("failure_description"):
+                    row["failure_description"] = row["fault_description"]
+                if row.get("fault") and not row.get("failure_description"):
+                    row["failure_description"] = row["fault"]
+                normalized_items.append(row)
+            data["extracted_items"] = normalized_items
+        elif items is None or not isinstance(items, list):
+            data["extracted_items"] = []
+        oe = data.get("original_evidence")
+        if isinstance(oe, str):
+            data["original_evidence"] = [oe]
+        elif oe is None or not isinstance(oe, list):
+            data["original_evidence"] = []
+        fc = data.get("field_confidences")
+        if isinstance(fc, dict):
+            data["field_confidences"] = {str(k): float(v) for k, v in fc.items() if v is not None}
+        elif fc is None or not isinstance(fc, dict):
+            data["field_confidences"] = {}
+        return data
+
 
 class AiReplyDraftResponse(BaseModel):
     subject: str = ""
@@ -35,6 +102,23 @@ class AiReplyDraftResponse(BaseModel):
     confidence_score: float = Field(default=0, ge=0, le=1)
     risk_level: str = "low"
     suggestions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        missing = data.get("missing_fields")
+        if isinstance(missing, list):
+            data["missing_fields"] = {str(k): f"missing:{k}" for k in missing if k is not None}
+        elif missing is None or not isinstance(missing, dict):
+            data["missing_fields"] = {}
+        suggestions = data.get("suggestions")
+        if isinstance(suggestions, str):
+            data["suggestions"] = [suggestions]
+        elif suggestions is None or not isinstance(suggestions, list):
+            data["suggestions"] = []
+        return data
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -112,9 +196,9 @@ class DeepSeekProvider:
             parsed_json = json.loads(output_text)
             parsed = response_model.model_validate(parsed_json)
         except json.JSONDecodeError as exc:
-            raise AiProviderError("AI_PROVIDER_OUTPUT_NOT_JSON") from exc
+            raise AiProviderError("AI_PROVIDER_OUTPUT_NOT_JSON", raw_output=output_text) from exc
         except ValidationError as exc:
-            raise AiProviderError("AI_PROVIDER_OUTPUT_SCHEMA_INVALID") from exc
+            raise AiProviderError("AI_PROVIDER_OUTPUT_SCHEMA_INVALID", raw_output=output_text) from exc
 
         return AiJsonCompletion(
             trace_id=trace_id,

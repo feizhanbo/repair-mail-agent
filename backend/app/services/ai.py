@@ -194,17 +194,18 @@ async def _run_ai_json(
         completion = await _provider().chat_json(messages=messages, response_model=response_model)
     except AiProviderError as exc:
         trace_id = sha256_text(f"{call_type}:{utcnow().isoformat()}")[:32]
+        raw_out = getattr(exc, "raw_output", None)
         ai_log = await _persist_ai_log(
             session,
             trace_id=trace_id,
             call_type=call_type,
             input_payload=input_payload,
             request_payload={"model": settings.AI_MODEL, "messages": messages, "response_format": {"type": "json_object"}},
-            output_payload=None,
+            output_payload={"error": str(exc), "raw_output": raw_out[:2000] if raw_out else None},
             parsed=None,
             latency_ms=None,
             input_summary=input_summary,
-            output_summary=None,
+            output_summary=(raw_out or str(exc))[:1000],
             email_id=email_id,
             ticket_id=ticket_id,
             error_message=str(exc),

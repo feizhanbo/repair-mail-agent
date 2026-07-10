@@ -12,6 +12,8 @@ class LoginRequest(BaseModel):
 
 
 class EmailIngestRequest(BaseModel):
+    fetch_job_run_id: int | None = None
+    raw_eml_oss_object_id: int | None = None
     mailbox_account: str = Field(default="manual", max_length=255)
     folder_name: str | None = Field(default="INBOX", max_length=255)
     imap_uid: str | None = Field(default=None, max_length=100)

@@ -111,7 +111,9 @@ ITEM_WRITE_FIELDS = {
 
 EMAIL_FIELDS = (
     "id",
+    "fetch_job_run_id",
     "thread_id",
+    "raw_eml_oss_object_id",
     "mail_direction",
     "mailbox_account",
     "folder_name",
@@ -763,6 +765,7 @@ async def ensure_manual_review_ticket_from_parse_result(
     parse_result.ticket_id = ticket.id
     parse_result.apply_status = "needs_manual_review"
     parse_result.error_message = reason
+    await _create_items_from_parse_result(session, ticket, parse_result, user_id=None)
     await _link_email_to_ticket(session, email=email, ticket=ticket, link_type="related", link_reason=reason)
     await create_manual_task_if_missing(
         session,

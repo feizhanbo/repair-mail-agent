@@ -9,6 +9,8 @@ import type {
   DatabaseTablesResponse,
   DashboardSummary,
   EmailDetail,
+  EmailFlowTrace,
+  EmailIngestResult,
   EmailIngestRequest,
   EmailItem,
   LoginRequest,
@@ -74,6 +76,9 @@ function friendlyServerMessage(status?: number, code?: string): string {
     XLSX_HEADER_REQUIRED: '导入文件缺少表头，请下载模板后重新填写',
     XLSX_VALIDATION_FAILED: '导入文件内容有误，请检查模板字段和日期格式',
     XLSX_INVALID_FILE: '导入文件无法读取，请上传 .xlsx 格式文件',
+    EML_FILE_REQUIRED: '请上传 .eml 邮件文件',
+    EML_FILE_EMPTY: '邮件文件为空，请重新选择',
+    EML_FROM_ADDRESS_REQUIRED: '邮件缺少发件人，请检查邮件文件',
   };
   if (code && messages[code]) return messages[code];
   if (code?.startsWith('ROLE_NOT_ALLOWED')) return '选择的角色不可用';
@@ -150,7 +155,16 @@ export const api = {
   dashboard: () => getData<DashboardSummary>('/dashboard/summary'),
   emails: (params: Record<string, unknown>) => getData<PageData<EmailItem>>('/emails', { params }),
   emailDetail: (id: number) => getData<EmailDetail>(`/emails/${id}`),
-  ingestEmail: (body: EmailIngestRequest) => postData('/emails/ingest', body),
+  emailFlowTrace: (id: number) => getData<EmailFlowTrace>(`/emails/${id}/flow-trace`),
+  ingestEmail: (body: EmailIngestRequest) => postData<EmailIngestResult, EmailIngestRequest>('/emails/ingest', body),
+  ingestEmlFile: (file: File, options?: { mailbox_account?: string; folder_name?: string; auto_parse?: boolean }) => {
+    const body = new FormData();
+    body.append('file', file);
+    body.append('mailbox_account', options?.mailbox_account ?? 'manual-eml');
+    body.append('folder_name', options?.folder_name ?? 'INBOX');
+    body.append('auto_parse', String(options?.auto_parse ?? true));
+    return postData<EmailIngestResult>('/emails/ingest-eml', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   reparseEmail: (id: number, body = { mode: 'field_extract' as const }) => postData(`/emails/${id}/reparse`, body),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),

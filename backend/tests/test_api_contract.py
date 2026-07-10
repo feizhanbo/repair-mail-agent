@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import CurrentUser, get_current_user
+from app.api.v1 import emails as emails_api
 from app.config import settings
 from app.core.database import get_session
 from app.main import app
@@ -85,7 +86,12 @@ def test_expected_business_routes_are_registered() -> None:
     routes = {f"{','.join(sorted(route.methods or []))} {route.path}" for route in app.routes}
     assert "POST /api/v1/auth/login" in routes
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
+    assert "POST /api/v1/emails/ingest-eml" in routes
+    assert "POST /api/v1/emails/fetch-now" in routes
+    assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
     assert "PATCH /api/v1/tickets/{ticket_id}/fields" in routes
+    assert "POST /api/v1/parse-results/{parse_result_id}/apply" in routes
+    assert "POST /api/v1/tickets/parse-results/{parse_result_id}/apply" not in routes
     assert "POST /api/v1/manual-review/tasks/{task_id}/reparse" in routes
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes
     assert "GET /api/v1/ai-logs" in routes
@@ -128,6 +134,101 @@ def test_ticket_detail_success_contract(monkeypatch) -> None:
     assert payload["data"]["ticket"]["id"] == 42
     assert payload["message"] == "ok"
     assert payload["request_id"].startswith("req_")
+
+
+def test_email_eml_ingest_forwards_uploaded_file(monkeypatch) -> None:
+    session = FakeSession()
+    seen = {}
+
+    def fake_payload(content: bytes, *, mailbox_account: str, folder_name: str | None):
+        seen["content"] = content
+        seen["mailbox_account"] = mailbox_account
+        seen["folder_name"] = folder_name
+        return {"from_address": "customer@example.com"}
+
+    async def fake_ingest(_session, *, payload, user_id: int, auto_parse: bool):
+        seen["payload"] = payload
+        seen["user_id"] = user_id
+        seen["auto_parse"] = auto_parse
+        return {"email": {"id": 33, "from_address": payload["from_address"]}}
+
+    monkeypatch.setattr(emails_api, "payload_from_eml_bytes", fake_payload)
+    monkeypatch.setattr(emails_api.email_service, "ingest_email", fake_ingest)
+
+    with make_client(session) as client:
+        response = client.post(
+            "/api/v1/emails/ingest-eml",
+            data={"mailbox_account": "qa-mailbox", "folder_name": "Archive", "auto_parse": "false"},
+            files={"file": ("sample.eml", b"From: customer@example.com\r\n\r\nbody", "message/rfc822")},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["email"]["id"] == 33
+    assert seen["content"].startswith(b"From:")
+    assert seen["mailbox_account"] == "qa-mailbox"
+    assert seen["folder_name"] == "Archive"
+    assert seen["user_id"] == 7
+    assert seen["auto_parse"] is False
+    assert session.committed is True
+
+
+def test_email_fetch_now_forwards_to_imap_service(monkeypatch) -> None:
+    session = FakeSession()
+    seen = {}
+
+    async def fake_fetch(_session, **kwargs):
+        seen.update(kwargs)
+        return {"job_id": 9, "processed_count": 1, "success_count": 1, "failed_count": 0, "fetched": [{"email_id": 33}], "failures": []}
+
+    monkeypatch.setattr(emails_api.imap_fetcher, "fetch_imap_emails", fake_fetch)
+
+    with make_client(session, roles=["supervisor"], user_id=8) as client:
+        response = client.post(
+            "/api/v1/emails/fetch-now",
+            params={
+                "folder_name": "INBOX",
+                "limit": 1,
+                "unseen_only": "false",
+                "message_id": "<sample@example.com>",
+                "auto_parse": "true",
+                "archive_to_oss": "true",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["job_id"] == 9
+    assert seen["folder_name"] == "INBOX"
+    assert seen["limit"] == 1
+    assert seen["unseen_only"] is False
+    assert seen["message_id"] == "<sample@example.com>"
+    assert seen["auto_parse"] is True
+    assert seen["archive_to_oss"] is True
+    assert seen["user_id"] == 8
+    assert session.committed is True
+
+
+def test_email_flow_trace_contract(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_trace(_session, *, email_id: int):
+        seen["email_id"] = email_id
+        return {"email_id": email_id, "tickets": [{"id": 9}], "manual_review_tasks": []}
+
+    monkeypatch.setattr(emails_api, "build_email_flow_trace", fake_trace)
+
+    with make_client() as client:
+        response = client.get("/api/v1/emails/33/flow-trace")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["email_id"] == 33
+    assert payload["data"]["tickets"][0]["id"] == 9
+    assert seen["email_id"] == 33
 
 
 def test_ticket_list_page_contract(monkeypatch) -> None:

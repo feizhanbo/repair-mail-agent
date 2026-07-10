@@ -173,6 +173,59 @@ export type EmailDetail = {
   parse_results: ParseResult[];
 };
 
+export type EmailIngestResult = {
+  duplicate: boolean;
+  email: EmailItem;
+  classification?: {
+    confidence?: number | string | null;
+    reason?: string | null;
+  };
+  parse?: JsonRecord | null;
+};
+
+export type EmailTicketLink = {
+  id: number;
+  email_id: number;
+  ticket_id: number;
+  link_type: string;
+  link_reason?: string | null;
+  linked_by_user_id?: number | null;
+  created_at?: string;
+};
+
+export type OperationLog = {
+  id: number;
+  user_id?: number | null;
+  operation_type: string;
+  target_type: string;
+  target_id?: number | null;
+  description?: string | null;
+  before_data?: JsonRecord | null;
+  after_data?: JsonRecord | null;
+  created_at?: string;
+};
+
+export type EmailFlowTrace = {
+  runtime_config: Pick<SystemConfig, 'auto_send_enabled' | 'reply_send_mode' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>;
+  ingest_result?: JsonRecord | null;
+  trace_only: boolean;
+  email: EmailItem;
+  email_id: number;
+  attachments: Attachment[];
+  email_ticket_links: EmailTicketLink[];
+  parse_results: ParseResult[];
+  tickets: Ticket[];
+  ticket_items: TicketLine[];
+  manual_review_tasks: ManualTask[];
+  reply_records: ReplyRecord[];
+  ai_call_logs: AiLog[];
+  notification_events: NotificationEvent[];
+  ticket_status_logs: StatusLog[];
+  field_audit_logs: FieldAuditLog[];
+  sn_validation_results: SnValidationResult[];
+  operation_logs: OperationLog[];
+};
+
 export type EmailIngestRequest = {
   mailbox_account?: string;
   folder_name?: string;
