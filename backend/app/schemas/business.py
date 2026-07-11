@@ -30,7 +30,6 @@ class EmailIngestRequest(BaseModel):
 
 
 class EmailReparseRequest(BaseModel):
-    mode: Literal["field_extract", "classification_and_extract"] = "field_extract"
     reason: str | None = Field(default=None, max_length=500)
 
 

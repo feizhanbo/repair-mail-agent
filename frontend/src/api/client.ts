@@ -150,8 +150,17 @@ export const api = {
   dashboard: () => getData<DashboardSummary>('/dashboard/summary'),
   emails: (params: Record<string, unknown>) => getData<PageData<EmailItem>>('/emails', { params }),
   emailDetail: (id: number) => getData<EmailDetail>(`/emails/${id}`),
-  ingestEmail: (body: EmailIngestRequest) => postData('/emails/ingest', body),
-  reparseEmail: (id: number, body = { mode: 'field_extract' as const }) => postData(`/emails/${id}/reparse`, body),
+  emailFlowTrace: (id: number) => getData<EmailFlowTrace>(`/emails/${id}/flow-trace`),
+  ingestEmail: (body: EmailIngestRequest) => postData<EmailIngestResult, EmailIngestRequest>('/emails/ingest', body),
+  ingestEmlFile: (file: File, options?: { mailbox_account?: string; folder_name?: string; auto_parse?: boolean }) => {
+    const body = new FormData();
+    body.append('file', file);
+    body.append('mailbox_account', options?.mailbox_account ?? 'manual-eml');
+    body.append('folder_name', options?.folder_name ?? 'INBOX');
+    body.append('auto_parse', String(options?.auto_parse ?? true));
+    return postData<EmailIngestResult>('/emails/ingest-eml', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  reparseEmail: (id: number, body: Record<string, unknown> = {}) => postData(`/emails/${id}/reparse`, body),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
   exportSelectedTickets: (ids: number[]) => apiClient.post<Blob, Blob>('/tickets/export-selected', { ids }, { responseType: 'blob' }),

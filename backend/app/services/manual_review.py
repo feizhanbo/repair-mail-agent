@@ -308,7 +308,6 @@ async def reparse_task(
         session,
         email_id=email_id,
         user_id=user_id,
-        mode=mode,
         reason=reason or f"manual review task {task.id} triggered reparse",
     )
     await log_operation(

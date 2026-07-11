@@ -153,6 +153,12 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "trigger_event": "export_completed",
         "condition_desc": "导出或下游同步完成。",
     },
+    {
+        "from_status_code": "ready_for_export",
+        "to_status_code": "closed",
+        "trigger_event": "customer_receipt_confirmed",
+        "condition_desc": "客户确认收到维修后设备，自动关单。",
+    },
 )
 
 

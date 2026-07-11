@@ -25,7 +25,7 @@ from app.models import (
     SnValidationResult,
     TicketStatusLog,
 )
-from app.services.audit import log_operation
+from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
@@ -951,6 +951,17 @@ async def apply_parse_result(
             reason="客户已回复补充信息，重新进入解析校验流程。",
             metadata={"parse_result_id": parse_result.id, "email_id": email.id},
         )
+    if parse_result.intent_type == "customer_receipt_confirmed" and ticket.current_status_code == "ready_for_export":
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="closed",
+            trigger_event="customer_receipt_confirmed",
+            user_id=user_id,
+            operator_type="user" if user_id else "system",
+            reason="客户确认收到维修后设备，自动关单。",
+            metadata={"parse_result_id": parse_result.id, "email_id": email.id},
+        )
     if ticket.current_status_code == "new_email":
         if parse_result.confidence_score is not None and float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:
             await transition_ticket(
@@ -1009,6 +1020,21 @@ async def validate_ticket_sn(
                 user_id=user_id,
                 reason="缺少报修明细。",
             )
+            try:
+                await create_notification(
+                    session,
+                    event_type="sn_validation_failed",
+                    target_type="repair_ticket",
+                    target_id=ticket.id,
+                    title=f"SN校验异常：{ticket.ticket_no}",
+                    content="缺少报修明细，无法进行 SN 校验。",
+                    priority="high",
+                    recipient_user_id=None,
+                    recipient_role_code="supervisor",
+                    metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no},
+                )
+            except Exception:
+                pass
         return await get_ticket_detail(session, ticket.id)
 
     has_problem = False
@@ -1086,6 +1112,36 @@ async def validate_ticket_sn(
                 user_id=user_id,
                 reason="SN 校验存在异常或警告。",
             )
+            try:
+                failed_items = [it for it in items if it.validation_status == "failed"]
+                warning_items = [it for it in items if it.validation_status == "warning"]
+                parts = []
+                if failed_items:
+                    parts.append(f"{len(failed_items)} 项校验失败")
+                if warning_items:
+                    parts.append(f"{len(warning_items)} 项校验警告")
+                content = "，".join(parts) + "。"
+                if failed_items:
+                    details = "; ".join(
+                        f"{it.sn or '无SN'}: {it.validation_message}" for it in failed_items[:3]
+                    )
+                    if len(failed_items) > 3:
+                        details += f" 等{len(failed_items)}项"
+                    content += f" 失败明细：{details}"
+                await create_notification(
+                    session,
+                    event_type="sn_validation_failed",
+                    target_type="repair_ticket",
+                    target_id=ticket.id,
+                    title=f"SN校验异常：{ticket.ticket_no}",
+                    content=content,
+                    priority="high",
+                    recipient_user_id=None,
+                    recipient_role_code="supervisor",
+                    metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no},
+                )
+            except Exception:
+                pass
         elif not ticket.missing_fields:
             await transition_ticket(
                 session,

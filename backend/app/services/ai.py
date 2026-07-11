@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from email.utils import parseaddr
 from pathlib import Path
@@ -12,15 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
-from app.models import AiCallLog, Email, EmailAttachment, ParseResult, RepairTicket, SnAsset
+from app.integrations.qwen_provider import QwenProvider
+from app.models import AiCallLog, Email, EmailAttachment, OssObject, ParseResult, RepairTicket, SnAsset
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.parser import clean_email_body
-
-AI_EXTRACT_SYSTEM_PROMPT = """
-你是邮件报修自动化系统的结构化解析助手。你只能输出 JSON 对象。
-根据输入邮件和附件提取报修意图、工单字段、报修明细、缺失字段、冲突字段、字段置信度和证据片段。
-不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
-""".strip()
 
 AI_EXTRACT_SYSTEM_PROMPT = """
 你是邮件报修系统的结构化解析助手，只能输出 JSON 对象。
@@ -38,12 +35,35 @@ AI_REPLY_SYSTEM_PROMPT = """
 语气礼貌、简洁，避免承诺维修结果，不要加入输入中不存在的客户信息。
 """.strip()
 
+logger = logging.getLogger(__name__)
+
+
+def _is_retryable_error(exc: AiProviderError) -> bool:
+    msg = str(exc)
+    if "TIMEOUT" in msg.upper():
+        return True
+    if "OUTPUT_NOT_JSON" in msg or "OUTPUT_SCHEMA_INVALID" in msg:
+        return True
+    m = re.search(r"HTTP_([0-9]+)", msg)
+    if m and int(m.group(1)) >= 500:
+        return True
+    return False
+
 
 def ai_configured() -> bool:
-    return settings.AI_PROVIDER.lower() == "deepseek" and bool(settings.AI_API_KEY)
+    return (settings.AI_PROVIDER.lower() == "deepseek" and bool(settings.AI_API_KEY)) or \
+           (settings.AI_PROVIDER.lower() == "qwen" and bool(settings.QWEN_API_KEY)) or \
+           bool(settings.AI_API_KEY)
 
 
-def _provider() -> DeepSeekProvider:
+def _provider() -> DeepSeekProvider | QwenProvider:
+    if settings.AI_PROVIDER.lower() == "qwen":
+        return QwenProvider(
+            api_key=settings.QWEN_API_KEY,
+            base_url=settings.QWEN_BASE_URL,
+            model=settings.QWEN_MODEL,
+            timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+        )
     return DeepSeekProvider(
         api_key=settings.AI_API_KEY,
         base_url=settings.AI_BASE_URL,
@@ -190,24 +210,44 @@ async def _run_ai_json(
 ) -> tuple[BaseModel | None, AiCallLog | None]:
     if not ai_configured():
         return None, None
-    try:
-        completion = await _provider().chat_json(messages=messages, response_model=response_model)
-    except AiProviderError as exc:
+
+    last_error: AiProviderError | None = None
+    max_retries = settings.AI_MAX_RETRIES
+
+    for attempt in range(max_retries + 1):
+        try:
+            completion = await _provider().chat_json(messages=messages, response_model=response_model)
+            last_error = None
+            break
+        except AiProviderError as exc:
+            last_error = exc
+            if attempt < max_retries and _is_retryable_error(exc):
+                delay = settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "AI call failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1, max_retries, delay, exc,
+                )
+                await asyncio.sleep(delay)
+            else:
+                break
+
+    if last_error is not None:
         trace_id = sha256_text(f"{call_type}:{utcnow().isoformat()}")[:32]
+        raw_out = getattr(last_error, "raw_output", None)
         ai_log = await _persist_ai_log(
             session,
             trace_id=trace_id,
             call_type=call_type,
             input_payload=input_payload,
             request_payload={"model": settings.AI_MODEL, "messages": messages, "response_format": {"type": "json_object"}},
-            output_payload=None,
+            output_payload={"error": str(last_error), "raw_output": raw_out[:2000] if raw_out else None},
             parsed=None,
             latency_ms=None,
             input_summary=input_summary,
-            output_summary=None,
+            output_summary=(raw_out or str(last_error))[:1000],
             email_id=email_id,
             ticket_id=ticket_id,
-            error_message=str(exc),
+            error_message=str(last_error),
         )
         return None, ai_log
 
@@ -373,6 +413,81 @@ async def _enrich_ai_quality(
     return parsed
 
 
+class MultimodalParseResult(BaseModel):
+    extracted_fields: dict[str, Any] = {}
+    extracted_items: list[dict[str, Any]] = []
+    raw_text: str = ""
+
+
+def _qwen_vl_configured() -> bool:
+    return bool(settings.QWEN_API_KEY and settings.QWEN_MODEL)
+
+
+def _oss_url_from_object(oss_obj: OssObject) -> str:
+    from urllib.parse import urlparse
+
+    endpoint_url = oss_obj.endpoint or settings.OSS_ENDPOINT
+    parsed = urlparse(endpoint_url)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or parsed.path
+    if netloc.startswith("//"):
+        netloc = netloc[2:]
+    return f"{scheme}://{oss_obj.bucket}.{netloc}/{oss_obj.object_key}"
+
+
+async def parse_attachment_multimodal(
+    session: AsyncSession,
+    attachment: EmailAttachment,
+) -> dict[str, Any] | None:
+    content_type = (attachment.content_type or "").lower()
+    if not (content_type.startswith("image/") or content_type == "application/pdf"):
+        return None
+
+    if not _qwen_vl_configured():
+        return None
+
+    image_url: str | None = None
+    if attachment.oss_object_id:
+        oss_obj = await session.get(OssObject, attachment.oss_object_id)
+        if oss_obj is not None and oss_obj.upload_status == "success":
+            image_url = _oss_url_from_object(oss_obj)
+
+    if not image_url:
+        return None
+
+    provider = QwenProvider(
+        api_key=settings.QWEN_API_KEY,
+        base_url=settings.QWEN_BASE_URL,
+        model=settings.QWEN_MODEL,
+        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+    )
+
+    prompt = (
+        "请识别并提取这张图片/文档中的维修报修相关信息（SN序列号、设备型号、故障描述、客户信息等）。\n"
+        "请输出 JSON，字段为 extracted_fields（结构化字段键值对）、extracted_items（物品列表，每项含 sn、"
+        "failure_description 等）、raw_text（完整识别出的文本内容）。"
+    )
+
+    try:
+        completion = await provider.vl_chat(
+            image_urls=[image_url],
+            prompt=prompt,
+            response_model=MultimodalParseResult,
+            temperature=0.1,
+        )
+    except AiProviderError:
+        return None
+
+    parsed = completion.parsed
+    return {
+        "file_name": attachment.file_name,
+        "content_type": attachment.content_type,
+        "extracted_fields": parsed.extracted_fields or {},
+        "extracted_items": parsed.extracted_items or [],
+        "raw_text": parsed.raw_text or "",
+    }
+
+
 async def create_ai_parse_candidate(
     session: AsyncSession,
     *,
@@ -381,10 +496,13 @@ async def create_ai_parse_candidate(
     mode: str,
     ticket_id: int | None = None,
     rule_context: dict[str, Any] | None = None,
+    multimodal_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     input_payload = _email_input(email, attachments, mode)
     if rule_context:
         input_payload["rule_context"] = rule_context
+    if multimodal_results:
+        input_payload["multimodal_results"] = multimodal_results
     messages = [
         {"role": "system", "content": AI_EXTRACT_SYSTEM_PROMPT},
         {

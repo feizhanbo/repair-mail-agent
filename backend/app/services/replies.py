@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import logging
 import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid, parseaddr
@@ -18,6 +18,8 @@ from app.services.audit import log_operation
 from app.services.common import model_to_dict, utcnow
 from app.services.tickets import get_ticket
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
+
+logger = logging.getLogger(__name__)
 
 REPLY_FIELDS = (
     "id",
@@ -112,6 +114,16 @@ def _smtp_configured() -> bool:
     return bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD)
 
 
+def _recipient_in_whitelist(address: str | None) -> bool:
+    if not address:
+        return False
+    whitelist = getattr(settings, "SMTP_RECIPIENT_WHITELIST", [])
+    if not whitelist:
+        return False
+    parsed = parseaddr(address)[1] or address
+    return parsed.lower() in [w.lower() for w in whitelist]
+
+
 def _reply_can_auto_send(reply: ReplyRecord, *, confidence_score: float | None = None, risk_level: str | None = None) -> bool:
     if settings.REPLY_SEND_MODE != "auto_send" or not settings.AUTO_SEND_ENABLED:
         return False
@@ -121,10 +133,14 @@ def _reply_can_auto_send(reply: ReplyRecord, *, confidence_score: float | None =
         return False
     if risk_level and risk_level not in {"low", "normal"}:
         return False
+    if not _recipient_in_whitelist(reply.to_addresses):
+        return False
     return True
 
 
 def _send_reply_via_smtp(reply: ReplyRecord) -> tuple[bool, str | None, str | None]:
+    if not _recipient_in_whitelist(reply.to_addresses):
+        return False, None, "收件人邮箱不在白名单中，开发阶段禁止向真实客户邮箱发信。"
     if not _valid_recipient(reply.to_addresses):
         return False, None, "收件人邮箱无效，已转人工确认。"
     if not _smtp_configured():
@@ -171,7 +187,6 @@ async def _archive_outbound_email(
         mailbox_account=settings.SMTP_USER or "system",
         folder_name="sent",
         message_id=smtp_message_id,
-        message_id_hash=hashlib.sha256(smtp_message_id.encode("utf-8")).hexdigest(),
         in_reply_to=reply.in_reply_to,
         references_header=reply.references_header,
         raw_headers={"generated_by": "reply_record", "reply_id": reply.id},
@@ -353,6 +368,9 @@ async def create_reply_draft(
     )
     session.add(reply)
     await session.flush()
+    if not _recipient_in_whitelist(reply.to_addresses):
+        reply.review_status = "pending"
+        logger.warning("Reply draft %s recipient %s not in whitelist, forcing human review", ticket.ticket_no, reply.to_addresses)
     if not _reply_can_auto_send(reply, confidence_score=reply_confidence_score, risk_level=reply_risk_level):
         await create_manual_task_if_missing(
             session,

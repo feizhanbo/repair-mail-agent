@@ -36,6 +36,8 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
         return "internal_forward", 0.65, "主题疑似内部转发。"
     if any(keyword in text for keyword in ("报修", "维修", "故障", "repair", "rma", "sn")):
         return "new_repair", 0.8, "命中报修关键词。"
+    if any(keyword in text for keyword in ("收到", "已收到", "签收", "received", "到货", "收货")):
+        return "customer_receipt_confirmed", 0.9, "客户确认收到维修后设备。"
     return "unknown", 0.45, "未命中明确分类规则。"
 
 

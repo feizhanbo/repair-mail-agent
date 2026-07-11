@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
-    REDIS_URL: str = "redis://redis:6379/0"
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -23,6 +22,8 @@ class Settings(BaseSettings):
     IMAP_PORT: int = 993
     IMAP_USER: str = "repair@example.com"
     IMAP_PASSWORD: str = ""
+    IMAP_POLL_INTERVAL_MINUTES: int = 5
+    AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
     SMTP_PORT: int = 587
@@ -39,12 +40,19 @@ class Settings(BaseSettings):
     AI_MODEL: str = "deepseek-v4-flash"
     AI_BASE_URL: str = "https://api.deepseek.com"
     AI_TIMEOUT_SECONDS: float = 30.0
+    AI_MAX_RETRIES: int = 2
+    AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
+
+    QWEN_API_KEY: str = ""
+    QWEN_MODEL: str = "qwen-plus"
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     AUTO_SEND_ENABLED: bool = False
     REPLY_SEND_MODE: str = "human_review"
     AUTO_SEND_MIN_CONFIDENCE: float = 0.85
+    SMTP_RECIPIENT_WHITELIST: list[str] = ["rmatest2@accotest.com"]
     MAX_FOLLOW_UP: int = 3
     CONFIDENCE_THRESHOLD: float = 0.7
     RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")
