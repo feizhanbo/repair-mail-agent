@@ -40,7 +40,7 @@ class EmailThread(TimestampMixin, Base):
 class Email(TimestampMixin, Base):
     __tablename__ = "emails"
     __table_args__ = (
-        UniqueConstraint("message_id_hash", name="uk_emails_message_id_hash"),
+        UniqueConstraint("message_id", name="uk_emails_message_id"),
         Index("idx_emails_thread", "thread_id"),
         Index("idx_emails_received_at", "received_at"),
         Index("idx_emails_fetch_job", "fetch_job_run_id"),
@@ -58,7 +58,6 @@ class Email(TimestampMixin, Base):
     folder_name: Mapped[str | None] = mapped_column(String(255))
     imap_uid: Mapped[str | None] = mapped_column(String(100))
     message_id: Mapped[str] = mapped_column(String(500), nullable=False)
-    message_id_hash: Mapped[str] = mapped_column(mysql.CHAR(64), nullable=False)
     in_reply_to: Mapped[str | None] = mapped_column(String(500))
     references_header: Mapped[str | None] = mapped_column(Text)
     raw_headers: Mapped[dict | None] = mapped_column(mysql.JSON)

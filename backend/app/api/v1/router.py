@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import ai_logs, auth, dashboard, db_browser, email_threads, emails, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
+from app.api.v1 import ai_logs, auth, dashboard, db_browser, email_threads, emails, graph_runs, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
 
 api_router = APIRouter()
 
@@ -21,3 +21,4 @@ api_router.include_router(notifications.router, prefix="/notifications", tags=["
 api_router.include_router(statistics.router, prefix="/statistics", tags=["统计分析"])
 api_router.include_router(system.router, prefix="/system", tags=["系统配置"])
 api_router.include_router(db_browser.router, prefix="/db-browser", tags=["数据库浏览"])
+api_router.include_router(graph_runs.router, prefix="/graph-runs", tags=["graph-runs"])

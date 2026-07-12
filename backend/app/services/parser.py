@@ -134,12 +134,16 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
     text = f"{subject}\n{body}".lower()
     if email.in_reply_to:
         return "customer_reply", 0.85, "存在 In-Reply-To，按客户补充处理。"
+    if any(keyword in text for keyword in ("附件", "照片", "图片", "截图", "扫描", "file", "attachment", "attach")):
+        return "unsafe_attachment_candidate", 0.6, "邮件提及附件内容。"
     if any(keyword in text for keyword in ("退订", "unsubscribe", "广告", "newsletter")):
         return "irrelevant", 0.9, "命中无关邮件关键词。"
     if any(keyword in text for keyword in ("fwd:", "fw:", "转发")):
         return "internal_forward", 0.65, "主题疑似内部转发。"
     if any(keyword in text for keyword in ("报修", "维修", "故障", "repair", "rma", "sn")):
         return "new_repair", 0.8, "命中报修关键词。"
+    if any(keyword in text for keyword in ("收到", "已收到", "签收", "received", "到货", "收货")):
+        return "customer_receipt_confirmed", 0.9, "客户确认收到维修后设备。"
     return "unknown", 0.45, "未命中明确分类规则。"
 
 
@@ -169,12 +173,31 @@ def extract_fields(email: Email) -> dict[str, Any]:
         confidence = 0.58 if items else 0.42
     if confidence < settings.CONFIDENCE_THRESHOLD:
         fields["confidence_warning"] = "规则解析置信度低于阈值，建议人工复核。"
+    conflict_fields: dict[str, Any] = {}
+    if sns:
+        subject_sns = set(_extract_sns(subject))
+        body_sns = set(_extract_sns(body))
+        if subject_sns and body_sns and subject_sns != body_sns:
+            all_sns = subject_sns | body_sns
+            if len(all_sns) > 1:
+                conflict_fields["sn"] = {"values": list(all_sns), "reason": "主题与正文提取的SN不一致。"}
+            elif len(subject_sns) + len(body_sns) > 1:
+                conflict_fields["sn"] = {"values": list(all_sns), "reason": "同一SN在主题和正文中格式不一致。"}
+        elif len(sns) > 1:
+            conflict_fields["sn"] = {"values": sns, "reason": "邮件中包含多个不同SN。"}
+    phone_matches = list(PHONE_PATTERN.finditer(combined))
+    if len(phone_matches) > 1:
+        phone_vals = [m.group(1).strip() for m in phone_matches]
+        unique_phones = set(re.sub(r"\s+", "", p) for p in phone_vals)
+        if len(unique_phones) > 1:
+            conflict_fields["phone"] = {"values": phone_vals, "reason": "邮件中包含多个不同号码。"}
+
     return {
         "body": body,
         "fields": {key: value for key, value in fields.items() if value is not None},
         "items": items,
         "missing_fields": missing_fields,
-        "conflict_fields": {},
+        "conflict_fields": conflict_fields,
         "confidence_score": confidence,
         "field_confidences": {
             "sn": 0.85 if sns else 0.0,

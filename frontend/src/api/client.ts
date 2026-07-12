@@ -165,7 +165,7 @@ export const api = {
     body.append('auto_parse', String(options?.auto_parse ?? true));
     return postData<EmailIngestResult>('/emails/ingest-eml', body, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
-  reparseEmail: (id: number, body = { mode: 'field_extract' as const }) => postData(`/emails/${id}/reparse`, body),
+  reparseEmail: (id: number, body: Record<string, unknown> = {}) => postData(`/emails/${id}/reparse`, body),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
   exportSelectedTickets: (ids: number[]) => apiClient.post<Blob, Blob>('/tickets/export-selected', { ids }, { responseType: 'blob' }),

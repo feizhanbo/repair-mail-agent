@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
+from email.mime.text import MIMEText
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -13,7 +15,10 @@ from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
 from app.services import imap_fetcher
 from app.services.email_flow_trace import build_email_flow_trace
-from app.services.eml import payload_from_eml_bytes
+from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
+from app.services.storage import upload_bytes_to_oss
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -76,6 +81,52 @@ async def ingest_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
+    try:
+        body = payload.html_body or payload.text_body or ""
+        msg = MIMEText(body, "html" if payload.html_body else "plain", "utf-8")
+        msg["From"] = payload.from_address
+        if payload.to_addresses:
+            msg["To"] = payload.to_addresses
+        if payload.cc_addresses:
+            msg["Cc"] = payload.cc_addresses
+        if payload.subject:
+            msg["Subject"] = payload.subject
+        if payload.message_id:
+            msg["Message-ID"] = payload.message_id
+        if payload.in_reply_to:
+            msg["In-Reply-To"] = payload.in_reply_to
+        if payload.references_header:
+            msg["References"] = payload.references_header
+        if payload.sent_at:
+            from email.utils import format_datetime
+
+            msg["Date"] = format_datetime(payload.sent_at)
+        raw_eml = msg.as_bytes()
+        raw_object = await upload_bytes_to_oss(
+            session,
+            content=raw_eml,
+            original_file_name="ingest.eml",
+            content_type="message/rfc822",
+            source_type="raw_eml",
+            user_id=current_user.id,
+        )
+        payload.raw_eml_oss_object_id = raw_object.id
+        for attachment in payload.attachments:
+            attachment_content = attachment.get("content")
+            if attachment_content:
+                if isinstance(attachment_content, str):
+                    attachment_content = attachment_content.encode("utf-8")
+                attachment_object = await upload_bytes_to_oss(
+                    session,
+                    content=attachment_content,
+                    original_file_name=attachment.get("file_name"),
+                    content_type=attachment.get("content_type"),
+                    source_type="email_attachment",
+                    user_id=current_user.id,
+                )
+                attachment["oss_object_id"] = attachment_object.id
+    except Exception:
+        logger.exception("OSS archival failed for /ingest endpoint, continuing without archival")
     result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
     await session.commit()
     return ok(result, "email ingested")
@@ -99,6 +150,29 @@ async def ingest_eml(
         payload = payload_from_eml_bytes(content, mailbox_account=mailbox_account, folder_name=folder_name)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    try:
+        raw_object = await upload_bytes_to_oss(
+            session,
+            content=content,
+            original_file_name=file.filename or "ingest.eml",
+            content_type="message/rfc822",
+            source_type="raw_eml",
+            user_id=current_user.id,
+        )
+        payload.raw_eml_oss_object_id = raw_object.id
+        blobs = attachment_blobs_from_eml_bytes(content)
+        for attachment, blob in zip(payload.attachments, blobs, strict=False):
+            attachment_object = await upload_bytes_to_oss(
+                session,
+                content=blob["content"],
+                original_file_name=blob["file_name"],
+                content_type=blob.get("content_type"),
+                source_type="email_attachment",
+                user_id=current_user.id,
+            )
+            attachment["oss_object_id"] = attachment_object.id
+    except Exception:
+        logger.exception("OSS archival failed for /ingest-eml endpoint, continuing without archival")
     result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
     await session.commit()
     return ok(result, "eml ingested")
@@ -138,6 +212,6 @@ async def reparse_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    result = await email_service.reparse_email(session, email_id=email_id, user_id=current_user.id, mode=payload.mode, reason=payload.reason)
+    result = await email_service.reparse_email(session, email_id=email_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()
     return ok(result, "email reparsed")

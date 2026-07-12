@@ -94,3 +94,44 @@ async def upload_bytes_to_oss(
     oss_object.etag = getattr(result, "etag", None)
     oss_object.error_message = None
     return oss_object
+
+
+async def generate_presigned_url(
+    session: AsyncSession,
+    *,
+    object_key: str,
+    expires_seconds: int = 3600,
+    bucket: str | None = None,
+    endpoint: str | None = None,
+) -> str:
+    if not _oss_configured():
+        raise StorageConfigurationError("OSS_NOT_CONFIGURED")
+
+    import oss2
+
+    _bucket = bucket or settings.OSS_BUCKET
+    _endpoint = endpoint or settings.OSS_ENDPOINT
+
+    auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
+    oss_bucket = oss2.Bucket(auth, _endpoint, _bucket)
+    return oss_bucket.sign_url("GET", object_key, expires_seconds)
+
+
+async def generate_presigned_url_for_object(
+    session: AsyncSession,
+    *,
+    oss_object_id: int,
+    expires_seconds: int = 3600,
+) -> str:
+    stmt = select(OssObject).where(OssObject.id == oss_object_id)
+    oss_object = await session.scalar(stmt)
+    if oss_object is None:
+        raise ValueError(f"OssObject with id {oss_object_id} not found")
+
+    return await generate_presigned_url(
+        session,
+        object_key=oss_object.object_key,
+        expires_seconds=expires_seconds,
+        bucket=oss_object.bucket,
+        endpoint=oss_object.endpoint or settings.OSS_ENDPOINT,
+    )

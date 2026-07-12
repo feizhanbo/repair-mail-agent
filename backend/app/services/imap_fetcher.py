@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import JobRunLog
+from app.models.mail_fetch import MailFetchRecord
 from app.services import emails as email_service
 from app.services.common import utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
@@ -132,6 +133,17 @@ async def fetch_imap_emails(
                         )
                         attachment["oss_object_id"] = attachment_object.id
                 ingest_result = await email_service.ingest_email(session, payload=payload, user_id=user_id, auto_parse=auto_parse)
+                session.add(
+                    MailFetchRecord(
+                        mailbox_account=settings.IMAP_USER,
+                        folder_name=folder_name,
+                        imap_uid=uid,
+                        message_id=payload.message_id,
+                        fetch_job_run_id=job.id,
+                        email_id=ingest_result.get("email", {}).get("id"),
+                        duplicate=ingest_result.get("duplicate", False),
+                    )
+                )
                 fetched.append(
                     {
                         "uid": uid,

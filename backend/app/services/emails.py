@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import Email, EmailAttachment, EmailThread, ParseResult, RepairTicket
 from app.schemas.business import EmailIngestRequest
-from app.services.ai import create_ai_parse_candidate
+from app.services.ai import create_ai_parse_candidate, parse_attachment_multimodal
 from app.services.audit import log_operation
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, utcnow
 from app.services.parser import classify_email, clean_email_body, extract_fields
@@ -140,8 +140,7 @@ async def ingest_email(
     auto_parse: bool = True,
 ) -> dict[str, Any]:
     message_id = normalize_message_id(payload.message_id)
-    message_hash = sha256_text(message_id)
-    duplicate = await session.scalar(select(Email).where(Email.message_id_hash == message_hash))
+    duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))
     if duplicate is not None:
         return {"duplicate": True, "email": serialize_email(duplicate)}
 
@@ -163,7 +162,6 @@ async def ingest_email(
         folder_name=payload.folder_name,
         imap_uid=payload.imap_uid,
         message_id=message_id,
-        message_id_hash=message_hash,
         in_reply_to=payload.in_reply_to,
         references_header=payload.references_header,
         from_address=payload.from_address,
@@ -290,10 +288,8 @@ async def reparse_email(
     *,
     email_id: int,
     user_id: int | None = None,
-    mode: str = "field_extract",
     reason: str | None = None,
 ) -> dict[str, Any]:
-    del mode
     email = await session.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
@@ -345,6 +341,21 @@ async def reparse_email(
     attachments = (
         await session.execute(select(EmailAttachment).where(EmailAttachment.email_id == email.id).order_by(EmailAttachment.created_at.desc()))
     ).scalars().all()
+
+    multimodal_results: list[dict[str, Any]] = []
+    for attachment in attachments:
+        ct = (attachment.content_type or "").lower()
+        if not (ct.startswith("image/") or ct == "application/pdf"):
+            continue
+        multimodal = await parse_attachment_multimodal(session, attachment)
+        if multimodal:
+            multimodal_results.append(multimodal)
+            attachment.extracted_json = {
+                "multimodal": multimodal,
+                "parsed_at": utcnow().isoformat(),
+            }
+            attachment.parse_status = "parsed"
+
     thread = await session.get(EmailThread, email.thread_id) if email.thread_id else None
     ai_result = await create_ai_parse_candidate(
         session,
@@ -360,6 +371,7 @@ async def reparse_email(
             "conflict_fields": rule_parse.conflict_fields,
             "evidence": rule_parse.evidence,
         },
+        multimodal_results=multimodal_results or None,
     )
 
     ai_parse = ai_result["parse_result"] if ai_result else None
