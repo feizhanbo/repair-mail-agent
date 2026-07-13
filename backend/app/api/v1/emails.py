@@ -11,12 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_session
 from app.core.response import ok, page
+from app.models import Email, EmailAttachment
 from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
 from app.services import imap_fetcher
 from app.services.email_flow_trace import build_email_flow_trace
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
-from app.services.storage import upload_bytes_to_oss
+from app.services.storage import generate_presigned_url_for_object, upload_bytes_to_oss
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,71 @@ async def list_emails(
         received_end=received_end,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.get("/{email_id}/flow-trace")
+async def email_flow_trace(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await build_email_flow_trace(session, email_id))
+
+
+@router.get("/{email_id}/raw-eml-url")
+async def raw_eml_download_url(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    expires_seconds: int = Query(3600, ge=60, le=86400),
+) -> dict:
+    del current_user
+    email = await session.get(Email, email_id)
+    if email is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+    if not email.raw_eml_oss_object_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RAW_EML_NOT_ARCHIVED")
+    try:
+        url = await generate_presigned_url_for_object(session, oss_object_id=email.raw_eml_oss_object_id, expires_seconds=expires_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
+    return ok(
+        {
+            "object_id": email.raw_eml_oss_object_id,
+            "file_name": f"email-{email.id}.eml",
+            "url": url,
+            "expires_seconds": expires_seconds,
+        }
+    )
+
+
+@router.get("/attachments/{attachment_id}/download-url")
+async def attachment_download_url(
+    attachment_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    expires_seconds: int = Query(3600, ge=60, le=86400),
+) -> dict:
+    del current_user
+    attachment = await session.get(EmailAttachment, attachment_id)
+    if attachment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ATTACHMENT_NOT_FOUND")
+    if not attachment.oss_object_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ATTACHMENT_NOT_ARCHIVED")
+    try:
+        url = await generate_presigned_url_for_object(session, oss_object_id=attachment.oss_object_id, expires_seconds=expires_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
+    return ok(
+        {
+            "attachment_id": attachment.id,
+            "object_id": attachment.oss_object_id,
+            "file_name": attachment.file_name,
+            "url": url,
+            "expires_seconds": expires_seconds,
+        }
+    )
 
 
 @router.get("/{email_id}")

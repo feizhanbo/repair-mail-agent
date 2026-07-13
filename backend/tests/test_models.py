@@ -2,37 +2,38 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 26
+    assert len(Base.metadata.tables) == 27
 
 
 def test_phase_one_table_names() -> None:
     assert set(Base.metadata.tables) == {
-        "users",
-        "roles",
-        "user_roles",
-        "oss_objects",
-        "email_threads",
-        "emails",
-        "email_attachments",
-        "email_ticket_links",
-        "repair_tickets",
-        "repair_ticket_items",
-        "workflow_statuses",
-        "workflow_transitions",
-        "ticket_status_logs",
-        "field_audit_logs",
-        "parse_results",
-        "sn_validation_results",
-        "sn_assets",
+        "ai_call_logs",
         "board_cards",
-        "reply_templates",
-        "reply_records",
+        "email_attachments",
+        "email_threads",
+        "email_ticket_links",
+        "emails",
+        "field_audit_logs",
+        "job_run_logs",
+        "mail_fetch_records",
         "manual_review_tasks",
         "notification_events",
-        "ai_call_logs",
         "operation_logs",
+        "oss_objects",
+        "parse_results",
+        "repair_ticket_items",
+        "repair_tickets",
+        "reply_records",
+        "reply_templates",
+        "roles",
+        "sn_assets",
+        "sn_validation_results",
         "system_event_logs",
-        "job_run_logs",
+        "ticket_status_logs",
+        "user_roles",
+        "users",
+        "workflow_statuses",
+        "workflow_transitions",
     }
 
 

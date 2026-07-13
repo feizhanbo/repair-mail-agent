@@ -9,6 +9,8 @@ import type {
   DatabaseTablesResponse,
   DashboardSummary,
   EmailDetail,
+  EmailFlowTrace,
+  EmailIngestResult,
   EmailIngestRequest,
   EmailItem,
   LoginRequest,
@@ -17,6 +19,7 @@ import type {
   ManualTaskDetail,
   ManualTaskReparseResponse,
   NotificationEvent,
+  ObjectDownloadUrl,
   PageData,
   ReplyTemplate,
   ReplyRecord,
@@ -151,6 +154,8 @@ export const api = {
   emails: (params: Record<string, unknown>) => getData<PageData<EmailItem>>('/emails', { params }),
   emailDetail: (id: number) => getData<EmailDetail>(`/emails/${id}`),
   emailFlowTrace: (id: number) => getData<EmailFlowTrace>(`/emails/${id}/flow-trace`),
+  rawEmlDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/${id}/raw-eml-url`),
+  attachmentDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/attachments/${id}/download-url`),
   ingestEmail: (body: EmailIngestRequest) => postData<EmailIngestResult, EmailIngestRequest>('/emails/ingest', body),
   ingestEmlFile: (file: File, options?: { mailbox_account?: string; folder_name?: string; auto_parse?: boolean }) => {
     const body = new FormData();

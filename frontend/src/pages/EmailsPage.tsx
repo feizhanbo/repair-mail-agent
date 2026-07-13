@@ -1,6 +1,6 @@
-import { PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, message } from 'antd';
+import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, Upload, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
@@ -8,7 +8,7 @@ import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
-import type { EmailIngestRequest, EmailItem, ParseResult } from '../types/api';
+import type { Attachment, EmailIngestRequest, EmailItem, ParseResult } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 
@@ -48,12 +48,35 @@ export default function EmailsPage() {
     },
     onError: handleMutationError,
   });
+  const ingestEmlMutation = useMutation({
+    mutationFn: (file: File) => api.ingestEmlFile(file, { auto_parse: true }),
+    onSuccess: () => {
+      message.success('EML imported');
+      void queryClient.invalidateQueries({ queryKey: ['emails'] });
+      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+    },
+    onError: handleMutationError,
+  });
   const reparseMutation = useMutation({
     mutationFn: (id: number) => api.reparseEmail(id),
     onSuccess: () => {
       message.success('重解析已完成');
       void queryClient.invalidateQueries({ queryKey: ['email-detail', selectedId] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+    },
+    onError: handleMutationError,
+  });
+  const rawEmlDownloadMutation = useMutation({
+    mutationFn: (id: number) => api.rawEmlDownloadUrl(id),
+    onSuccess: (data) => {
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+    },
+    onError: handleMutationError,
+  });
+  const attachmentDownloadMutation = useMutation({
+    mutationFn: (id: number) => api.attachmentDownloadUrl(id),
+    onSuccess: (data) => {
+      window.open(data.url, '_blank', 'noopener,noreferrer');
     },
     onError: handleMutationError,
   });
@@ -92,7 +115,26 @@ export default function EmailsPage() {
 
   return (
     <div className="page-stack">
-      <PageTitle title="邮件中心" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setIngestOpen(true)} />} />
+      <PageTitle
+        title="邮件中心"
+        extra={(
+          <Space>
+            <Upload
+              accept=".eml,message/rfc822"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                ingestEmlMutation.mutate(file);
+                return false;
+              }}
+            >
+              <Button icon={<UploadOutlined />} loading={ingestEmlMutation.isPending}>Upload EML</Button>
+            </Upload>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIngestOpen(true)}>
+              Manual
+            </Button>
+          </Space>
+        )}
+      />
       <SectionPanel>
         <Form<EmailFilters>
           form={filterForm}
@@ -173,8 +215,49 @@ export default function EmailsPage() {
               <Descriptions.Item label="发件人">{detailQuery.data.email.from_address}</Descriptions.Item>
               <Descriptions.Item label="收件人">{detailQuery.data.email.to_addresses || '-'}</Descriptions.Item>
               <Descriptions.Item label="Message-ID">{detailQuery.data.email.message_id}</Descriptions.Item>
+              <Descriptions.Item label="原始EML">
+                {detailQuery.data.email.raw_eml_oss_object_id ? (
+                  <Button
+                    size="small"
+                    icon={<DownloadOutlined />}
+                    loading={rawEmlDownloadMutation.isPending}
+                    onClick={() => rawEmlDownloadMutation.mutate(detailQuery.data.email.id)}
+                  >
+                    Download
+                  </Button>
+                ) : '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="正文">{compactText(detailQuery.data.email.clean_body, '-')}</Descriptions.Item>
             </Descriptions>
+            <div>
+              <Typography.Title level={5}>附件</Typography.Title>
+              <Table<Attachment>
+                size="small"
+                rowKey="id"
+                dataSource={detailQuery.data.attachments}
+                pagination={false}
+                columns={[
+                  { title: '文件名', dataIndex: 'file_name', ellipsis: true },
+                  { title: '类型', dataIndex: 'content_type', width: 150, render: (value?: string) => value || '-' },
+                  { title: '大小', dataIndex: 'file_size', width: 100, render: numberText },
+                  { title: '状态', dataIndex: 'parse_status', width: 100, render: (value: string) => <StatusTag value={value} /> },
+                  {
+                    title: '下载',
+                    width: 90,
+                    render: (_, record) => (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        disabled={!record.oss_object_id}
+                        loading={attachmentDownloadMutation.isPending}
+                        onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                      />
+                    ),
+                  },
+                ]}
+              />
+            </div>
             <div>
               <Typography.Title level={5}>解析候选</Typography.Title>
               <Table<ParseResult>

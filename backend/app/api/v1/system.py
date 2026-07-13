@@ -12,6 +12,7 @@ from app.core.database import get_session
 from app.core.response import ok
 from app.models import ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
+from app.services.ai import ai_configured
 from app.services.common import model_to_dict
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 
@@ -31,7 +32,7 @@ def _config_payload() -> dict:
             "imap_configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
             "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD),
             "oss_configured": bool(settings.OSS_ENDPOINT and settings.OSS_BUCKET and settings.OSS_ACCESS_KEY and settings.OSS_SECRET_KEY),
-            "ai_configured": bool(settings.AI_PROVIDER and settings.AI_API_KEY),
+            "ai_configured": ai_configured(),
             "ai_provider": settings.AI_PROVIDER,
             "ai_model": settings.AI_MODEL,
             "ai_base_url": settings.AI_BASE_URL,

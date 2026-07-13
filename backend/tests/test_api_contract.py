@@ -85,6 +85,9 @@ def test_expected_business_routes_are_registered() -> None:
     routes = {f"{','.join(sorted(route.methods or []))} {route.path}" for route in app.routes}
     assert "POST /api/v1/auth/login" in routes
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
+    assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
+    assert "GET /api/v1/emails/{email_id}/raw-eml-url" in routes
+    assert "GET /api/v1/emails/attachments/{attachment_id}/download-url" in routes
     assert "PATCH /api/v1/tickets/{ticket_id}/fields" in routes
     assert "POST /api/v1/manual-review/tasks/{task_id}/reparse" in routes
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes

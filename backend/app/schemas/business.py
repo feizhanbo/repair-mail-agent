@@ -15,6 +15,7 @@ class EmailIngestRequest(BaseModel):
     mailbox_account: str = Field(default="manual", max_length=255)
     folder_name: str | None = Field(default="INBOX", max_length=255)
     imap_uid: str | None = Field(default=None, max_length=100)
+    fetch_job_run_id: int | None = None
     message_id: str | None = Field(default=None, max_length=500)
     in_reply_to: str | None = Field(default=None, max_length=500)
     references_header: str | None = None
@@ -26,6 +27,7 @@ class EmailIngestRequest(BaseModel):
     html_body: str | None = None
     sent_at: datetime | None = None
     received_at: datetime | None = None
+    raw_eml_oss_object_id: int | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 

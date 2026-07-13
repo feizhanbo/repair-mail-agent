@@ -12,7 +12,9 @@ class Settings(BaseSettings):
     APP_NAME: str = "repair-mail-agent"
     LOG_LEVEL: str = "INFO"
 
-    DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
+    DB_NAME: str = "repair_system_test"
+    DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
+    DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"

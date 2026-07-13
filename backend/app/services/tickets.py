@@ -116,6 +116,8 @@ EMAIL_FIELDS = (
     "mailbox_account",
     "folder_name",
     "imap_uid",
+    "fetch_job_run_id",
+    "raw_eml_oss_object_id",
     "message_id",
     "in_reply_to",
     "from_address",

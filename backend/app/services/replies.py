@@ -114,6 +114,12 @@ def _smtp_configured() -> bool:
     return bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD)
 
 
+def _smtp_client() -> smtplib.SMTP:
+    if settings.SMTP_PORT == 465:
+        return smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
+    return smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
+
+
 def _recipient_in_whitelist(address: str | None) -> bool:
     if not address:
         return False
@@ -159,7 +165,7 @@ def _send_reply_via_smtp(reply: ReplyRecord) -> tuple[bool, str | None, str | No
         message["References"] = reply.references_header
     message.set_content(reply.final_body or reply.draft_body or "")
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
+        with _smtp_client() as smtp:
             if settings.SMTP_PORT == 587:
                 smtp.starttls()
             smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)

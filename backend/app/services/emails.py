@@ -159,7 +159,9 @@ async def ingest_email(
         mailbox_account=payload.mailbox_account,
         folder_name=payload.folder_name,
         imap_uid=payload.imap_uid,
+        fetch_job_run_id=payload.fetch_job_run_id,
         message_id=message_id,
+        raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
         in_reply_to=payload.in_reply_to,
         references_header=payload.references_header,
         from_address=payload.from_address,
@@ -190,6 +192,7 @@ async def ingest_email(
         session.add(
             EmailAttachment(
                 email_id=email.id,
+                oss_object_id=attachment_payload.get("oss_object_id"),
                 file_name=attachment_payload.get("file_name") or "attachment",
                 content_type=attachment_payload.get("content_type"),
                 file_size=attachment_payload.get("file_size"),

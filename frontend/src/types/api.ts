@@ -101,10 +101,12 @@ export type DashboardSummary = {
 export type EmailItem = {
   id: number;
   thread_id?: number | null;
+  raw_eml_oss_object_id?: number | null;
   mail_direction: string;
   mailbox_account: string;
   folder_name?: string | null;
   imap_uid?: string | null;
+  fetch_job_run_id?: number | null;
   message_id?: string | null;
   in_reply_to?: string | null;
   from_address: string;
@@ -173,10 +175,42 @@ export type EmailDetail = {
   parse_results: ParseResult[];
 };
 
+export type EmailIngestResult = {
+  duplicate: boolean;
+  email: EmailItem;
+  classification?: {
+    confidence?: number | string | null;
+    reason?: string | null;
+  };
+  parse?: JsonRecord | null;
+};
+
+export type ObjectDownloadUrl = {
+  attachment_id?: number;
+  object_id: number;
+  file_name: string;
+  url: string;
+  expires_seconds: number;
+};
+
+export type EmailFlowTraceEvent = {
+  event_type: string;
+  created_at?: string | null;
+  summary?: string | null;
+  data?: JsonRecord | null;
+};
+
+export type EmailFlowTrace = EmailDetail & {
+  ticket_links: JsonRecord[];
+  ai_logs: AiLog[];
+  timeline: EmailFlowTraceEvent[];
+};
+
 export type EmailIngestRequest = {
   mailbox_account?: string;
   folder_name?: string;
   imap_uid?: string;
+  fetch_job_run_id?: number;
   message_id?: string;
   in_reply_to?: string;
   references_header?: string;
