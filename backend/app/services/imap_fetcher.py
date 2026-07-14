@@ -12,6 +12,7 @@ from app.models.mail_fetch import MailFetchRecord
 from app.services import emails as email_service
 from app.services.common import utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
+from app.services.mail_precheck import precheck_email_payload, precheck_imap_uid
 from app.services.storage import upload_bytes_to_oss
 
 
@@ -94,6 +95,7 @@ async def fetch_imap_emails(
 
     fetched: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    skipped_count = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
         client = _connect()
@@ -107,10 +109,49 @@ async def fetch_imap_emails(
 
         for uid in uids:
             try:
+                uid_precheck = await precheck_imap_uid(
+                    session,
+                    mailbox_account=settings.IMAP_USER,
+                    folder_name=folder_name,
+                    imap_uid=uid,
+                )
+                if uid_precheck is not None:
+                    skipped_count += 1
+                    fetched.append({"uid": uid, "fetch_status": uid_precheck.status, "precheck": uid_precheck.to_dict()})
+                    continue
+
                 raw = _uid_fetch_raw(client, uid)
                 payload = payload_from_eml_bytes(raw, mailbox_account=settings.IMAP_USER, folder_name=folder_name)
                 payload.imap_uid = uid
                 payload.fetch_job_run_id = job.id
+                payload_precheck = await precheck_email_payload(session, payload)
+                if not payload_precheck.accepted:
+                    skipped_count += 1
+                    session.add(
+                        MailFetchRecord(
+                            mailbox_account=settings.IMAP_USER,
+                            folder_name=folder_name,
+                            imap_uid=uid,
+                            message_id=payload_precheck.message_id or payload.message_id or "",
+                            fetch_job_run_id=job.id,
+                            email_id=payload_precheck.duplicate_email_id,
+                            duplicate=payload_precheck.status == "duplicate_message_skipped",
+                            fetch_status=payload_precheck.status,
+                            error_message=payload_precheck.reason[:1000],
+                        )
+                    )
+                    fetched.append(
+                        {
+                            "uid": uid,
+                            "message_id": payload_precheck.message_id,
+                            "email_id": payload_precheck.duplicate_email_id,
+                            "duplicate": payload_precheck.status == "duplicate_message_skipped",
+                            "fetch_status": payload_precheck.status,
+                            "precheck": payload_precheck.to_dict(),
+                        }
+                    )
+                    continue
+
                 if archive_to_oss:
                     raw_object = await upload_bytes_to_oss(
                         session,
@@ -142,6 +183,7 @@ async def fetch_imap_emails(
                         fetch_job_run_id=job.id,
                         email_id=ingest_result.get("email", {}).get("id"),
                         duplicate=ingest_result.get("duplicate", False),
+                        fetch_status="duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
                     )
                 )
                 fetched.append(
@@ -150,6 +192,7 @@ async def fetch_imap_emails(
                         "message_id": payload.message_id,
                         "email_id": ingest_result.get("email", {}).get("id"),
                         "duplicate": ingest_result.get("duplicate", False),
+                        "fetch_status": "duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
                         "parse_status": ingest_result.get("email", {}).get("parse_status"),
                     }
                 )
@@ -165,6 +208,9 @@ async def fetch_imap_emails(
     finally:
         job.finished_at = utcnow()
         job.duration_ms = int((time.monotonic() - started) * 1000)
+        metadata = dict(job.metadata_json or {})
+        metadata["skipped_count"] = skipped_count
+        job.metadata_json = metadata
         if client is not None:
             try:
                 client.close()
@@ -181,6 +227,7 @@ async def fetch_imap_emails(
         "processed_count": job.processed_count,
         "success_count": job.success_count,
         "failed_count": job.failed_count,
+        "skipped_count": skipped_count,
         "fetched": fetched,
         "failures": failures,
     }

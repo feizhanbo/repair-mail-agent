@@ -16,12 +16,16 @@ def anyio_backend() -> str:
 
 
 class FakeSession:
-    def __init__(self) -> None:
+    def __init__(self, scalar_result=None) -> None:
         self.added = []
         self._next_id = 1
+        self.scalar_result = scalar_result
 
     def add(self, instance) -> None:
         self.added.append(instance)
+
+    async def scalar(self, _statement):
+        return self.scalar_result
 
     async def flush(self) -> None:
         for instance in self.added:
@@ -67,6 +71,16 @@ def _raw_eml() -> bytes:
     return message.as_bytes()
 
 
+def _raw_irrelevant_eml() -> bytes:
+    message = EmailMessage()
+    message["From"] = "News <news@example.com>"
+    message["To"] = "Repair <repair@example.com>"
+    message["Subject"] = "Newsletter"
+    message["Message-ID"] = "<imap-newsletter@example.com>"
+    message.set_content("unsubscribe from this newsletter")
+    return message.as_bytes()
+
+
 @pytest.mark.anyio
 async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(monkeypatch: pytest.MonkeyPatch) -> None:
     raw = _raw_eml()
@@ -109,3 +123,71 @@ async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(m
     assert any(isinstance(item, MailFetchRecord) and item.email_id == 77 for item in session.added)
     assert client.closed is True
     assert client.logged_out is True
+
+
+@pytest.mark.anyio
+async def test_fetch_imap_emails_skips_existing_uid_before_fetching_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = MailFetchRecord(
+        mailbox_account="imap-test@example.com",
+        folder_name="INBOX",
+        imap_uid="101",
+        message_id="<existing@example.com>",
+        email_id=33,
+        fetch_status="ingested",
+    )
+    existing.id = 9
+    session = FakeSession(existing)
+    client = FakeImapClient(_raw_eml())
+    fetched_raw = False
+
+    def fail_fetch_raw(_client, _uid: str) -> bytes:
+        nonlocal fetched_raw
+        fetched_raw = True
+        raise AssertionError("raw fetch should not happen for duplicate UID")
+
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher, "_uid_fetch_raw", fail_fetch_raw)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+
+    result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
+
+    assert fetched_raw is False
+    assert result["status"] == "success"
+    assert result["success_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["fetched"][0]["fetch_status"] == "duplicate_uid_skipped"
+
+
+@pytest.mark.anyio
+async def test_fetch_imap_emails_skips_irrelevant_before_oss_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    client = FakeImapClient(_raw_irrelevant_eml())
+    uploaded = False
+    ingested = False
+
+    async def fail_upload(*args, **kwargs):
+        nonlocal uploaded
+        uploaded = True
+        raise AssertionError("irrelevant email should not be archived to OSS")
+
+    async def fail_ingest(*args, **kwargs):
+        nonlocal ingested
+        ingested = True
+        raise AssertionError("irrelevant email should not be ingested")
+
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+    monkeypatch.setattr(imap_fetcher, "upload_bytes_to_oss", fail_upload)
+    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fail_ingest)
+
+    result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
+
+    assert uploaded is False
+    assert ingested is False
+    assert result["status"] == "success"
+    assert result["success_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["fetched"][0]["fetch_status"] == "irrelevant_skipped"
+    record = next(item for item in session.added if isinstance(item, MailFetchRecord))
+    assert record.fetch_status == "irrelevant_skipped"
+    assert record.email_id is None

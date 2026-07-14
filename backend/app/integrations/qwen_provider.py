@@ -73,9 +73,13 @@ class QwenProvider:
             parsed_json = json.loads(output_text)
             parsed = response_model.model_validate(parsed_json)
         except json.JSONDecodeError as exc:
-            raise AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON", raw_output=output_text) from exc
+            error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
+            error.raw_output = output_text  # type: ignore[attr-defined]
+            raise error from exc
         except ValidationError as exc:
-            raise AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID", raw_output=output_text) from exc
+            error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
+            error.raw_output = output_text  # type: ignore[attr-defined]
+            raise error from exc
 
         return AiJsonCompletion(
             trace_id=trace_id,
@@ -145,9 +149,13 @@ class QwenProvider:
             parsed_json = json.loads(output_text)
             parsed = response_model.model_validate(parsed_json)
         except json.JSONDecodeError as exc:
-            raise AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON", raw_output=output_text) from exc
+            error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
+            error.raw_output = output_text  # type: ignore[attr-defined]
+            raise error from exc
         except ValidationError as exc:
-            raise AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID", raw_output=output_text) from exc
+            error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
+            error.raw_output = output_text  # type: ignore[attr-defined]
+            raise error from exc
 
         return AiJsonCompletion(
             trace_id=trace_id,

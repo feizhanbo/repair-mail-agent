@@ -12,7 +12,7 @@ from app.core.database import get_session
 from app.core.response import ok
 from app.models import ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
-from app.services.ai import ai_configured
+from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 
@@ -32,12 +32,19 @@ def _config_payload() -> dict:
             "imap_configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
             "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD),
             "oss_configured": bool(settings.OSS_ENDPOINT and settings.OSS_BUCKET and settings.OSS_ACCESS_KEY and settings.OSS_SECRET_KEY),
-            "ai_configured": ai_configured(),
-            "ai_provider": settings.AI_PROVIDER,
+            "ai_configured": text_ai_configured(),
+            "text_ai_configured": text_ai_configured(),
+            "text_ai_provider": "deepseek",
             "ai_model": settings.AI_MODEL,
             "ai_base_url": settings.AI_BASE_URL,
             "ai_prompt_version": settings.AI_PROMPT_VERSION,
             "ai_timeout_seconds": settings.AI_TIMEOUT_SECONDS,
+            "multimodal_ai_configured": multimodal_ai_configured(),
+            "multimodal_provider": settings.MULTIMODAL_PROVIDER,
+            "qwen_vl_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
+            "relay_sn_sync_enabled": settings.RELAY_SN_SYNC_ENABLED,
+            "relay_push_enabled": settings.RELAY_PUSH_ENABLED,
+            "relay_configured": bool(settings.RELAY_BASE_URL and settings.RELAY_API_KEY),
         },
     }
 

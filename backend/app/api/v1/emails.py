@@ -17,6 +17,7 @@ from app.services import emails as email_service
 from app.services import imap_fetcher
 from app.services.email_flow_trace import build_email_flow_trace
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
+from app.services.mail_precheck import precheck_email_payload
 from app.services.storage import generate_presigned_url_for_object, upload_bytes_to_oss
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,15 @@ async def ingest_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
+    precheck = await precheck_email_payload(session, payload)
+    if not precheck.accepted:
+        if precheck.status == "duplicate_message_skipped":
+            result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
+        else:
+            result = {"skipped": True, "precheck": precheck.to_dict()}
+        await session.commit()
+        return ok(result, "email skipped by precheck")
+
     try:
         body = payload.html_body or payload.text_body or ""
         msg = MIMEText(body, "html" if payload.html_body else "plain", "utf-8")
@@ -206,6 +216,15 @@ async def ingest_eml(
         payload = payload_from_eml_bytes(content, mailbox_account=mailbox_account, folder_name=folder_name)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    precheck = await precheck_email_payload(session, payload)
+    if not precheck.accepted:
+        if precheck.status == "duplicate_message_skipped":
+            result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
+        else:
+            result = {"skipped": True, "precheck": precheck.to_dict()}
+        await session.commit()
+        return ok(result, "eml skipped by precheck")
+
     try:
         raw_object = await upload_bytes_to_oss(
             session,

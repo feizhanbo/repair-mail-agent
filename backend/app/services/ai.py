@@ -50,20 +50,23 @@ def _is_retryable_error(exc: AiProviderError) -> bool:
     return False
 
 
+def text_ai_configured() -> bool:
+    return bool(settings.AI_API_KEY)
+
+
+def multimodal_ai_configured() -> bool:
+    return (
+        settings.MULTIMODAL_PROVIDER.lower() == "qwen"
+        and bool(settings.QWEN_API_KEY)
+        and bool(settings.QWEN_VL_MODEL or settings.QWEN_MODEL)
+    )
+
+
 def ai_configured() -> bool:
-    return (settings.AI_PROVIDER.lower() == "deepseek" and bool(settings.AI_API_KEY)) or \
-           (settings.AI_PROVIDER.lower() == "qwen" and bool(settings.QWEN_API_KEY)) or \
-           bool(settings.AI_API_KEY)
+    return text_ai_configured()
 
 
-def _provider() -> DeepSeekProvider | QwenProvider:
-    if settings.AI_PROVIDER.lower() == "qwen":
-        return QwenProvider(
-            api_key=settings.QWEN_API_KEY,
-            base_url=settings.QWEN_BASE_URL,
-            model=settings.QWEN_MODEL,
-            timeout_seconds=settings.AI_TIMEOUT_SECONDS,
-        )
+def _text_provider() -> DeepSeekProvider:
     return DeepSeekProvider(
         api_key=settings.AI_API_KEY,
         base_url=settings.AI_BASE_URL,
@@ -161,7 +164,7 @@ async def _persist_ai_log(
         "trace_id": trace_id,
         "call_type": call_type,
         "prompt_version": settings.AI_PROMPT_VERSION,
-        "provider": settings.AI_PROVIDER,
+        "provider": "deepseek",
         "model": settings.AI_MODEL,
         "input": input_payload,
         "request": request_payload,
@@ -178,7 +181,7 @@ async def _persist_ai_log(
         email_id=email_id,
         ticket_id=ticket_id,
         call_type=call_type,
-        provider_name=settings.AI_PROVIDER,
+        provider_name="deepseek",
         model_name=settings.AI_MODEL,
         prompt_version=settings.AI_PROMPT_VERSION,
         input_summary=input_summary[:1000],
@@ -208,7 +211,7 @@ async def _run_ai_json(
     email_id: int | None = None,
     ticket_id: int | None = None,
 ) -> tuple[BaseModel | None, AiCallLog | None]:
-    if not ai_configured():
+    if not text_ai_configured():
         return None, None
 
     last_error: AiProviderError | None = None
@@ -216,7 +219,7 @@ async def _run_ai_json(
 
     for attempt in range(max_retries + 1):
         try:
-            completion = await _provider().chat_json(messages=messages, response_model=response_model)
+            completion = await _text_provider().chat_json(messages=messages, response_model=response_model)
             last_error = None
             break
         except AiProviderError as exc:
@@ -420,7 +423,7 @@ class MultimodalParseResult(BaseModel):
 
 
 def _qwen_vl_configured() -> bool:
-    return bool(settings.QWEN_API_KEY and settings.QWEN_MODEL)
+    return multimodal_ai_configured()
 
 
 def _oss_url_from_object(oss_obj: OssObject) -> str:
@@ -458,7 +461,7 @@ async def parse_attachment_multimodal(
     provider = QwenProvider(
         api_key=settings.QWEN_API_KEY,
         base_url=settings.QWEN_BASE_URL,
-        model=settings.QWEN_MODEL,
+        model=settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
         timeout_seconds=settings.AI_TIMEOUT_SECONDS,
     )
 
@@ -546,8 +549,10 @@ async def create_ai_parse_candidate(
             "source_type": "ai",
             "trace_id": ai_log.trace_id,
             "ai_call_log_id": ai_log.id,
-            "provider": settings.AI_PROVIDER,
+            "provider": "deepseek",
             "model": settings.AI_MODEL,
+            "multimodal_provider": settings.MULTIMODAL_PROVIDER,
+            "multimodal_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
             "prompt_version": settings.AI_PROMPT_VERSION,
             "mode": mode,
         },

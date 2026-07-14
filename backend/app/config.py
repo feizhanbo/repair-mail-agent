@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     IMAP_USER: str = "repair@example.com"
     IMAP_PASSWORD: str = ""
     IMAP_POLL_INTERVAL_MINUTES: int = 5
+    IMAP_FETCH_ENABLED: bool = True
+    IMAP_FOLDER: str = "INBOX"
+    IMAP_FETCH_LIMIT: int = 10
+    IMAP_UNSEEN_ONLY: bool = True
+    IMAP_ARCHIVE_TO_OSS: bool = True
+    IMAP_MARK_SEEN_AFTER_SUCCESS: bool = False
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
@@ -46,10 +52,19 @@ class Settings(BaseSettings):
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
+    MAIL_PRECHECK_IRRELEVANT_MIN_CONFIDENCE: float = 0.85
 
+    MULTIMODAL_PROVIDER: str = "qwen"
     QWEN_API_KEY: str = ""
     QWEN_MODEL: str = "qwen-plus"
+    QWEN_VL_MODEL: str = "qwen-vl-plus"
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    RELAY_BASE_URL: str = ""
+    RELAY_API_KEY: str = ""
+    RELAY_SN_SYNC_ENABLED: bool = False
+    RELAY_PUSH_ENABLED: bool = False
+    RELAY_TIMEOUT_SECONDS: float = 10.0
 
     AUTO_SEND_ENABLED: bool = False
     REPLY_SEND_MODE: str = "human_review"

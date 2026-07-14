@@ -34,9 +34,18 @@ def setup_logging():
 
 
 async def _scheduled_imap_fetch():
+    if not settings.IMAP_FETCH_ENABLED:
+        logger.info("Scheduled IMAP fetch skipped: IMAP_FETCH_ENABLED=false")
+        return
     try:
         async with AsyncSessionLocal() as session:
-            result = await fetch_imap_emails(session)
+            result = await fetch_imap_emails(
+                session,
+                folder_name=settings.IMAP_FOLDER,
+                limit=settings.IMAP_FETCH_LIMIT,
+                unseen_only=settings.IMAP_UNSEEN_ONLY,
+                archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
+            )
             await session.commit()
             logger.info(
                 "Scheduled IMAP fetch completed: job_id=%s status=%s processed=%s success=%s failed=%s",
@@ -96,13 +105,16 @@ async def lifespan(app: FastAPI):
     )
     read_runtime_config()
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        _scheduled_imap_fetch,
-        "interval",
-        minutes=settings.IMAP_POLL_INTERVAL_MINUTES,
-        id="imap_poll",
-        replace_existing=True,
-    )
+    if settings.IMAP_FETCH_ENABLED:
+        scheduler.add_job(
+            _scheduled_imap_fetch,
+            "interval",
+            minutes=settings.IMAP_POLL_INTERVAL_MINUTES,
+            id="imap_poll",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.add_job(
         _scheduled_auto_followup,
         "interval",

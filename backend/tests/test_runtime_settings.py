@@ -8,7 +8,7 @@ from app.api.v1.system import _config_payload
 from app.config import settings
 
 
-def test_system_payload_reports_qwen_configured_without_exposing_secrets(
+def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -23,6 +23,8 @@ def test_system_payload_reports_qwen_configured_without_exposing_secrets(
     monkeypatch.setattr(settings, "AI_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "AI_API_KEY", "")
     monkeypatch.setattr(settings, "QWEN_API_KEY", secret_values["qwen"])
+    monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
+    monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
     monkeypatch.setattr(settings, "IMAP_HOST", "imap.example.com")
     monkeypatch.setattr(settings, "IMAP_USER", "imap@example.com")
     monkeypatch.setattr(settings, "IMAP_PASSWORD", secret_values["imap"])
@@ -37,11 +39,14 @@ def test_system_payload_reports_qwen_configured_without_exposing_secrets(
     payload = _config_payload()
 
     integrations = payload["integrations"]
-    assert integrations["ai_configured"] is True
+    assert integrations["ai_configured"] is False
+    assert integrations["text_ai_configured"] is False
+    assert integrations["text_ai_provider"] == "deepseek"
+    assert integrations["multimodal_ai_configured"] is True
+    assert integrations["multimodal_provider"] == "qwen"
     assert integrations["imap_configured"] is True
     assert integrations["smtp_configured"] is True
     assert integrations["oss_configured"] is True
-    assert integrations["ai_provider"] == "qwen"
 
     serialized = json.dumps(payload, ensure_ascii=False)
     for secret in secret_values.values():

@@ -43,3 +43,21 @@ def test_parse_result_apply_status_columns() -> None:
     assert "applied_by_user_id" in columns
     assert "applied_at" in columns
 
+
+def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:
+    table = Base.metadata.tables["mail_fetch_records"]
+    constraint_columns = {
+        constraint.name: tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if constraint.name
+    }
+    assert constraint_columns["uk_mail_fetch_records"] == ("mailbox_account", "folder_name", "imap_uid")
+    assert "fetch_status" in table.columns
+
+
+def test_email_oss_link_columns_exist_for_archival_consistency() -> None:
+    email_columns = Base.metadata.tables["emails"].columns
+    attachment_columns = Base.metadata.tables["email_attachments"].columns
+    assert "raw_eml_oss_object_id" in email_columns
+    assert "oss_object_id" in attachment_columns
+
