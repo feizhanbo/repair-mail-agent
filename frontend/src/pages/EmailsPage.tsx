@@ -8,9 +8,10 @@ import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
-import type { Attachment, EmailIngestRequest, EmailItem, ParseResult } from '../types/api';
+import type { Attachment, EmailIngestAttachment, EmailIngestRequest, EmailIngestResult, EmailItem, ParseResult } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
+import { saveBlob } from '../utils/download';
 
 type EmailFilters = {
   subject?: string;
@@ -26,9 +27,16 @@ export default function EmailsPage() {
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [ingestOpen, setIngestOpen] = useState(false);
+  const [manualAttachments, setManualAttachments] = useState<EmailIngestAttachment[]>([]);
   const [filterForm] = Form.useForm<EmailFilters>();
   const queryClient = useQueryClient();
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
+  const ingestSuccessMessage = (data: EmailIngestResult) => {
+    if (data.skipped) return '邮件已被预检查跳过';
+    if (data.duplicate) return '邮件已存在，未重复入库';
+    if (data.parse && typeof data.parse === 'object' && 'manual_ticket' in data.parse) return '邮件已入库并进入人工复核';
+    return '邮件已入库';
+  };
   const emailsQuery = useQuery({
     queryKey: ['emails', filters, page],
     queryFn: () => api.emails({ ...filters, page, page_size: 20 }),
@@ -39,10 +47,11 @@ export default function EmailsPage() {
     enabled: Boolean(selectedId),
   });
   const ingestMutation = useMutation({
-    mutationFn: api.ingestEmail,
-    onSuccess: () => {
-      message.success('邮件已入库');
+    mutationFn: (values: EmailIngestRequest) => api.ingestEmail({ ...values, attachments: manualAttachments }),
+    onSuccess: (data) => {
+      message.success(ingestSuccessMessage(data));
       setIngestOpen(false);
+      setManualAttachments([]);
       void queryClient.invalidateQueries({ queryKey: ['emails'] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     },
@@ -50,8 +59,8 @@ export default function EmailsPage() {
   });
   const ingestEmlMutation = useMutation({
     mutationFn: (file: File) => api.ingestEmlFile(file, { auto_parse: true }),
-    onSuccess: () => {
-      message.success('EML imported');
+    onSuccess: (data) => {
+      message.success(ingestSuccessMessage(data));
       void queryClient.invalidateQueries({ queryKey: ['emails'] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     },
@@ -80,6 +89,23 @@ export default function EmailsPage() {
     },
     onError: handleMutationError,
   });
+  const exportMutation = useMutation({
+    mutationFn: () => api.exportEmails(filters),
+    onSuccess: (blob) => saveBlob(blob, 'emails-export.xlsx'),
+    onError: handleMutationError,
+  });
+  const addManualAttachment = async (file: File) => {
+    const content_base64 = await fileToBase64(file);
+    setManualAttachments((items) => [
+      ...items,
+      {
+        file_name: file.name,
+        content_type: file.type || 'application/octet-stream',
+        file_size: file.size,
+        content_base64,
+      },
+    ]);
+  };
 
   const columns: ColumnsType<EmailItem> = [
     { title: '主题', dataIndex: 'subject', ellipsis: true, render: (value?: string) => value || '-' },
@@ -119,6 +145,9 @@ export default function EmailsPage() {
         title="邮件中心"
         extra={(
           <Space>
+            <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
+              导出
+            </Button>
             <Upload
               accept=".eml,message/rfc822"
               showUploadList={false}
@@ -127,10 +156,10 @@ export default function EmailsPage() {
                 return false;
               }}
             >
-              <Button icon={<UploadOutlined />} loading={ingestEmlMutation.isPending}>Upload EML</Button>
+              <Button icon={<UploadOutlined />} loading={ingestEmlMutation.isPending}>导入 EML</Button>
             </Upload>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setIngestOpen(true)}>
-              Manual
+              手动入库
             </Button>
           </Space>
         )}
@@ -256,6 +285,20 @@ export default function EmailsPage() {
                     ),
                   },
                 ]}
+                expandable={{
+                  expandedRowRender: (record) => (
+                    <div className="evidence-grid">
+                      <div>
+                        <Typography.Text strong>提取文本</Typography.Text>
+                        <pre className="json-block">{record.extracted_text || '-'}</pre>
+                      </div>
+                      <div>
+                        <Typography.Text strong>提取 JSON</Typography.Text>
+                        <JsonBlock value={record.extracted_json} />
+                      </div>
+                    </div>
+                  ),
+                }}
               />
             </div>
             <div>
@@ -277,7 +320,16 @@ export default function EmailsPage() {
           </div>
         ) : null}
       </Drawer>
-      <Modal title="手动邮件入库" open={ingestOpen} onCancel={() => setIngestOpen(false)} footer={null} destroyOnClose>
+      <Modal
+        title="手动邮件入库"
+        open={ingestOpen}
+        onCancel={() => {
+          setIngestOpen(false);
+          setManualAttachments([]);
+        }}
+        footer={null}
+        destroyOnClose
+      >
         <Form<EmailIngestRequest>
           layout="vertical"
           initialValues={{ mailbox_account: 'manual', folder_name: 'INBOX' }}
@@ -298,6 +350,44 @@ export default function EmailsPage() {
           <Form.Item label="正文" name="text_body">
             <Input.TextArea rows={7} />
           </Form.Item>
+          <Form.Item label="附件">
+            <Upload
+              multiple
+              accept=".docx,.xlsx,.csv,.txt,.html,.htm,.pdf,image/*"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                addManualAttachment(file).catch(handleMutationError);
+                return Upload.LIST_IGNORE;
+              }}
+            >
+              <Button icon={<UploadOutlined />}>选择附件</Button>
+            </Upload>
+            <Table<EmailIngestAttachment>
+              size="small"
+              rowKey={(record) => `${record.file_name}-${record.file_size ?? 0}`}
+              dataSource={manualAttachments}
+              pagination={false}
+              style={{ marginTop: 8 }}
+              columns={[
+                { title: '文件名', dataIndex: 'file_name', ellipsis: true },
+                { title: '类型', dataIndex: 'content_type', width: 160 },
+                { title: '大小', dataIndex: 'file_size', width: 100, render: numberText },
+                {
+                  title: '操作',
+                  width: 80,
+                  render: (_, record) => (
+                    <Button
+                      type="link"
+                      size="small"
+                      onClick={() => setManualAttachments((items) => items.filter((item) => item !== record))}
+                    >
+                      移除
+                    </Button>
+                  ),
+                },
+              ]}
+            />
+          </Form.Item>
           <Button type="primary" htmlType="submit" loading={ingestMutation.isPending}>
             入库
           </Button>
@@ -305,4 +395,16 @@ export default function EmailsPage() {
       </Modal>
     </div>
   );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      resolve(value.includes(',') ? value.split(',', 2)[1] : value);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('FILE_READ_FAILED'));
+    reader.readAsDataURL(file);
+  });
 }

@@ -28,6 +28,7 @@ class EmailIngestRequest(BaseModel):
     sent_at: datetime | None = None
     received_at: datetime | None = None
     raw_eml_oss_object_id: int | None = None
+    raw_eml_sha256: str | None = Field(default=None, max_length=64)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 

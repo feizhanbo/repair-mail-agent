@@ -12,6 +12,7 @@ from app.api.deps import CurrentUser, get_current_user
 from app.config import settings
 from app.core.database import get_session
 from app.main import app
+from app.services import emails as email_service
 from app.services import manual_review as manual_review_service
 from app.services import master_data as master_data_service
 from app.services import replies as reply_service
@@ -86,6 +87,7 @@ def test_expected_business_routes_are_registered() -> None:
     assert "POST /api/v1/auth/login" in routes
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
     assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
+    assert "GET /api/v1/emails/export" in routes
     assert "GET /api/v1/emails/{email_id}/raw-eml-url" in routes
     assert "GET /api/v1/emails/attachments/{attachment_id}/download-url" in routes
     assert "PATCH /api/v1/tickets/{ticket_id}/fields" in routes
@@ -222,6 +224,25 @@ def test_ticket_selected_export_forwards_ids(monkeypatch) -> None:
     assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     assert response.content.startswith(b"PK")
     assert seen["ids"] == [3, 8]
+
+
+def test_email_export_returns_xlsx_blob(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_export(_session, **kwargs):
+        seen.update(kwargs)
+        return [{"id": 1, "message_id": "<m@example.com>", "subject": "Repair", "attachment_count": 2}]
+
+    monkeypatch.setattr(email_service, "export_emails", fake_export)
+
+    with make_client() as client:
+        response = client.get("/api/v1/emails/export", params={"parse_status": "parsed", "keyword": "SN001"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert response.content.startswith(b"PK")
+    assert seen["parse_status"] == "parsed"
+    assert seen["keyword"] == "SN001"
 
 
 def test_http_exception_uses_unified_error_contract(monkeypatch) -> None:

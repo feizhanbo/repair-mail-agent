@@ -485,6 +485,13 @@ function TicketDetailView({
 }) {
   const timelineEmails = detail.email_timeline.length > 0 ? detail.email_timeline : detail.source_email ? [detail.source_email] : [];
   const fieldAudits = detail.field_evidence?.field_audits ?? [];
+  const attachmentDownloadMutation = useMutation({
+    mutationFn: (attachmentId: number) => api.attachmentDownloadUrl(attachmentId),
+    onSuccess: (data) => {
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
 
   return (
     <div className="drawer-stack">
@@ -650,6 +657,22 @@ function TicketDetailView({
                   { title: '大小', dataIndex: 'file_size', width: 100, render: formatBytes },
                   { title: '解析状态', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
                   { title: '解析错误', dataIndex: 'parse_error', ellipsis: true, render: (value?: string) => value || '-' },
+                  {
+                    title: '下载',
+                    width: 90,
+                    render: (_, record) => (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        disabled={!record.oss_object_id}
+                        loading={attachmentDownloadMutation.isPending}
+                        onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                      >
+                        下载
+                      </Button>
+                    ),
+                  },
                 ]}
                 expandable={{
                   expandedRowRender: (record) => (

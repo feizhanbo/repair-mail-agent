@@ -91,7 +91,7 @@ async def precheck_email_payload(
     session: AsyncSession,
     payload: EmailIngestRequest,
 ) -> MailPrecheckResult:
-    message_id = normalize_message_id(payload.message_id)
+    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
     payload.message_id = message_id
 
     duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))

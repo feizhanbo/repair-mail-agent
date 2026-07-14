@@ -57,6 +57,7 @@ function friendlyServerMessage(status?: number, code?: string): string {
     WORKFLOW_STATUS_NOT_FOUND: '目标状态不可用，请联系管理员',
     TICKET_ALREADY_CLOSED: '工单已关闭，不能继续操作',
     EMAIL_NOT_FOUND: '邮件不存在或已被删除',
+    ATTACHMENT_CONTENT_INVALID: '附件内容无法读取，请重新选择文件',
     MANUAL_TASK_NOT_FOUND: '复核任务不存在或已被处理',
     MANUAL_TASK_NOT_CLAIMABLE: '当前任务不能领取',
     MANUAL_TASK_NOT_RELEASABLE: '当前任务不能释放',
@@ -156,6 +157,7 @@ export const api = {
   emailFlowTrace: (id: number) => getData<EmailFlowTrace>(`/emails/${id}/flow-trace`),
   rawEmlDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/${id}/raw-eml-url`),
   attachmentDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/attachments/${id}/download-url`),
+  exportEmails: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/emails/export', { params, responseType: 'blob' }),
   ingestEmail: (body: EmailIngestRequest) => postData<EmailIngestResult, EmailIngestRequest>('/emails/ingest', body),
   ingestEmlFile: (file: File, options?: { mailbox_account?: string; folder_name?: string; auto_parse?: boolean }) => {
     const body = new FormData();

@@ -20,7 +20,7 @@ class FakeSession:
         return self.duplicate
 
 
-def _payload(*, subject: str, text_body: str, message_id: str = "<precheck@example.com>") -> EmailIngestRequest:
+def _payload(*, subject: str, text_body: str, message_id: str | None = "<precheck@example.com>") -> EmailIngestRequest:
     return EmailIngestRequest(
         mailbox_account="manual",
         folder_name="INBOX",
@@ -42,6 +42,23 @@ async def test_precheck_rejects_duplicate_message_id_before_oss_upload() -> None
     assert result.accepted is False
     assert result.status == "duplicate_message_skipped"
     assert result.duplicate_email_id == 42
+
+
+@pytest.mark.anyio
+async def test_precheck_uses_raw_eml_hash_when_message_id_missing() -> None:
+    raw_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+    synthetic_message_id = "<raw-abcdef1234567890abcdef12@repair-mail-agent.local>"
+    duplicate = Email(mailbox_account="manual", message_id=synthetic_message_id, from_address="customer@example.com")
+    duplicate.id = 88
+    payload = _payload(subject="Repair SN001", text_body="Please repair SN001", message_id=None)
+    payload.raw_eml_sha256 = raw_hash
+
+    result = await precheck_email_payload(FakeSession(duplicate), payload)
+
+    assert payload.message_id == synthetic_message_id
+    assert result.accepted is False
+    assert result.status == "duplicate_message_skipped"
+    assert result.duplicate_email_id == 88
 
 
 @pytest.mark.anyio

@@ -93,6 +93,11 @@ async def export_tickets(
         "assigned_user_id",
         "followup_count",
         "confidence_score",
+        "missing_fields_json",
+        "conflict_fields_json",
+        "attachment_summary",
+        "sn_validation_summary",
+        "reply_status_summary",
         "created_at",
         "updated_at",
     ]

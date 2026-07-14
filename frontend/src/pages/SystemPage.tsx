@@ -251,14 +251,22 @@ export default function SystemPage() {
           <Descriptions.Item label="追问上限">{info?.max_follow_up ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="置信度阈值">{info?.confidence_threshold ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="自动发送安全阈值">{info?.auto_send_min_confidence ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="AI 状态">
-            <Tag color={integrations.ai_configured ? 'green' : 'default'}>{integrations.ai_configured ? '已配置' : '未配置'}</Tag>
+          <Descriptions.Item label="文本 AI 状态">
+            <Tag color={integrations.text_ai_configured ? 'green' : 'default'}>{integrations.text_ai_configured ? '已配置' : '未配置'}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="AI Provider">{String(integrations.ai_provider ?? '-')}</Descriptions.Item>
-          <Descriptions.Item label="AI 模型">{String(integrations.ai_model ?? '-')}</Descriptions.Item>
-          <Descriptions.Item label="AI Base URL">{String(integrations.ai_base_url ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label="文本 AI Provider">{String(integrations.text_ai_provider ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label="文本 AI 模型">{String(integrations.ai_model ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label="文本 AI Base URL">{String(integrations.ai_base_url ?? '-')}</Descriptions.Item>
           <Descriptions.Item label="Prompt 版本">{String(integrations.ai_prompt_version ?? '-')}</Descriptions.Item>
           <Descriptions.Item label="AI 超时">{integrations.ai_timeout_seconds ? `${String(integrations.ai_timeout_seconds)}s` : '-'}</Descriptions.Item>
+          <Descriptions.Item label="多模态 AI 状态">
+            <Tag color={integrations.multimodal_ai_configured ? 'green' : 'default'}>{integrations.multimodal_ai_configured ? '已配置' : '未配置'}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="多模态 Provider">{String(integrations.multimodal_provider ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label="Qwen VL 模型">{String(integrations.qwen_vl_model ?? '-')}</Descriptions.Item>
+          <Descriptions.Item label="SN 中转同步">{integrations.relay_sn_sync_enabled ? '开启' : '关闭'}</Descriptions.Item>
+          <Descriptions.Item label="解析结果推送">{integrations.relay_push_enabled ? '开启' : '关闭'}</Descriptions.Item>
+          <Descriptions.Item label="中转配置">{integrations.relay_configured ? '已配置' : '未配置'}</Descriptions.Item>
         </Descriptions>
       </SectionPanel>
       <SectionPanel>

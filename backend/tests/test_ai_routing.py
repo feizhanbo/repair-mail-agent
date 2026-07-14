@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.models import EmailAttachment, OssObject
-from app.services import ai
+from app.models import EmailAttachment
+from app.services import ai, attachment_parser
 
 
 @pytest.fixture
@@ -42,28 +42,21 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
         async def vl_chat(self, **kwargs):
             del kwargs
             return SimpleNamespace(
-                parsed=ai.MultimodalParseResult(
+                parsed=attachment_parser.AttachmentParseJson(
+                    file_type="image",
                     extracted_fields={"sn": "SN001"},
                     extracted_items=[{"sn": "SN001"}],
                     raw_text="SN001",
                 )
             )
 
-    class FakeSession:
-        async def get(self, model, _id: int):
-            if model is OssObject:
-                obj = OssObject(
-                    bucket="repair-mail",
-                    endpoint="https://oss.example.com",
-                    object_key="attachments/fault.png",
-                    source_type="email_attachment",
-                    upload_status="success",
-                )
-                obj.id = _id
-                return obj
-            return None
+    async def fake_presigned_url(_session, *, oss_object_id: int, expires_seconds: int) -> str:
+        assert oss_object_id == 12
+        assert expires_seconds == 1800
+        return "https://oss.example.com/signed-image"
 
-    monkeypatch.setattr(ai, "QwenProvider", FakeQwenProvider)
+    monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
+    monkeypatch.setattr(attachment_parser, "generate_presigned_url_for_object", fake_presigned_url)
     attachment = EmailAttachment(
         email_id=1,
         file_name="fault.png",
@@ -72,7 +65,7 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
         oss_object_id=12,
     )
 
-    result = await ai.parse_attachment_multimodal(FakeSession(), attachment)
+    result = await ai.parse_attachment_multimodal(SimpleNamespace(), attachment)
 
     assert seen["model"] == "qwen-vl-plus"
     assert result is not None

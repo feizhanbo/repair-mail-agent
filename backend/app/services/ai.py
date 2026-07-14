@@ -442,53 +442,9 @@ async def parse_attachment_multimodal(
     session: AsyncSession,
     attachment: EmailAttachment,
 ) -> dict[str, Any] | None:
-    content_type = (attachment.content_type or "").lower()
-    if not (content_type.startswith("image/") or content_type == "application/pdf"):
-        return None
+    from app.services.attachment_parser import parse_attachment
 
-    if not _qwen_vl_configured():
-        return None
-
-    image_url: str | None = None
-    if attachment.oss_object_id:
-        oss_obj = await session.get(OssObject, attachment.oss_object_id)
-        if oss_obj is not None and oss_obj.upload_status == "success":
-            image_url = _oss_url_from_object(oss_obj)
-
-    if not image_url:
-        return None
-
-    provider = QwenProvider(
-        api_key=settings.QWEN_API_KEY,
-        base_url=settings.QWEN_BASE_URL,
-        model=settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
-        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
-    )
-
-    prompt = (
-        "请识别并提取这张图片/文档中的维修报修相关信息（SN序列号、设备型号、故障描述、客户信息等）。\n"
-        "请输出 JSON，字段为 extracted_fields（结构化字段键值对）、extracted_items（物品列表，每项含 sn、"
-        "failure_description 等）、raw_text（完整识别出的文本内容）。"
-    )
-
-    try:
-        completion = await provider.vl_chat(
-            image_urls=[image_url],
-            prompt=prompt,
-            response_model=MultimodalParseResult,
-            temperature=0.1,
-        )
-    except AiProviderError:
-        return None
-
-    parsed = completion.parsed
-    return {
-        "file_name": attachment.file_name,
-        "content_type": attachment.content_type,
-        "extracted_fields": parsed.extracted_fields or {},
-        "extracted_items": parsed.extracted_items or [],
-        "raw_text": parsed.raw_text or "",
-    }
+    return await parse_attachment(session, attachment)
 
 
 async def create_ai_parse_candidate(

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import logging
 from datetime import date
-from email.mime.text import MIMEText
+from email.message import EmailMessage
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
@@ -15,14 +19,87 @@ from app.models import Email, EmailAttachment
 from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
 from app.services import imap_fetcher
+from app.services.audit import log_operation
 from app.services.email_flow_trace import build_email_flow_trace
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
+from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services.storage import generate_presigned_url_for_object, upload_bytes_to_oss
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _attachment_content_bytes(attachment: dict) -> bytes | None:
+    if attachment.get("content_base64"):
+        return base64.b64decode(str(attachment["content_base64"]), validate=True)
+    content = attachment.get("content")
+    if content is None:
+        return None
+    if isinstance(content, bytes):
+        return content
+    return str(content).encode("utf-8")
+
+
+def _manual_raw_eml(payload: EmailIngestRequest) -> bytes:
+    msg = EmailMessage()
+    msg["From"] = payload.from_address
+    if payload.to_addresses:
+        msg["To"] = payload.to_addresses
+    if payload.cc_addresses:
+        msg["Cc"] = payload.cc_addresses
+    if payload.subject:
+        msg["Subject"] = payload.subject
+    if payload.message_id:
+        msg["Message-ID"] = payload.message_id
+    if payload.in_reply_to:
+        msg["In-Reply-To"] = payload.in_reply_to
+    if payload.references_header:
+        msg["References"] = payload.references_header
+    if payload.sent_at:
+        from email.utils import format_datetime
+
+        msg["Date"] = format_datetime(payload.sent_at)
+    if payload.html_body:
+        msg.set_content(payload.text_body or "")
+        msg.add_alternative(payload.html_body, subtype="html")
+    else:
+        msg.set_content(payload.text_body or "", subtype="plain")
+    for attachment in payload.attachments:
+        content = _attachment_content_bytes(attachment)
+        if content is None:
+            continue
+        content_type = str(attachment.get("content_type") or "application/octet-stream")
+        maintype, _, subtype = content_type.partition("/")
+        msg.add_attachment(
+            content,
+            maintype=maintype or "application",
+            subtype=subtype or "octet-stream",
+            filename=attachment.get("file_name") or "attachment",
+        )
+    return msg.as_bytes()
+
+
+async def _record_precheck_skip(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    source: str,
+    precheck,
+) -> None:
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="email_precheck_skipped",
+        target_type="email",
+        description=precheck.reason,
+        after_data={"source": source, "precheck": precheck.to_dict()},
+    )
 
 
 @router.get("")
@@ -55,6 +132,53 @@ async def list_emails(
         received_end=received_end,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.get("/export")
+async def export_emails(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    parse_status: str | None = None,
+    intent_type: str | None = None,
+    keyword: str | None = None,
+    subject: str | None = None,
+    from_address: str | None = None,
+    message_id: str | None = None,
+    received_start: date | None = None,
+    received_end: date | None = None,
+) -> Response:
+    del current_user
+    rows = await email_service.export_emails(
+        session,
+        parse_status=parse_status,
+        intent_type=intent_type,
+        keyword=keyword,
+        subject=subject,
+        from_address=from_address,
+        message_id=message_id,
+        received_start=received_start,
+        received_end=received_end,
+    )
+    fieldnames = [
+        "id",
+        "message_id",
+        "subject",
+        "from_address",
+        "to_addresses",
+        "intent_type",
+        "parse_status",
+        "received_at",
+        "attachment_count",
+        "latest_parser_type",
+        "latest_confidence_score",
+        "latest_missing_fields",
+        "latest_conflict_fields",
+    ]
+    return Response(
+        content=xlsx_bytes(rows, fieldnames),
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="emails-export.xlsx"'},
+    )
 
 
 @router.get("/{email_id}/flow-trace")
@@ -138,36 +262,22 @@ async def ingest_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
+    try:
+        raw_eml = _manual_raw_eml(payload)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ATTACHMENT_CONTENT_INVALID") from exc
+    payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
         else:
+            await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest", precheck=precheck)
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok(result, "email skipped by precheck")
 
     try:
-        body = payload.html_body or payload.text_body or ""
-        msg = MIMEText(body, "html" if payload.html_body else "plain", "utf-8")
-        msg["From"] = payload.from_address
-        if payload.to_addresses:
-            msg["To"] = payload.to_addresses
-        if payload.cc_addresses:
-            msg["Cc"] = payload.cc_addresses
-        if payload.subject:
-            msg["Subject"] = payload.subject
-        if payload.message_id:
-            msg["Message-ID"] = payload.message_id
-        if payload.in_reply_to:
-            msg["In-Reply-To"] = payload.in_reply_to
-        if payload.references_header:
-            msg["References"] = payload.references_header
-        if payload.sent_at:
-            from email.utils import format_datetime
-
-            msg["Date"] = format_datetime(payload.sent_at)
-        raw_eml = msg.as_bytes()
         raw_object = await upload_bytes_to_oss(
             session,
             content=raw_eml,
@@ -178,10 +288,8 @@ async def ingest_email(
         )
         payload.raw_eml_oss_object_id = raw_object.id
         for attachment in payload.attachments:
-            attachment_content = attachment.get("content")
+            attachment_content = _attachment_content_bytes(attachment)
             if attachment_content:
-                if isinstance(attachment_content, str):
-                    attachment_content = attachment_content.encode("utf-8")
                 attachment_object = await upload_bytes_to_oss(
                     session,
                     content=attachment_content,
@@ -214,6 +322,7 @@ async def ingest_eml(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EML_FILE_EMPTY")
     try:
         payload = payload_from_eml_bytes(content, mailbox_account=mailbox_account, folder_name=folder_name)
+        payload.raw_eml_sha256 = _sha256_bytes(content)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
@@ -221,6 +330,7 @@ async def ingest_eml(
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
         else:
+            await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload", precheck=precheck)
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok(result, "eml skipped by precheck")

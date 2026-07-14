@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import Email, EmailAttachment, EmailThread, ParseResult
 from app.schemas.business import EmailIngestRequest
-from app.services.ai import create_ai_parse_candidate, parse_attachment_multimodal
+from app.services.ai import create_ai_parse_candidate
+from app.services.attachment_parser import parse_attachment
 from app.services.audit import log_operation
-from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, utcnow
+from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, to_plain, utcnow
 from app.services.parser import classify_email, clean_email_body, extract_fields
 from app.services.replies import create_reply_draft
 from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result
@@ -53,6 +54,65 @@ async def list_emails(
     statement = statement.order_by(Email.received_at.desc(), Email.id.desc())
     emails, total = await paginate_scalars(session, statement, page, page_size)
     return [model_to_dict(email, EMAIL_FIELDS) for email in emails], total
+
+
+async def export_emails(
+    session: AsyncSession,
+    *,
+    parse_status: str | None = None,
+    intent_type: str | None = None,
+    keyword: str | None = None,
+    subject: str | None = None,
+    from_address: str | None = None,
+    message_id: str | None = None,
+    received_start: date | None = None,
+    received_end: date | None = None,
+) -> list[dict[str, Any]]:
+    statement = select(Email)
+    if parse_status:
+        statement = statement.where(Email.parse_status == parse_status)
+    if intent_type:
+        statement = statement.where(Email.intent_type == intent_type)
+    if subject:
+        statement = statement.where(Email.subject.like(f"%{subject}%"))
+    if from_address:
+        statement = statement.where(Email.from_address.like(f"%{from_address}%"))
+    if message_id:
+        statement = statement.where(Email.message_id.like(f"%{message_id}%"))
+    if received_start:
+        statement = statement.where(Email.received_at >= received_start)
+    if received_end:
+        statement = statement.where(Email.received_at <= received_end)
+    if keyword:
+        like = f"%{keyword}%"
+        statement = statement.where(or_(Email.subject.like(like), Email.from_address.like(like), Email.clean_body.like(like)))
+    rows = (await session.execute(statement.order_by(Email.received_at.desc(), Email.id.desc()))).scalars().all()
+    export_rows: list[dict[str, Any]] = []
+    for email in rows:
+        attachment_count = int(
+            await session.scalar(select(func.count()).select_from(EmailAttachment).where(EmailAttachment.email_id == email.id)) or 0
+        )
+        latest_parse = await session.scalar(
+            select(ParseResult).where(ParseResult.email_id == email.id).order_by(ParseResult.created_at.desc(), ParseResult.id.desc())
+        )
+        export_rows.append(
+            {
+                "id": email.id,
+                "message_id": email.message_id,
+                "subject": email.subject,
+                "from_address": email.from_address,
+                "to_addresses": email.to_addresses,
+                "intent_type": email.intent_type,
+                "parse_status": email.parse_status,
+                "received_at": email.received_at,
+                "attachment_count": attachment_count,
+                "latest_parser_type": latest_parse.parser_type if latest_parse else None,
+                "latest_confidence_score": latest_parse.confidence_score if latest_parse else None,
+                "latest_missing_fields": to_plain(latest_parse.missing_fields) if latest_parse else None,
+                "latest_conflict_fields": to_plain(latest_parse.conflict_fields) if latest_parse else None,
+            }
+        )
+    return export_rows
 
 
 async def get_email_detail(session: AsyncSession, email_id: int) -> dict[str, Any]:
@@ -139,7 +199,7 @@ async def ingest_email(
     user_id: int | None = None,
     auto_parse: bool = True,
 ) -> dict[str, Any]:
-    message_id = normalize_message_id(payload.message_id)
+    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
     duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))
     if duplicate is not None:
         return {"duplicate": True, "email": serialize_email(duplicate)}
@@ -162,6 +222,7 @@ async def ingest_email(
         fetch_job_run_id=payload.fetch_job_run_id,
         message_id=message_id,
         raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
+        raw_headers={"raw_eml_sha256": payload.raw_eml_sha256} if payload.raw_eml_sha256 else None,
         in_reply_to=payload.in_reply_to,
         references_header=payload.references_header,
         from_address=payload.from_address,
@@ -343,17 +404,9 @@ async def reparse_email(
 
     multimodal_results: list[dict[str, Any]] = []
     for attachment in attachments:
-        ct = (attachment.content_type or "").lower()
-        if not (ct.startswith("image/") or ct == "application/pdf"):
-            continue
-        multimodal = await parse_attachment_multimodal(session, attachment)
-        if multimodal:
-            multimodal_results.append(multimodal)
-            attachment.extracted_json = {
-                "multimodal": multimodal,
-                "parsed_at": utcnow().isoformat(),
-            }
-            attachment.parse_status = "parsed"
+        attachment_result = await parse_attachment(session, attachment)
+        if attachment_result:
+            multimodal_results.append(attachment_result)
 
     thread = await session.get(EmailThread, email.thread_id) if email.thread_id else None
     ai_result = await create_ai_parse_candidate(

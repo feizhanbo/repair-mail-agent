@@ -135,3 +135,27 @@ async def generate_presigned_url_for_object(
         bucket=oss_object.bucket,
         endpoint=oss_object.endpoint or settings.OSS_ENDPOINT,
     )
+
+
+async def download_oss_object_bytes(
+    session: AsyncSession,
+    *,
+    oss_object_id: int,
+) -> bytes:
+    if not _oss_configured():
+        raise StorageConfigurationError("OSS_NOT_CONFIGURED")
+
+    oss_object = await session.scalar(select(OssObject).where(OssObject.id == oss_object_id))
+    if oss_object is None:
+        raise ValueError(f"OssObject with id {oss_object_id} not found")
+    if oss_object.upload_status != "success":
+        raise StorageUploadError("OSS_OBJECT_NOT_READY")
+
+    import oss2
+
+    auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
+    bucket = oss2.Bucket(auth, oss_object.endpoint or settings.OSS_ENDPOINT, oss_object.bucket)
+    try:
+        return bucket.get_object(oss_object.object_key).read()
+    except Exception as exc:
+        raise StorageUploadError("OSS_DOWNLOAD_FAILED") from exc

@@ -32,9 +32,11 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def normalize_message_id(message_id: str | None) -> str:
+def normalize_message_id(message_id: str | None, *, fallback_hash: str | None = None) -> str:
     if message_id and message_id.strip():
         return message_id.strip()
+    if fallback_hash and fallback_hash.strip():
+        return f"<raw-{fallback_hash.strip().lower()[:24]}@repair-mail-agent.local>"
     return f"<manual-{sha256_text(str(utcnow().timestamp()))[:24]}@repair-mail-agent.local>"
 
 

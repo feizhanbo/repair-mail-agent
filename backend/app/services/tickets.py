@@ -297,7 +297,16 @@ async def export_tickets(
         request_date_end=request_date_end,
     ).order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
     rows = (await session.execute(statement)).scalars().all()
-    return [serialize_ticket(ticket) for ticket in rows]
+    export_rows: list[dict[str, Any]] = []
+    for ticket in rows:
+        data = serialize_ticket(ticket)
+        data["missing_fields_json"] = json.dumps(to_plain(ticket.missing_fields), ensure_ascii=False) if ticket.missing_fields else ""
+        data["conflict_fields_json"] = json.dumps(to_plain(ticket.conflict_fields), ensure_ascii=False) if ticket.conflict_fields else ""
+        data["attachment_summary"] = await _attachment_export_summary(session, ticket.id)
+        data["sn_validation_summary"] = await _sn_validation_export_summary(session, ticket.id)
+        data["reply_status_summary"] = await _reply_export_summary(session, ticket.id)
+        export_rows.append(data)
+    return export_rows
 
 
 def _ticket_export_rows(ticket: RepairTicket, items: list[RepairTicketItem]) -> list[dict[str, Any]]:
@@ -323,11 +332,38 @@ def _ticket_export_rows(ticket: RepairTicket, items: list[RepairTicketItem]) -> 
                 {"section": f"明细{item.line_no}", "field": "SN", "value": item.sn},
                 {"section": f"明细{item.line_no}", "field": "物料编码", "value": item.material_code},
                 {"section": f"明细{item.line_no}", "field": "物料名称", "value": item.material_name},
-                {"section": f"明细{item.line_no}", "field": "故障现象", "value": item.fault_description},
+                {"section": f"明细{item.line_no}", "field": "故障现象", "value": item.failure_description},
                 {"section": f"明细{item.line_no}", "field": "数量", "value": item.quantity},
             ]
         )
     return rows
+
+
+async def _attachment_export_summary(session: AsyncSession, ticket_id: int) -> str:
+    attachments = await get_ticket_attachments(session, ticket_id)
+    parts: list[str] = []
+    for attachment in attachments:
+        extracted = attachment.get("extracted_json") or {}
+        summary = extracted.get("summary") if isinstance(extracted, dict) else None
+        parts.append(
+            f"{attachment.get('file_name') or '-'}[{attachment.get('parse_status') or '-'}]"
+            + (f": {summary}" if summary else "")
+        )
+    return "\n".join(parts)
+
+
+async def _sn_validation_export_summary(session: AsyncSession, ticket_id: int) -> str:
+    rows = (
+        await session.execute(select(SnValidationResult).where(SnValidationResult.ticket_id == ticket_id).order_by(SnValidationResult.checked_at.desc()))
+    ).scalars().all()
+    return "\n".join(f"{row.sn}: {row.result_status} {row.result_message or ''}".strip() for row in rows)
+
+
+async def _reply_export_summary(session: AsyncSession, ticket_id: int) -> str:
+    rows = (
+        await session.execute(select(ReplyRecord).where(ReplyRecord.ticket_id == ticket_id).order_by(ReplyRecord.created_at.desc()))
+    ).scalars().all()
+    return "\n".join(f"{row.reply_type}: review={row.review_status}, send={row.send_status}" for row in rows)
 
 
 async def export_tickets_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
@@ -341,7 +377,15 @@ async def export_tickets_selected(session: AsyncSession, *, ids: list[int]) -> b
         items = (
             await session.execute(select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket.id).order_by(RepairTicketItem.line_no))
         ).scalars().all()
-        sheets.append((ticket.ticket_no, _ticket_export_rows(ticket, list(items)), ["section", "field", "value"]))
+        rows = _ticket_export_rows(ticket, list(items))
+        rows.extend(
+            [
+                {"section": "附件", "field": "附件解析摘要", "value": await _attachment_export_summary(session, ticket.id)},
+                {"section": "SN校验", "field": "校验摘要", "value": await _sn_validation_export_summary(session, ticket.id)},
+                {"section": "回复", "field": "回复状态", "value": await _reply_export_summary(session, ticket.id)},
+            ]
+        )
+        sheets.append((ticket.ticket_no, rows, ["section", "field", "value"]))
     return xlsx_workbook_bytes(sheets)
 
 

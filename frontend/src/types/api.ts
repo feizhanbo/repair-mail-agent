@@ -176,8 +176,10 @@ export type EmailDetail = {
 };
 
 export type EmailIngestResult = {
-  duplicate: boolean;
-  email: EmailItem;
+  duplicate?: boolean;
+  skipped?: boolean;
+  email?: EmailItem;
+  precheck?: JsonRecord;
   classification?: {
     confidence?: number | string | null;
     reason?: string | null;
@@ -212,6 +214,7 @@ export type EmailIngestRequest = {
   imap_uid?: string;
   fetch_job_run_id?: number;
   message_id?: string;
+  raw_eml_sha256?: string;
   in_reply_to?: string;
   references_header?: string;
   from_address: string;
@@ -220,6 +223,14 @@ export type EmailIngestRequest = {
   subject?: string;
   text_body?: string;
   html_body?: string;
+  attachments?: EmailIngestAttachment[];
+};
+
+export type EmailIngestAttachment = {
+  file_name: string;
+  content_type?: string;
+  file_size?: number;
+  content_base64?: string;
 };
 
 export type Ticket = {

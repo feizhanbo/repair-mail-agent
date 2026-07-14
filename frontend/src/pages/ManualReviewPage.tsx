@@ -1,5 +1,6 @@
 import {
   CheckCircleOutlined,
+  DownloadOutlined,
   EditOutlined,
   FileAddOutlined,
   MailOutlined,
@@ -565,6 +566,14 @@ function ManualEvidencePane({
   onApplyParse: (id: number) => void;
   onRejectParse: (id: number) => void;
 }) {
+  const attachmentDownloadMutation = useMutation({
+    mutationFn: (attachmentId: number) => api.attachmentDownloadUrl(attachmentId),
+    onSuccess: (data) => {
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+
   if (!detail && !loading) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择左侧任务" />;
   }
@@ -610,6 +619,22 @@ function ManualEvidencePane({
                   { title: '类型', dataIndex: 'content_type', width: 140, render: (value?: string) => value || '-' },
                   { title: '大小', dataIndex: 'file_size', width: 90, render: formatBytes },
                   { title: '解析', dataIndex: 'parse_status', width: 100, render: (value: string) => <StatusTag value={value} kind="parse" /> },
+                  {
+                    title: '下载',
+                    width: 90,
+                    render: (_, record) => (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        disabled={!record.oss_object_id}
+                        loading={attachmentDownloadMutation.isPending}
+                        onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                      >
+                        下载
+                      </Button>
+                    ),
+                  },
                 ]}
                 expandable={{
                   expandedRowRender: (record) => (

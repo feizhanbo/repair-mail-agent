@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import imaplib
 import time
 from typing import Any
@@ -122,6 +123,7 @@ async def fetch_imap_emails(
 
                 raw = _uid_fetch_raw(client, uid)
                 payload = payload_from_eml_bytes(raw, mailbox_account=settings.IMAP_USER, folder_name=folder_name)
+                payload.raw_eml_sha256 = hashlib.sha256(raw).hexdigest()
                 payload.imap_uid = uid
                 payload.fetch_job_run_id = job.id
                 payload_precheck = await precheck_email_payload(session, payload)

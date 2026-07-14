@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
     MAIL_PRECHECK_IRRELEVANT_MIN_CONFIDENCE: float = 0.85
+    ATTACHMENT_MAX_AUTO_PARSE_BYTES: int = 50 * 1024 * 1024
+    ATTACHMENT_TEXT_MAX_CHARS: int = 20000
+    PDF_MAX_PARSE_PAGES: int = 15
 
     MULTIMODAL_PROVIDER: str = "qwen"
     QWEN_API_KEY: str = ""

@@ -98,10 +98,10 @@ async def _scheduled_auto_followup():
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info(
-        "Application starting: app_name=%s app_env=%s ai_provider=%s",
+        "Application starting: app_name=%s app_env=%s text_ai_provider=deepseek multimodal_provider=%s",
         settings.APP_NAME,
         settings.APP_ENV,
-        settings.AI_PROVIDER,
+        settings.MULTIMODAL_PROVIDER,
     )
     read_runtime_config()
     scheduler = AsyncIOScheduler()
