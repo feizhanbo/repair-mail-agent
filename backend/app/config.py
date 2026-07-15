@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     DB_NAME: str = "repair_system_test"
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
     DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
+    DB_SMOKE_DATABASE_URL: str = ""
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     IMAP_UNSEEN_ONLY: bool = True
     IMAP_ARCHIVE_TO_OSS: bool = True
     IMAP_MARK_SEEN_AFTER_SUCCESS: bool = False
+    IMAP_MAX_RETRIES: int = 5
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
@@ -52,10 +54,24 @@ class Settings(BaseSettings):
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
+    AI_FULL_LOG_ENABLED: bool = True
+    AI_FULL_LOG_RETENTION_DAYS: int = 30
+    AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")
     MAIL_PRECHECK_IRRELEVANT_MIN_CONFIDENCE: float = 0.85
     ATTACHMENT_MAX_AUTO_PARSE_BYTES: int = 50 * 1024 * 1024
     ATTACHMENT_TEXT_MAX_CHARS: int = 20000
     PDF_MAX_PARSE_PAGES: int = 15
+    PDF_PREVIEW_MAX_PAGES: int = 5
+    ATTACHMENT_MAX_ARCHIVE_BYTES: int = 200 * 1024 * 1024
+    EMAIL_MAX_ARCHIVE_BYTES: int = 500 * 1024 * 1024
+    EMAIL_MAX_ATTACHMENTS: int = 50
+    INLINE_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
+    INLINE_IMAGE_MIN_PARSE_WIDTH: int = 256
+    INLINE_IMAGE_MIN_PARSE_HEIGHT: int = 128
+    OSS_ORPHAN_MIN_AGE_HOURS: int = 24
+    OSS_IO_CONCURRENCY: int = 4
+    MAIL_IO_CONCURRENCY: int = 2
+    FILE_PARSE_CONCURRENCY: int = 2
 
     MULTIMODAL_PROVIDER: str = "qwen"
     QWEN_API_KEY: str = ""
@@ -69,10 +85,18 @@ class Settings(BaseSettings):
     RELAY_PUSH_ENABLED: bool = False
     RELAY_TIMEOUT_SECONDS: float = 10.0
 
+    EMAIL_ASYNC_ENABLED: bool = False
+    IMAP_ASYNC_ENABLED: bool = False
+    SMTP_ASYNC_ENABLED: bool = False
+    IMPORT_EXPORT_ASYNC_ENABLED: bool = False
+    ASYNC_JOB_POLL_SECONDS: int = 5
+    ASYNC_JOB_STALE_SECONDS: int = 900
+
     AUTO_SEND_ENABLED: bool = False
     REPLY_SEND_MODE: str = "human_review"
+    AUTO_APPLY_MIN_CONFIDENCE: float = 0.85
     AUTO_SEND_MIN_CONFIDENCE: float = 0.85
-    SMTP_RECIPIENT_WHITELIST: list[str] = ["rmatest2@accotest.com"]
+    SMTP_RECIPIENT_WHITELIST: list[str] = []
     MAX_FOLLOW_UP: int = 3
     CONFIDENCE_THRESHOLD: float = 0.7
     RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")

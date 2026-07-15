@@ -216,6 +216,14 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
+  const confirmExportMutation = useMutation({
+    mutationFn: (id: number) => api.confirmTicketExport(id),
+    onSuccess: () => {
+      message.success('导出完成，工单已结单');
+      invalidateDetail();
+    },
+    onError: handleMutationError,
+  });
   const exportMutation = useMutation({
     mutationFn: () => api.exportSelectedTickets(selectedTicketKeys.map(Number)),
     onSuccess: (blob) => saveBlob(blob, 'tickets-selected-export.xlsx'),
@@ -351,6 +359,16 @@ export default function TicketsPage() {
               >
                 生成追问
               </Button>
+              {canTransitionTicket && detailQuery.data.ticket.current_status_code === 'ready_for_export' ? (
+                <Button
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  loading={confirmExportMutation.isPending}
+                  onClick={() => confirmAction('确认数据已经导出并关闭工单？', () => confirmExportMutation.mutate(detailQuery.data.ticket.id))}
+                >
+                  确认导出完成
+                </Button>
+              ) : null}
               {canTransitionTicket ? (
                 <Button type="primary" onClick={() => setTransitionOpen(true)}>
                   状态流转

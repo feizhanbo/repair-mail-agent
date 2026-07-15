@@ -808,6 +808,9 @@ async def ensure_manual_review_ticket_from_parse_result(
             )
     parse_result.ticket_id = ticket.id
     parse_result.apply_status = "needs_manual_review"
+    parse_result.accepted = False
+    parse_result.accepted_by_user_id = None
+    parse_result.accepted_at = None
     parse_result.error_message = reason
     await _link_email_to_ticket(session, email=email, ticket=ticket, link_type="related", link_reason=reason)
     await create_manual_task_if_missing(

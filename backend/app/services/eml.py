@@ -116,12 +116,16 @@ def _parse_eml(raw: bytes) -> tuple[Message, list[dict[str, Any]], list[dict[str
             index = len(attachments) + 1
             file_name = _attachment_name(part, index)
             content_id = _content_id(part)
+            is_inline = (
+                (part.get_content_disposition() or "").lower() == "inline"
+                or (bool(content_id) and (part.get_content_disposition() or "").lower() != "attachment")
+            )
             metadata = {
                 "file_name": file_name,
                 "content_type": content_type,
                 "file_size": len(content),
                 "file_hash": hashlib.sha256(content).hexdigest(),
-                "is_inline": (part.get_content_disposition() or "").lower() == "inline",
+                "is_inline": is_inline,
                 "content_id": content_id,
                 "parse_status": "pending",
             }

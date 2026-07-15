@@ -110,8 +110,14 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     {
         "from_status_code": "need_customer_info",
         "to_status_code": "auto_replied",
-        "trigger_event": "reply_draft_created",
-        "condition_desc": "补充信息邮件已生成并发送。",
+        "trigger_event": "reply_sent",
+        "condition_desc": "补充信息邮件已成功发送。",
+    },
+    {
+        "from_status_code": "manual_review",
+        "to_status_code": "auto_replied",
+        "trigger_event": "reply_sent",
+        "condition_desc": "人工审核后的补充信息邮件已成功发送。",
     },
     {
         "from_status_code": "auto_replied",

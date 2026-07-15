@@ -10,6 +10,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import ReplyDraftRequest, ReplyRejectRequest, ReplyUpdateRequest
 from app.services import replies as reply_service
+from app.services.jobs import enqueue_job, serialize_job
 
 router = APIRouter()
 
@@ -77,6 +78,28 @@ async def approve_send(
     result = await reply_service.approve_reply(session, reply_id=reply_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "reply approved")
+
+
+@router.post("/{reply_id}/approve-send/jobs")
+async def approve_send_job(
+    reply_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    reply = await reply_service.approve_reply_for_async(session, reply_id=reply_id, user_id=current_user.id)
+    if reply.send_status == "sent":
+        await session.commit()
+        return ok({"reply": reply_service.serialize_reply(reply), "job": None}, "reply already sent")
+    job = await enqueue_job(
+        session,
+        job_type="smtp_send",
+        resource_type="reply_record",
+        resource_id=reply.id,
+        idempotency_key=f"smtp_send:{reply.id}",
+        metadata={"user_id": current_user.id},
+    )
+    await session.commit()
+    return ok({"reply": reply_service.serialize_reply(reply), "job": serialize_job(job)}, "reply send queued")
 
 
 @router.post("/{reply_id}/reject")

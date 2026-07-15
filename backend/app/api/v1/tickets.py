@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Annotated
 
@@ -12,9 +13,10 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
-from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
+from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
+from app.services.email_flow_trace import build_ticket_timeline
 from app.services.workflow import transition_ticket
 
 router = APIRouter()
@@ -101,7 +103,7 @@ async def export_tickets(
         "created_at",
         "updated_at",
     ]
-    content = xlsx_bytes(rows, fieldnames)
+    content = await asyncio.to_thread(xlsx_bytes, rows, fieldnames)
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -122,6 +124,16 @@ async def export_selected_tickets(
         media_type=EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="tickets-selected-export.xlsx"'},
     )
+
+
+@router.get("/{ticket_id}/timeline")
+async def ticket_timeline(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await build_ticket_timeline(session, ticket_id))
 
 
 @router.get("/{ticket_id}")
@@ -195,6 +207,30 @@ async def validate_sn(
     result = await ticket_service.validate_ticket_sn(session, ticket_id=ticket_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "ticket sn validated")
+
+
+@router.post("/{ticket_id}/confirm-export")
+async def confirm_export(
+    ticket_id: int,
+    payload: TicketExportConfirmRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    if ticket.current_status_code != "ready_for_export":
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TICKET_NOT_READY_FOR_EXPORT")
+    await transition_ticket(
+        session,
+        ticket=ticket,
+        to_status_code="closed",
+        trigger_event="export_completed",
+        user_id=current_user.id,
+        reason=payload.reason or "Export completion confirmed",
+    )
+    await session.commit()
+    return ok(await ticket_service.get_ticket_detail(session, ticket_id), "ticket closed after export confirmation")
 
 
 @router.get("/{ticket_id}/parse-results")

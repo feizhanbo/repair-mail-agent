@@ -20,6 +20,7 @@ import { Badge, Button, Layout, Menu, Space, Typography } from 'antd';
 import { useState } from 'react';
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { ActiveJobMonitor } from '../components/ActiveJobMonitor';
 import { useAuthStore } from '../stores/authStore';
 import { hasAnyRole, hasRole } from '../utils/roles';
 
@@ -75,6 +76,7 @@ export default function AppLayout() {
 
   return (
     <Layout className="app-shell">
+      <ActiveJobMonitor />
       <Sider width={232} theme="light" className="app-sider" collapsible collapsed={collapsed} trigger={null}>
         <div className="brand-block">
           {collapsed ? (

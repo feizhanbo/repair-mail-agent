@@ -4,19 +4,23 @@ import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
-from app.models import RepairTicket
+from app.core.request_context import bind_request_context, normalize_correlation_id, reset_request_context
+from app.models import JobRunLog, RepairTicket
 from app.services.imap_fetcher import fetch_imap_emails
+from app.services.ai import maintain_ai_jsonl_logs
+from app.services.jobs import claim_next_job, execute_claimed_job
 from app.services.replies import create_reply_draft
 from app.services.runtime_config import read_runtime_config
+from app.services.common import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +43,22 @@ async def _scheduled_imap_fetch():
         return
     try:
         async with AsyncSessionLocal() as session:
-            result = await fetch_imap_emails(
-                session,
-                folder_name=settings.IMAP_FOLDER,
-                limit=settings.IMAP_FETCH_LIMIT,
-                unseen_only=settings.IMAP_UNSEEN_ONLY,
-                archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
-            )
-            await session.commit()
+            lock_name = "repair_mail_agent_imap_poll"
+            acquired = await session.scalar(text("SELECT GET_LOCK(:lock_name, 0)"), {"lock_name": lock_name})
+            if acquired != 1:
+                logger.info("Scheduled IMAP fetch skipped: distributed lock unavailable")
+                return
+            try:
+                result = await fetch_imap_emails(
+                    session,
+                    folder_name=settings.IMAP_FOLDER,
+                    limit=settings.IMAP_FETCH_LIMIT,
+                    unseen_only=settings.IMAP_UNSEEN_ONLY,
+                    archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
+                )
+                await session.commit()
+            finally:
+                await session.scalar(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": lock_name})
             logger.info(
                 "Scheduled IMAP fetch completed: job_id=%s status=%s processed=%s success=%s failed=%s",
                 result.get("job_id"),
@@ -94,6 +106,44 @@ async def _scheduled_auto_followup():
         logger.exception("Scheduled auto follow-up failed")
 
 
+async def _scheduled_job_worker():
+    for _ in range(10):
+        async with AsyncSessionLocal() as claim_session:
+            job = await claim_next_job(claim_session)
+            if job is None:
+                await claim_session.commit()
+                return
+            job_id = job.id
+            await claim_session.commit()
+        async with AsyncSessionLocal() as run_session:
+            claimed_job = await run_session.get(JobRunLog, job_id)
+            if claimed_job is None or claimed_job.status != "running":
+                continue
+            from app.core.request_context import bind_request_context, reset_request_context
+
+            tokens = bind_request_context(
+                correlation_id=claimed_job.correlation_id or f"job-{claimed_job.id}",
+                client_ip=None,
+                user_agent="background-job-worker",
+            )
+            try:
+                await execute_claimed_job(run_session, claimed_job)
+                await run_session.commit()
+            finally:
+                reset_request_context(tokens)
+
+
+async def _scheduled_ai_log_maintenance():
+    async with AsyncSessionLocal() as session:
+        result = await maintain_ai_jsonl_logs(session)
+        await session.commit()
+    logger.info(
+        "AI JSONL maintenance completed: sanitized_files=%d deleted_files=%d",
+        result["sanitized_files"],
+        result["deleted_files"],
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -105,7 +155,7 @@ async def lifespan(app: FastAPI):
     )
     read_runtime_config()
     scheduler = AsyncIOScheduler()
-    if settings.IMAP_FETCH_ENABLED:
+    if settings.IMAP_FETCH_ENABLED and settings.IMAP_ARCHIVE_TO_OSS:
         scheduler.add_job(
             _scheduled_imap_fetch,
             "interval",
@@ -115,6 +165,8 @@ async def lifespan(app: FastAPI):
             coalesce=True,
             max_instances=1,
         )
+    elif settings.IMAP_FETCH_ENABLED:
+        logger.error("IMAP scheduler disabled: IMAP_ARCHIVE_TO_OSS must be true")
     scheduler.add_job(
         _scheduled_auto_followup,
         "interval",
@@ -122,9 +174,28 @@ async def lifespan(app: FastAPI):
         id="auto_followup",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _scheduled_job_worker,
+        "interval",
+        seconds=max(1, settings.ASYNC_JOB_POLL_SECONDS),
+        id="background_job_worker",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduled_ai_log_maintenance,
+        "interval",
+        hours=24,
+        next_run_time=utcnow(),
+        id="ai_log_maintenance",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     scheduler.start()
     logger.info("Schedulers started: IMAP poll interval=%d min, auto follow-up interval=%d min", settings.IMAP_POLL_INTERVAL_MINUTES, settings.AUTO_FOLLOWUP_INTERVAL_MINUTES)
-    logger.info("SMTP whitelist configured: %s", settings.SMTP_RECIPIENT_WHITELIST if settings.SMTP_RECIPIENT_WHITELIST else "EMPTY - ALL OUTBOUND EMAIL BLOCKED")
+    logger.info("SMTP whitelist configured: count=%d", len(settings.SMTP_RECIPIENT_WHITELIST))
     if not settings.SMTP_RECIPIENT_WHITELIST:
         logger.warning("SECURITY: SMTP_RECIPIENT_WHITELIST is empty, all outbound email will be blocked!")
     try:
@@ -148,6 +219,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = normalize_correlation_id(request.headers.get("X-Correlation-ID"))
+    tokens = bind_request_context(
+        correlation_id=correlation_id,
+        client_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("User-Agent"),
+    )
+    try:
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = correlation_id
+        return response
+    finally:
+        reset_request_context(tokens)
 
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)

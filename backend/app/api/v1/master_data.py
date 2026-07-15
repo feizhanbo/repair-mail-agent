@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -11,6 +12,8 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import BoardCardImportRequest, IdsRequest, SnAssetImportRequest
 from app.services import master_data as master_data_service
+from app.services.jobs import enqueue_job, serialize_job
+from app.services.storage import StorageConfigurationError, StorageUploadError, upload_bytes_to_oss
 
 router = APIRouter()
 
@@ -45,7 +48,7 @@ async def list_sn_assets(
 async def sn_assets_template(current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))]) -> Response:
     del current_user
     return Response(
-        content=master_data_service.sn_assets_template_xlsx(),
+        content=await asyncio.to_thread(master_data_service.sn_assets_template_xlsx),
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="sn-assets-template.xlsx"'},
     )
@@ -116,7 +119,7 @@ async def import_sn_assets_file(
     file: UploadFile = File(...),
 ) -> dict:
     content = await file.read()
-    items, file_hash = master_data_service.parse_sn_assets_xlsx(content)
+    items, file_hash = await asyncio.to_thread(master_data_service.parse_sn_assets_xlsx, content)
     result = await master_data_service.import_sn_assets(
         session,
         items=items,
@@ -126,6 +129,15 @@ async def import_sn_assets_file(
     )
     await session.commit()
     return ok(result, "sn assets file imported")
+
+
+@router.post("/sn-assets/import-file/jobs")
+async def import_sn_assets_file_job(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    file: UploadFile = File(...),
+) -> dict:
+    return await _queue_master_data_file(session, current_user, file, kind="sn_assets")
 
 
 @router.get("/board-cards")
@@ -156,7 +168,7 @@ async def list_board_cards(
 async def board_cards_template(current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))]) -> Response:
     del current_user
     return Response(
-        content=master_data_service.board_cards_template_xlsx(),
+        content=await asyncio.to_thread(master_data_service.board_cards_template_xlsx),
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="board-cards-template.xlsx"'},
     )
@@ -225,7 +237,7 @@ async def import_board_cards_file(
     file: UploadFile = File(...),
 ) -> dict:
     content = await file.read()
-    items, file_hash = master_data_service.parse_board_cards_xlsx(content)
+    items, file_hash = await asyncio.to_thread(master_data_service.parse_board_cards_xlsx, content)
     result = await master_data_service.import_board_cards(
         session,
         items=items,
@@ -235,3 +247,57 @@ async def import_board_cards_file(
     )
     await session.commit()
     return ok(result, "board cards file imported")
+
+
+@router.post("/board-cards/import-file/jobs")
+async def import_board_cards_file_job(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    file: UploadFile = File(...),
+) -> dict:
+    return await _queue_master_data_file(session, current_user, file, kind="board_cards")
+
+
+async def _queue_master_data_file(
+    session: AsyncSession,
+    current_user: CurrentUser,
+    file: UploadFile,
+    *,
+    kind: str,
+) -> dict:
+    if file.filename and not file.filename.lower().endswith(".xlsx"):
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="XLSX_FILE_REQUIRED")
+    content = await file.read()
+    if not content:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="XLSX_FILE_EMPTY")
+    import hashlib
+
+    file_hash = hashlib.sha256(content).hexdigest()
+    try:
+        input_object = await upload_bytes_to_oss(
+            session,
+            content=content,
+            original_file_name=file.filename or f"{kind}.xlsx",
+            content_type=master_data_service.EXCEL_MEDIA_TYPE,
+            source_type="master_data_import",
+            user_id=current_user.id,
+        )
+    except (StorageConfigurationError, StorageUploadError) as exc:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OSS_ARCHIVAL_FAILED") from exc
+    job = await enqueue_job(
+        session,
+        job_type="master_data_import",
+        resource_type="master_data",
+        resource_id=None,
+        idempotency_key=f"master_data_import:{kind}:{file_hash}",
+        metadata={"kind": kind, "user_id": current_user.id},
+        input_oss_object_id=input_object.id,
+    )
+    await session.commit()
+    return ok(serialize_job(job), "master data import queued")

@@ -1,0 +1,109 @@
+- generic [ref=e40]:
+  - complementary [ref=e41]:
+    - generic [ref=e42]:
+      - heading "邮件报修系统" [level=4] [ref=e44]
+      - menu [ref=e45]:
+        - menuitem "dashboard 首页看板" [ref=e46] [cursor=pointer]:
+          - img "dashboard" [ref=e47]
+          - generic [ref=e50]: 首页看板
+        - menuitem "mail 邮件中心" [ref=e51] [cursor=pointer]:
+          - img "mail" [ref=e52]
+          - generic [ref=e55]: 邮件中心
+        - menuitem "profile 工单中心" [ref=e56] [cursor=pointer]:
+          - img "profile" [ref=e57]
+          - generic [ref=e60]: 工单中心
+        - menuitem "team 人工复核" [ref=e61] [cursor=pointer]:
+          - img "team" [ref=e62]
+          - generic [ref=e65]: 人工复核
+        - menuitem "safety-certificate 回复管理" [ref=e66] [cursor=pointer]:
+          - img "safety-certificate" [ref=e67]
+          - generic [ref=e70]: 回复管理
+        - menuitem "bar-chart 统计分析" [ref=e71] [cursor=pointer]:
+          - img "bar-chart" [ref=e72]
+          - generic [ref=e75]: 统计分析
+        - menuitem "database 基础资料" [ref=e76] [cursor=pointer]:
+          - img "database" [ref=e77]
+          - generic [ref=e80]: 基础资料
+        - menuitem "user 用户管理" [ref=e81] [cursor=pointer]:
+          - img "user" [ref=e82]
+          - generic [ref=e85]: 用户管理
+        - menuitem "database 数据库浏览" [ref=e86] [cursor=pointer]:
+          - img "database" [ref=e87]
+          - generic [ref=e90]: 数据库浏览
+        - menuitem "message 站内消息" [ref=e91] [cursor=pointer]:
+          - img "message" [ref=e92]
+          - generic [ref=e95]: 站内消息
+        - menuitem "robot AI 日志" [ref=e96] [cursor=pointer]:
+          - img "robot" [ref=e97]
+          - generic [ref=e100]: AI 日志
+        - menuitem "setting 系统配置" [ref=e101] [cursor=pointer]:
+          - img "setting" [ref=e102]
+          - generic [ref=e105]: 系统配置
+  - generic [ref=e106]:
+    - banner [ref=e107]:
+      - button "折叠侧边栏" [ref=e108] [cursor=pointer]:
+        - img "menu-fold" [ref=e110]
+      - generic [ref=e113]:
+        - generic [ref=e115]:
+          - button "通知中心" [ref=e116] [cursor=pointer]:
+            - img "bell" [ref=e118]
+          - superscript [ref=e121]:
+            - generic [ref=e122]: "2"
+        - button "System Administrator" [ref=e125] [cursor=pointer]
+        - button "退出" [ref=e128] [cursor=pointer]:
+          - img "logout" [ref=e130]
+    - main [ref=e133]:
+      - generic [ref=e134]:
+        - heading "首页看板" [level=2] [ref=e136]
+        - generic [ref=e137]:
+          - button "mail 待解析邮件 0" [ref=e139] [cursor=pointer]:
+            - img "mail" [ref=e141]
+            - text: 待解析邮件
+            - generic [ref=e144]: "0"
+          - button "team 任务池总数 2" [ref=e146] [cursor=pointer]:
+            - img "team" [ref=e148]
+            - text: 任务池总数
+            - generic [ref=e151]: "2"
+          - button "user 我的待处理 0" [ref=e153] [cursor=pointer]:
+            - img "user" [ref=e155]
+            - text: 我的待处理
+            - generic [ref=e158]: "0"
+          - button "clock-circle 我的处理中 0" [ref=e160] [cursor=pointer]:
+            - img "clock-circle" [ref=e162]
+            - text: 我的处理中
+            - generic [ref=e166]: "0"
+          - button "clock-circle 待客户补充 0" [ref=e168] [cursor=pointer]:
+            - img "clock-circle" [ref=e170]
+            - text: 待客户补充
+            - generic [ref=e174]: "0"
+          - button "check-circle 可导出工单 0" [ref=e176] [cursor=pointer]:
+            - img "check-circle" [ref=e178]
+            - text: 可导出工单
+            - generic [ref=e182]: "0"
+          - button "alert 异常工单 0" [ref=e184] [cursor=pointer]:
+            - img "alert" [ref=e186]
+            - text: 异常工单
+            - generic [ref=e189]: "0"
+          - button "robot AI 低置信度 0" [ref=e191] [cursor=pointer]:
+            - img "robot" [ref=e193]
+            - text: AI 低置信度
+            - generic [ref=e196]: "0"
+        - generic [ref=e197]:
+          - heading "最近异常任务" [level=4] [ref=e199]
+          - table [ref=e206]:
+            - rowgroup [ref=e213]:
+              - row [ref=e214]:
+                - columnheader "任务" [ref=e215]
+                - columnheader "类型" [ref=e216]
+                - columnheader "状态" [ref=e217]
+                - columnheader "失败数" [ref=e218]
+                - columnheader "开始时间" [ref=e219]
+                - columnheader "错误" [ref=e220]
+            - rowgroup [ref=e221]:
+              - row [ref=e222]:
+                - cell "email_parse" [ref=e223]
+                - cell "email_parse" [ref=e224]
+                - cell "failed" [ref=e225]
+                - cell "3" [ref=e227]
+                - cell "2026-07-15 03:09" [ref=e228]
+                - cell "StatementError:MissingGreenlet" [ref=e229]

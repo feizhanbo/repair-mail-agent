@@ -7,16 +7,19 @@ import re
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
 from app.integrations.qwen_provider import QwenProvider
 from app.models import AiCallLog, Email, EmailAttachment, OssObject, ParseResult, RepairTicket, SnAsset
 from app.services.common import sha256_text, to_plain, utcnow
+from app.services.logging_safety import safe_error_code
 from app.services.parser import clean_email_body
 
 AI_EXTRACT_SYSTEM_PROMPT = """
@@ -36,6 +39,7 @@ AI_REPLY_SYSTEM_PROMPT = """
 """.strip()
 
 logger = logging.getLogger(__name__)
+_ai_log_file_lock = asyncio.Lock()
 
 
 def _is_retryable_error(exc: AiProviderError) -> bool:
@@ -86,9 +90,35 @@ def _safe_json(value: Any) -> str:
     return json.dumps(to_plain(value), ensure_ascii=False, default=str)
 
 
+_SENSITIVE_KEYS = {
+    "api_key", "apikey", "authorization", "password", "token", "access_token", "bearer_token",
+    "secret", "access_key", "secret_key",
+    "oss_access_key", "oss_secret_key", "smtp_password", "imap_password",
+}
+
+
+def sanitize_ai_detail(value: Any, *, key: str | None = None) -> Any:
+    normalized_key = (key or "").lower()
+    if normalized_key in _SENSITIVE_KEYS or normalized_key.endswith(("_api_key", "_password", "_secret_key")):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {str(item_key): sanitize_ai_detail(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_ai_detail(item) for item in value]
+    if isinstance(value, str):
+        if value.lower().startswith("data:"):
+            mime = value[5:].split(";", 1)[0][:100]
+            return {"binary_ref": True, "mime_type": mime, "chars": len(value), "sha256": sha256_text(value)}
+        if value.startswith(("http://", "https://")):
+            parsed = urlsplit(value)
+            if parsed.query or parsed.fragment:
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")) + "#SIGNED_QUERY_REDACTED"
+    return to_plain(value)
+
+
 def _write_jsonl(record: dict[str, Any]) -> tuple[str, int, str]:
     now = utcnow()
-    log_dir = Path("logs") / "ai" / f"{now:%Y}" / f"{now:%m}" / f"{now:%d}"
+    log_dir = Path(settings.AI_LOG_DIR) / f"{now:%Y}" / f"{now:%m}" / f"{now:%d}"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"ai-{now:%Y%m%d}.jsonl"
     line_no = 1
@@ -117,13 +147,18 @@ def _key_result(call_type: str, parsed: BaseModel | None) -> dict[str, Any] | No
     if call_type == "generate_reply_draft":
         body = data.get("body") or ""
         return {
-            "subject": data.get("subject"),
+            "subject_chars": len(data.get("subject") or ""),
             "body_chars": len(body),
             "risk_level": data.get("risk_level"),
             "missing_field_keys": sorted((data.get("missing_fields") or {}).keys()),
-            "suggestions": data.get("suggestions") or [],
+            "suggestion_count": len(data.get("suggestions") or []),
         }
-    return data
+    return {
+        "result_keys": sorted(data.keys()),
+        "warning_count": len(data.get("warnings") or []),
+        "item_count": len(data.get("extracted_items") or []),
+        "truncated": bool(data.get("truncated")),
+    }
 
 
 def _confidence(parsed: BaseModel | None) -> float | None:
@@ -144,7 +179,32 @@ def _status_for(parsed: BaseModel | None, error: str | None) -> str:
     return "success"
 
 
-async def _persist_ai_log(
+def _payload_metadata(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    serialized = _safe_json(payload)
+    return {
+        "keys": sorted(str(key) for key in payload.keys()),
+        "chars": len(serialized),
+        "sha256": sha256_text(serialized),
+    }
+
+
+def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
+    usage = (response_payload or {}).get("usage")
+    if not isinstance(usage, dict):
+        return None, None, None
+    input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+    output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+    return (
+        int(input_tokens) if isinstance(input_tokens, (int, float)) else None,
+        int(output_tokens) if isinstance(output_tokens, (int, float)) else None,
+        int(total_tokens) if isinstance(total_tokens, (int, float)) else None,
+    )
+
+
+async def persist_ai_log(
     session: AsyncSession,
     *,
     trace_id: str,
@@ -158,39 +218,79 @@ async def _persist_ai_log(
     output_summary: str | None,
     email_id: int | None = None,
     ticket_id: int | None = None,
+    attachment_id: int | None = None,
+    job_run_id: int | None = None,
+    correlation_id: str | None = None,
+    provider_name: str = "deepseek",
+    model_name: str | None = None,
+    prompt_version: str | None = None,
+    attempt_count: int = 1,
     error_message: str | None = None,
 ) -> AiCallLog:
+    model_name = model_name or settings.AI_MODEL
+    prompt_version = prompt_version or settings.AI_PROMPT_VERSION
+    error_code = safe_error_code(error_message, "AI_CALL_FAILED")
+    input_tokens, output_tokens, total_tokens = _token_usage(output_payload)
     record = {
         "trace_id": trace_id,
+        "correlation_id": correlation_id or get_correlation_id(),
         "call_type": call_type,
-        "prompt_version": settings.AI_PROMPT_VERSION,
-        "provider": "deepseek",
-        "model": settings.AI_MODEL,
-        "input": input_payload,
-        "request": request_payload,
-        "output": output_payload,
-        "parsed": parsed.model_dump() if parsed else None,
+        "prompt_version": prompt_version,
+        "provider": provider_name,
+        "model": model_name,
+        "email_id": email_id,
+        "ticket_id": ticket_id,
+        "attachment_id": attachment_id,
+        "job_run_id": job_run_id,
+        "input_metadata": _payload_metadata(input_payload),
+        "request_metadata": _payload_metadata(request_payload),
+        "response_metadata": _payload_metadata(output_payload),
+        "parsed_key_result": _key_result(call_type, parsed),
         "latency_ms": latency_ms,
         "status": _status_for(parsed, error_message),
-        "error_message": error_message,
+        "error_code": error_code,
+        "attempt_count": attempt_count,
+        "token_usage": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total": total_tokens,
+        },
         "created_at": utcnow().isoformat(),
     }
-    log_file_path, line_no, record_hash = _write_jsonl(record)
+    if settings.AI_FULL_LOG_ENABLED:
+        record.update(
+            {
+                "input_payload": sanitize_ai_detail(input_payload),
+                "request_payload": sanitize_ai_detail(request_payload),
+                "response_payload": sanitize_ai_detail(output_payload),
+                "parsed_result": sanitize_ai_detail(parsed.model_dump() if parsed else None),
+            }
+        )
+    async with _ai_log_file_lock:
+        log_file_path, line_no, record_hash = await asyncio.to_thread(_write_jsonl, record)
     ai_log = AiCallLog(
         trace_id=trace_id,
         email_id=email_id,
         ticket_id=ticket_id,
+        attachment_id=attachment_id,
+        job_run_id=job_run_id,
+        correlation_id=correlation_id or get_correlation_id(),
         call_type=call_type,
-        provider_name="deepseek",
-        model_name=settings.AI_MODEL,
-        prompt_version=settings.AI_PROMPT_VERSION,
+        provider_name=provider_name,
+        model_name=model_name,
+        prompt_version=prompt_version,
         input_summary=input_summary[:1000],
         output_summary=(output_summary or "")[:1000] or None,
         parsed_key_result=_key_result(call_type, parsed),
         confidence_score=_confidence(parsed),
         latency_ms=latency_ms,
+        attempt_count=attempt_count,
+        error_code=error_code,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
         status=_status_for(parsed, error_message),
-        error_message=error_message,
+        error_message=error_code,
         log_file_path=log_file_path,
         log_line_no=line_no,
         log_record_hash=record_hash,
@@ -198,6 +298,82 @@ async def _persist_ai_log(
     session.add(ai_log)
     await session.flush()
     return ai_log
+
+
+def _resolve_ai_log_path(log_file_path: str) -> Path:
+    if not log_file_path:
+        raise FileNotFoundError("AI_LOG_DETAIL_EXPIRED")
+    root = Path(settings.AI_LOG_DIR).resolve()
+    supplied = Path(log_file_path)
+    candidates = [supplied] if supplied.is_absolute() else [Path.cwd() / supplied, root.parent.parent / supplied]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved == root or root in resolved.parents:
+            return resolved
+    raise ValueError("AI_LOG_PATH_INVALID")
+
+
+async def read_ai_log_detail(ai_log: AiCallLog) -> dict[str, Any]:
+    path = _resolve_ai_log_path(ai_log.log_file_path or "")
+    if not path.exists() or not ai_log.log_line_no:
+        raise FileNotFoundError("AI_LOG_DETAIL_EXPIRED")
+
+    def _read() -> tuple[str, dict[str, Any]]:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, start=1):
+                if line_no == ai_log.log_line_no:
+                    raw = line.rstrip("\r\n")
+                    return raw, json.loads(raw)
+        raise FileNotFoundError("AI_LOG_DETAIL_EXPIRED")
+
+    raw, record = await asyncio.to_thread(_read)
+    if ai_log.log_record_hash and sha256_text(raw) != ai_log.log_record_hash:
+        raise ValueError("AI_LOG_DETAIL_HASH_MISMATCH")
+    return sanitize_ai_detail(record)
+
+
+async def maintain_ai_jsonl_logs(session: AsyncSession) -> dict[str, int]:
+    root = Path(settings.AI_LOG_DIR).resolve()
+    if not root.exists():
+        return {"sanitized_files": 0, "deleted_files": 0}
+    cutoff = utcnow().timestamp() - max(1, settings.AI_FULL_LOG_RETENTION_DAYS) * 86400
+    sanitized_files = 0
+    deleted_files = 0
+    for path in root.rglob("*.jsonl"):
+        if path.stat().st_mtime < cutoff:
+            await asyncio.to_thread(path.unlink)
+            deleted_files += 1
+            continue
+
+        def _sanitize_file() -> tuple[bool, list[str]]:
+            original_lines = path.read_text(encoding="utf-8").splitlines()
+            sanitized_lines: list[str] = []
+            for line in original_lines:
+                try:
+                    sanitized_lines.append(_safe_json(sanitize_ai_detail(json.loads(line))))
+                except (json.JSONDecodeError, TypeError):
+                    sanitized_lines.append(_safe_json({"status": "invalid_legacy_record", "record_sha256": sha256_text(line)}))
+            changed = original_lines != sanitized_lines
+            if changed:
+                temporary = path.with_suffix(".jsonl.tmp")
+                temporary.write_text("\n".join(sanitized_lines) + "\n", encoding="utf-8")
+                temporary.replace(path)
+            return changed, sanitized_lines
+
+        changed, lines = await asyncio.to_thread(_sanitize_file)
+        if not changed:
+            continue
+        sanitized_files += 1
+        path_values = {str(path), path.as_posix()}
+        try:
+            path_values.add(path.relative_to(Path.cwd()).as_posix())
+        except ValueError:
+            pass
+        rows = (await session.execute(select(AiCallLog).where(AiCallLog.log_file_path.in_(path_values)))).scalars().all()
+        for row in rows:
+            if row.log_line_no and row.log_line_no <= len(lines):
+                row.log_record_hash = sha256_text(lines[row.log_line_no - 1])
+    return {"sanitized_files": sanitized_files, "deleted_files": deleted_files}
 
 
 async def _run_ai_json(
@@ -217,7 +393,9 @@ async def _run_ai_json(
     last_error: AiProviderError | None = None
     max_retries = settings.AI_MAX_RETRIES
 
+    attempt_count = 0
     for attempt in range(max_retries + 1):
+        attempt_count = attempt + 1
         try:
             completion = await _text_provider().chat_json(messages=messages, response_model=response_model)
             last_error = None
@@ -237,26 +415,28 @@ async def _run_ai_json(
     if last_error is not None:
         trace_id = sha256_text(f"{call_type}:{utcnow().isoformat()}")[:32]
         raw_out = getattr(last_error, "raw_output", None)
-        ai_log = await _persist_ai_log(
+        error_code = safe_error_code(last_error, "AI_CALL_FAILED")
+        ai_log = await persist_ai_log(
             session,
             trace_id=trace_id,
             call_type=call_type,
             input_payload=input_payload,
             request_payload={"model": settings.AI_MODEL, "messages": messages, "response_format": {"type": "json_object"}},
-            output_payload={"error": str(last_error), "raw_output": raw_out[:2000] if raw_out else None},
+            output_payload={"error": str(last_error), "raw_output": raw_out if raw_out else None},
             parsed=None,
             latency_ms=None,
             input_summary=input_summary,
-            output_summary=(raw_out or str(last_error))[:1000],
+            output_summary=error_code,
             email_id=email_id,
             ticket_id=ticket_id,
-            error_message=str(last_error),
+            attempt_count=attempt_count,
+            error_message=error_code,
         )
         return None, ai_log
 
     parsed = completion.parsed
     output_summary = _summarize_output(call_type, parsed)
-    ai_log = await _persist_ai_log(
+    ai_log = await persist_ai_log(
         session,
         trace_id=completion.trace_id,
         call_type=call_type,
@@ -269,6 +449,7 @@ async def _run_ai_json(
         output_summary=output_summary,
         email_id=email_id,
         ticket_id=ticket_id,
+        attempt_count=attempt_count,
     )
     return parsed, ai_log
 
@@ -281,29 +462,40 @@ def _summarize_output(call_type: str, parsed: BaseModel) -> str:
             f"missing={','.join(sorted(parsed.missing_fields.keys())) or '-'}"
         )
     if isinstance(parsed, AiReplyDraftResponse):
-        return f"subject={parsed.subject}; confidence={parsed.confidence_score}; risk={parsed.risk_level}"
+        return f"subject_chars={len(parsed.subject)}; confidence={parsed.confidence_score}; risk={parsed.risk_level}"
     return f"{call_type} completed"
 
 
 def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) -> dict[str, Any]:
-    body = clean_email_body(email)
+    latest_reply = clean_email_body(email)
+    conversation_body = email.clean_body or email.text_body or latest_reply
     max_body_chars = max(1000, settings.AI_MAX_INPUT_CHARS // 2)
     attachment_budget = max(1000, settings.AI_MAX_INPUT_CHARS - max_body_chars)
     attachment_items: list[dict[str, Any]] = []
+    attachment_chars = 0
     for attachment in attachments:
-        if len(_safe_json(attachment_items)) >= attachment_budget:
-            break
-        attachment_items.append(
-            {
-                "id": attachment.id,
-                "file_name": attachment.file_name,
-                "content_type": attachment.content_type,
-                "parse_status": attachment.parse_status,
-                "extracted_text": _compact_text(attachment.extracted_text, 2500),
-                "extracted_json": attachment.extracted_json,
-                "parse_error": attachment.parse_error,
+        extracted_json = attachment.extracted_json
+        extracted_json_text = _safe_json(extracted_json) if extracted_json else ""
+        if len(extracted_json_text) > 3000:
+            extracted_json = {
+                "truncated": True,
+                "keys": sorted(extracted_json.keys()) if isinstance(extracted_json, dict) else [],
+                "preview": extracted_json_text[:2500],
             }
-        )
+        item = {
+            "id": attachment.id,
+            "file_name": attachment.file_name,
+            "content_type": attachment.content_type,
+            "parse_status": attachment.parse_status,
+            "extracted_text": _compact_text(attachment.extracted_text, 2500),
+            "extracted_json": extracted_json,
+            "parse_error": attachment.parse_error,
+        }
+        item_chars = len(_safe_json(item))
+        if attachment_chars + item_chars > attachment_budget:
+            break
+        attachment_items.append(item)
+        attachment_chars += item_chars
     return {
         "mode": mode,
         "email": {
@@ -316,7 +508,8 @@ def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) ->
             "received_at": email.received_at.isoformat() if email.received_at else None,
             "in_reply_to": email.in_reply_to,
             "references_header": email.references_header,
-            "clean_body": _compact_text(body, max_body_chars),
+            "latest_reply_segment": _compact_text(latest_reply, max_body_chars // 2),
+            "conversation_body": _compact_text(conversation_body, max_body_chars),
         },
         "attachments": attachment_items,
     }
@@ -480,7 +673,7 @@ async def create_ai_parse_candidate(
         messages=messages,
         response_model=AiExtractResponse,
         input_payload=input_payload,
-        input_summary=f"email_id={email.id}; subject={email.subject or '-'}; attachments={len(attachments)}; mode={mode}",
+        input_summary=f"email_id={email.id}; attachments={len(attachments)}; mode={mode}",
         email_id=email.id,
         ticket_id=ticket_id,
     )

@@ -117,3 +117,32 @@ def test_send_reply_blocks_non_whitelisted_recipient(monkeypatch: pytest.MonkeyP
     assert ok is False
     assert message_id is None
     assert error
+
+
+@pytest.mark.parametrize(
+    ("to_addresses", "cc_addresses"),
+    [
+        ("rmatest2@example.com, outside@example.com", None),
+        ("rmatest2@example.com", "outside@example.com"),
+    ],
+)
+def test_send_reply_requires_every_recipient_to_be_whitelisted(
+    monkeypatch: pytest.MonkeyPatch,
+    to_addresses: str,
+    cc_addresses: str | None,
+) -> None:
+    _configure_smtp(monkeypatch, port=465)
+    reply = _reply()
+    reply.to_addresses = to_addresses
+    reply.cc_addresses = cc_addresses
+    monkeypatch.setattr(
+        replies.smtplib,
+        "SMTP_SSL",
+        lambda *args, **kwargs: pytest.fail("SMTP must not be called when any recipient is outside the whitelist"),
+    )
+
+    ok, message_id, error = replies._send_reply_via_smtp(reply)
+
+    assert ok is False
+    assert message_id is None
+    assert error == "SMTP_RECIPIENT_NOT_ALLOWED"

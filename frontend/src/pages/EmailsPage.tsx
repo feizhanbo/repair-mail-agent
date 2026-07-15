@@ -5,6 +5,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
+import ContentPreviewButton from '../components/ContentPreviewButton';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
@@ -12,6 +13,7 @@ import type { Attachment, EmailIngestAttachment, EmailIngestRequest, EmailIngest
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
+import { rememberJob, waitForJob } from '../utils/jobs';
 
 type EmailFilters = {
   subject?: string;
@@ -21,6 +23,8 @@ type EmailFilters = {
   intent_type?: string;
   date_range?: unknown;
 };
+
+const emailAsyncEnabled = import.meta.env.VITE_EMAIL_ASYNC_ENABLED === 'true';
 
 export default function EmailsPage() {
   const [filters, setFilters] = useState<Record<string, unknown>>({});
@@ -47,7 +51,13 @@ export default function EmailsPage() {
     enabled: Boolean(selectedId),
   });
   const ingestMutation = useMutation({
-    mutationFn: (values: EmailIngestRequest) => api.ingestEmail({ ...values, attachments: manualAttachments }),
+    mutationFn: async (values: EmailIngestRequest) => {
+      const body = { ...values, attachments: manualAttachments };
+      if (!emailAsyncEnabled) return api.ingestEmail(body);
+      const result = await api.ingestEmailJob(body);
+      if (result.job) await waitForJob(result.job);
+      return result.ingest;
+    },
     onSuccess: (data) => {
       message.success(ingestSuccessMessage(data));
       setIngestOpen(false);
@@ -58,20 +68,27 @@ export default function EmailsPage() {
     onError: handleMutationError,
   });
   const ingestEmlMutation = useMutation({
-    mutationFn: (file: File) => api.ingestEmlFile(file, { auto_parse: true }),
-    onSuccess: (data) => {
-      message.success(ingestSuccessMessage(data));
+    mutationFn: (file: File) => api.ingestEmlFileJob(file),
+    onSuccess: ({ ingest, job }) => {
+      if (job) {
+        rememberJob(job);
+        message.success(`邮件已归档，解析任务 #${job.id} 已排队`);
+      } else {
+        message.success(ingestSuccessMessage(ingest));
+      }
       void queryClient.invalidateQueries({ queryKey: ['emails'] });
       void queryClient.invalidateQueries({ queryKey: ['tickets'] });
     },
     onError: handleMutationError,
   });
   const reparseMutation = useMutation({
-    mutationFn: (id: number) => api.reparseEmail(id),
+    mutationFn: async (id: number) => {
+      const job = await api.reparseEmailJob(id);
+      rememberJob(job);
+      return job;
+    },
     onSuccess: () => {
-      message.success('重解析已完成');
-      void queryClient.invalidateQueries({ queryKey: ['email-detail', selectedId] });
-      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+      message.success('重新解析任务已排队');
     },
     onError: handleMutationError,
   });
@@ -257,6 +274,7 @@ export default function EmailsPage() {
                 ) : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="正文">{compactText(detailQuery.data.email.clean_body, '-')}</Descriptions.Item>
+              <Descriptions.Item label="正文预览"><ContentPreviewButton kind="email" id={detailQuery.data.email.id} /></Descriptions.Item>
             </Descriptions>
             <div>
               <Typography.Title level={5}>附件</Typography.Title>
@@ -271,17 +289,21 @@ export default function EmailsPage() {
                   { title: '大小', dataIndex: 'file_size', width: 100, render: numberText },
                   { title: '状态', dataIndex: 'parse_status', width: 100, render: (value: string) => <StatusTag value={value} /> },
                   {
-                    title: '下载',
-                    width: 90,
+                    title: '操作',
+                    width: 120,
                     render: (_, record) => (
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<DownloadOutlined />}
-                        disabled={!record.oss_object_id}
-                        loading={attachmentDownloadMutation.isPending}
-                        onClick={() => attachmentDownloadMutation.mutate(record.id)}
-                      />
+                      <Space size={0}>
+                        <ContentPreviewButton kind="attachment" id={record.id} disabled={!record.oss_object_id} />
+                        <Button
+                          type="link"
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          disabled={!record.oss_object_id}
+                          loading={attachmentDownloadMutation.isPending}
+                          onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                          title="下载"
+                        />
+                      </Space>
                     ),
                   },
                 ]}

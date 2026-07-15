@@ -10,6 +10,7 @@ from app.config import settings
 CONFIG_KEYS = {
     "auto_send_enabled",
     "reply_send_mode",
+    "auto_apply_min_confidence",
     "auto_send_min_confidence",
     "confidence_threshold",
     "max_follow_up",
@@ -18,6 +19,7 @@ CONFIG_KEYS = {
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "auto_send_enabled": False,
     "reply_send_mode": "human_review",
+    "auto_apply_min_confidence": 0.85,
     "auto_send_min_confidence": 0.85,
     "confidence_threshold": 0.7,
     "max_follow_up": 3,
@@ -33,6 +35,7 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
         **DEFAULT_RUNTIME_CONFIG,
         "auto_send_enabled": bool(settings.AUTO_SEND_ENABLED),
         "reply_send_mode": settings.REPLY_SEND_MODE,
+        "auto_apply_min_confidence": float(settings.AUTO_APPLY_MIN_CONFIDENCE),
         "auto_send_min_confidence": float(settings.AUTO_SEND_MIN_CONFIDENCE),
         "confidence_threshold": float(settings.CONFIDENCE_THRESHOLD),
         "max_follow_up": int(settings.MAX_FOLLOW_UP),
@@ -41,6 +44,7 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
     mode = str(merged["reply_send_mode"] or "human_review")
     merged["reply_send_mode"] = mode if mode in {"human_review", "auto_send"} else "human_review"
     merged["auto_send_enabled"] = bool(merged["auto_send_enabled"])
+    merged["auto_apply_min_confidence"] = max(0.0, min(1.0, float(merged["auto_apply_min_confidence"])))
     merged["auto_send_min_confidence"] = max(0.0, min(1.0, float(merged["auto_send_min_confidence"])))
     merged["confidence_threshold"] = max(0.0, min(1.0, float(merged["confidence_threshold"])))
     merged["max_follow_up"] = max(1, min(10, int(merged["max_follow_up"])))
@@ -51,6 +55,7 @@ def apply_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
     config = _coerce_config(values)
     settings.AUTO_SEND_ENABLED = bool(config["auto_send_enabled"])
     settings.REPLY_SEND_MODE = str(config["reply_send_mode"])
+    settings.AUTO_APPLY_MIN_CONFIDENCE = float(config["auto_apply_min_confidence"])
     settings.AUTO_SEND_MIN_CONFIDENCE = float(config["auto_send_min_confidence"])
     settings.CONFIDENCE_THRESHOLD = float(config["confidence_threshold"])
     settings.MAX_FOLLOW_UP = int(config["max_follow_up"])
@@ -79,4 +84,3 @@ def write_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
     temp_path.write_text(json.dumps(next_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temp_path, path)
     return next_config
-

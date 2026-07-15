@@ -5,6 +5,7 @@ import type { UploadProps } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState, type Key } from 'react';
 import { api, apiErrorMessage } from '../api/client';
+import { waitForJob } from '../utils/jobs';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
@@ -67,7 +68,13 @@ export default function MasterDataPage() {
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const importFileMutation = useMutation({
-    mutationFn: (file: File) => (activeTab === 'sn' ? api.importSnAssetsFile(file) : api.importBoardCardsFile(file)),
+    mutationFn: async (file: File) => {
+      if (import.meta.env.VITE_IMPORT_EXPORT_ASYNC_ENABLED !== 'true') {
+        return activeTab === 'sn' ? api.importSnAssetsFile(file) : api.importBoardCardsFile(file);
+      }
+      const job = activeTab === 'sn' ? await api.importSnAssetsFileJob(file) : await api.importBoardCardsFileJob(file);
+      return waitForJob(job);
+    },
     onSuccess: () => {
       message.success('基础资料已导入');
       void queryClient.invalidateQueries({ queryKey: ['sn-assets'] });

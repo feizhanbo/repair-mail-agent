@@ -62,6 +62,8 @@ async def test_ingest_email_persists_raw_eml_and_attachment_oss_ids() -> None:
     assert len(threads) == 1
     assert len(emails) == 1
     assert emails[0].raw_eml_oss_object_id == 101
+    assert emails[0].created_at is not None
+    assert emails[0].updated_at is not None
     assert len(attachments) == 1
     assert attachments[0].oss_object_id == 202
     assert attachments[0].file_hash == "a" * 64

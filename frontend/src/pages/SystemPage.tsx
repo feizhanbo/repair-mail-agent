@@ -13,6 +13,7 @@ import { formatTime } from '../utils/format';
 type ConfigForm = {
   auto_send_enabled: boolean;
   reply_send_mode: 'human_review' | 'auto_send';
+  auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
   confidence_threshold: number;
   max_follow_up: number;
@@ -42,6 +43,11 @@ export default function SystemPage() {
   const configQuery = useQuery({
     queryKey: ['system-config'],
     queryFn: api.systemConfig,
+  });
+  const runtimeQuery = useQuery({
+    queryKey: ['system-runtime-status'],
+    queryFn: api.systemRuntimeStatus,
+    refetchInterval: 10000,
   });
   const templatesQuery = useQuery({
     queryKey: ['system-reply-templates'],
@@ -99,6 +105,7 @@ export default function SystemPage() {
       configForm.setFieldsValue({
         auto_send_enabled: configQuery.data.auto_send_enabled,
         reply_send_mode: configQuery.data.reply_send_mode,
+        auto_apply_min_confidence: configQuery.data.auto_apply_min_confidence,
         auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
         confidence_threshold: configQuery.data.confidence_threshold,
         max_follow_up: configQuery.data.max_follow_up,
@@ -206,6 +213,9 @@ export default function SystemPage() {
           <Form.Item label="置信度阈值" name="confidence_threshold" rules={[{ required: true }]}>
             <InputNumber min={0} max={1} step={0.01} precision={2} />
           </Form.Item>
+          <Form.Item label="自动采纳安全阈值" name="auto_apply_min_confidence" rules={[{ required: true }]}>
+            <InputNumber min={0} max={1} step={0.01} precision={2} />
+          </Form.Item>
           <Form.Item label="自动发送安全阈值" name="auto_send_min_confidence" rules={[{ required: true }]}>
             <InputNumber min={0} max={1} step={0.01} precision={2} />
           </Form.Item>
@@ -216,6 +226,21 @@ export default function SystemPage() {
             保存
           </Button>
         </Form>
+      </SectionPanel>
+      <SectionPanel>
+        <div className="section-heading">
+          <Typography.Title level={4}>运行状态</Typography.Title>
+        </div>
+        <Descriptions column={3} size="small" bordered>
+          <Descriptions.Item label="失败任务">{runtimeQuery.data?.failed_job_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="等待重试任务">{runtimeQuery.data?.retry_job_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="IMAP 待重试">{runtimeQuery.data?.imap_retry_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="OSS 孤立对象">{runtimeQuery.data?.oss_orphan_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="最近 IMAP 状态">{runtimeQuery.data?.latest_imap_job?.status ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="最近 IMAP 失败数">{runtimeQuery.data?.latest_imap_job?.failed_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="DeepSeek 最近状态">{runtimeQuery.data?.ai_provider_status.deepseek?.status ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="Qwen 最近状态">{runtimeQuery.data?.ai_provider_status.qwen?.status ?? '-'}</Descriptions.Item>
+        </Descriptions>
       </SectionPanel>
       <SectionPanel>
         <div className="section-heading">
@@ -250,6 +275,7 @@ export default function SystemPage() {
           <Descriptions.Item label="发送模式">{info?.reply_send_mode === 'auto_send' ? '满足条件自动发送' : '人工确认后发送'}</Descriptions.Item>
           <Descriptions.Item label="追问上限">{info?.max_follow_up ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="置信度阈值">{info?.confidence_threshold ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="自动采纳安全阈值">{info?.auto_apply_min_confidence ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="自动发送安全阈值">{info?.auto_send_min_confidence ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="文本 AI 状态">
             <Tag color={integrations.text_ai_configured ? 'green' : 'default'}>{integrations.text_ai_configured ? '已配置' : '未配置'}</Tag>

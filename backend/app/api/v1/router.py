@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import ai_logs, auth, dashboard, db_browser, email_threads, emails, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
+from app.api.v1 import ai_logs, auth, dashboard, db_browser, email_threads, emails, jobs, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
 
 api_router = APIRouter()
+
+api_router.include_router(jobs.router, prefix="/jobs", tags=["background-jobs"])
+api_router.include_router(jobs.exports_router, prefix="/exports", tags=["exports"])
 
 api_router.include_router(auth.router, prefix="/auth", tags=["认证"])
 api_router.include_router(users.router, prefix="/users", tags=["用户管理"])

@@ -47,12 +47,16 @@ class Email(TimestampMixin, Base):
         Index("idx_emails_direction_status_time", "mail_direction", "parse_status", "received_at"),
         Index("idx_emails_intent", "intent_type"),
         Index("idx_emails_from_domain", "from_domain"),
+        Index("idx_emails_processing_trace", "processing_trace_id"),
+        UniqueConstraint("source_content_sha256", name="uk_emails_source_content_sha256"),
     )
 
     id: Mapped[int] = pk_column()
     fetch_job_run_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("job_run_logs.id", name="fk_emails_fetch_job"))
     thread_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_threads.id", name="fk_emails_thread"))
     raw_eml_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_emails_raw_eml_oss"))
+    processing_trace_id: Mapped[str | None] = mapped_column(String(100))
+    source_content_sha256: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     mail_direction: Mapped[str] = mapped_column(String(20), nullable=False, server_default="inbound")
     mailbox_account: Mapped[str] = mapped_column(String(255), nullable=False)
     folder_name: Mapped[str | None] = mapped_column(String(255))

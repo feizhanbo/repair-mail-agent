@@ -7,7 +7,7 @@ import pytest
 
 from app.models import JobRunLog
 from app.models.mail_fetch import MailFetchRecord
-from app.services import imap_fetcher
+from app.services import email_archival, imap_fetcher
 
 
 @pytest.fixture
@@ -97,13 +97,14 @@ async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(m
         uploaded.append((source_type, original_file_name))
         return SimpleNamespace(id=len(uploaded) + 100)
 
-    async def fake_ingest(_session, *, payload, user_id: int | None, auto_parse: bool):
+    async def fake_ingest(_session, *, payload, user_id: int | None, auto_parse: bool, rule_analysis=None):
         ingested_payloads.append(payload)
         assert user_id == 7
         assert auto_parse is False
+        assert rule_analysis is not None
         return {"duplicate": False, "email": {"id": 77, "parse_status": "pending"}}
 
-    monkeypatch.setattr(imap_fetcher, "upload_bytes_to_oss", fake_upload)
+    monkeypatch.setattr(email_archival, "upload_bytes_to_oss", fake_upload)
     monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
@@ -177,7 +178,7 @@ async def test_fetch_imap_emails_skips_irrelevant_before_oss_upload(monkeypatch:
 
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
-    monkeypatch.setattr(imap_fetcher, "upload_bytes_to_oss", fail_upload)
+    monkeypatch.setattr(email_archival, "upload_bytes_to_oss", fail_upload)
     monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fail_ingest)
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)

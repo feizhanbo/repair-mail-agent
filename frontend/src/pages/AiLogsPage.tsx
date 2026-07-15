@@ -1,6 +1,6 @@
 import { SearchOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Button, DatePicker, Descriptions, Form, Input, Select, Space, Table, Typography } from 'antd';
+import { Button, DatePicker, Descriptions, Form, Input, Modal, Select, Space, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api } from '../api/client';
@@ -11,6 +11,7 @@ import StatusTag from '../components/StatusTag';
 import type { AiLog } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
+import { useAuthStore } from '../stores/authStore';
 
 type AiLogFilters = {
   ticket_id?: string;
@@ -26,10 +27,17 @@ type AiLogFilters = {
 export default function AiLogsPage() {
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const isAdmin = useAuthStore((state) => state.user?.roles.includes('admin'));
   const [filterForm] = Form.useForm<AiLogFilters>();
   const logsQuery = useQuery({
     queryKey: ['ai-logs', filters, page],
     queryFn: () => api.aiLogs({ ...filters, page, page_size: 20 }),
+  });
+  const detailQuery = useQuery({
+    queryKey: ['ai-log-detail', detailId],
+    queryFn: () => api.aiLogDetail(detailId as number),
+    enabled: Boolean(detailId && isAdmin),
   });
   const columns: ColumnsType<AiLog> = [
     { title: 'Trace', dataIndex: 'trace_id', width: 160, ellipsis: true },
@@ -44,6 +52,11 @@ export default function AiLogsPage() {
     { title: '耗时', dataIndex: 'latency_ms', width: 90, render: (value?: number | null) => (value ? `${value} ms` : '-') },
     { title: '输出摘要', dataIndex: 'output_summary', ellipsis: true, render: (value?: string | null) => compactText(value) },
     { title: '时间', dataIndex: 'created_at', width: 160, render: formatTime },
+    {
+      title: '明细',
+      width: 80,
+      render: (_, record) => isAdmin ? <Button type="link" size="small" onClick={() => setDetailId(record.id)}>查看</Button> : '-',
+    },
   ];
 
   return (
@@ -131,6 +144,9 @@ export default function AiLogsPage() {
           }}
         />
       </SectionPanel>
+      <Modal width={1000} title={`AI 调用明细 #${detailId ?? ''}`} open={Boolean(detailId)} onCancel={() => setDetailId(null)} footer={null} destroyOnClose>
+        {detailQuery.isFetching ? <Typography.Text>加载中...</Typography.Text> : <JsonBlock value={detailQuery.data} />}
+      </Modal>
     </div>
   );
 }

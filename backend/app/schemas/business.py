@@ -59,6 +59,10 @@ class TicketTransitionRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class TicketExportConfirmRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class TicketItemUpsert(BaseModel):
     id: int | None = None
     line_no: int | None = Field(default=None, ge=1)
@@ -167,6 +171,7 @@ class BoardCardImportRequest(BaseModel):
 class SystemConfigUpdateRequest(BaseModel):
     auto_send_enabled: bool | None = None
     reply_send_mode: Literal["human_review", "auto_send"] | None = None
+    auto_apply_min_confidence: float | None = Field(default=None, ge=0, le=1)
     auto_send_min_confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)
     max_follow_up: int | None = Field(default=None, ge=1, le=10)

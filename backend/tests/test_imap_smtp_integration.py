@@ -10,10 +10,14 @@ Phase C: SMTP 自动发送（含配置切换 + 回复草稿 + 状态检查 + 配
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
+from email.utils import getaddresses
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+from app.config import settings
 
 BASE = "http://127.0.0.1:8000"
 TOKEN: str | None = None
@@ -81,14 +85,20 @@ def phase_login() -> bool:
     _hdr("Phase A: 登录获取 JWT Token")
 
     try:
-        resp = _req("POST", "/api/v1/auth/login", body={"username": "admin", "password": "repair-admin-2026"})
+        resp = _req(
+            "POST",
+            "/api/v1/auth/login",
+            body={
+                "username": os.environ["INTEGRATION_ADMIN_USERNAME"],
+                "password": os.environ["INTEGRATION_ADMIN_PASSWORD"],
+            },
+        )
     except Exception as exc:
         _err(f"登录请求失败: {exc}")
         return False
 
     if not resp.get("success"):
         _err(f"登录失败: {resp.get('message', resp)}")
-        print(f"{IDENT}   完整响应: {json.dumps(resp, ensure_ascii=False, indent=2)}")
         return False
 
     data = resp.get("data", {})
@@ -101,7 +111,6 @@ def phase_login() -> bool:
     user = data.get("user", {})
     _ok(f"登录成功 → 用户: {user.get('username')} ({user.get('real_name')})")
     _ok(f"角色: {user.get('roles')}")
-    _ok(f"Token 前缀: {token[:30]}...")
     return True
 
 
@@ -125,8 +134,6 @@ def phase_imap_fetch() -> dict | None:
     except Exception as exc:
         _err(f"fetch-now 请求失败: {exc}")
         return None
-
-    print(f"{IDENT}响应: {json.dumps(resp, ensure_ascii=False, indent=2)}")
 
     if not resp.get("success"):
         _err(f"IMAP fetch 失败: {resp.get('message', resp)}")
@@ -192,8 +199,6 @@ def phase_config_enable_auto_send() -> bool:
     except Exception as exc:
         _err(f"配置更新失败: {exc}")
         return False
-
-    print(f"{IDENT}响应: {json.dumps(resp, ensure_ascii=False, indent=2)}")
 
     if not resp.get("success"):
         _err(f"配置更新失败: {resp.get('message', resp)}")
@@ -276,8 +281,6 @@ def phase_create_draft(ticket: dict) -> dict | None:
         _err(f"创建草稿失败: {exc}")
         return None
 
-    print(f"{IDENT}响应: {json.dumps(resp, ensure_ascii=False, indent=2)}")
-
     if not resp.get("success"):
         _err(f"创建草稿失败: {resp.get('message', resp)}")
         return None
@@ -304,6 +307,33 @@ def phase_create_draft(ticket: dict) -> dict | None:
         _warn("草稿状态为 pending_review，未触发自动发送")
 
     return data
+
+
+def phase_approve_safe_reply(draft_data: dict) -> bool:
+    _hdr("Phase C.4: 白名单复核并发送")
+    reply = draft_data.get("reply", {})
+    reply_id = reply.get("id")
+    values = [reply.get("to_addresses"), reply.get("cc_addresses")]
+    recipients = {
+        address.strip().lower()
+        for _, address in getaddresses([value for value in values if value])
+        if address.strip()
+    }
+    whitelist = {address.lower() for address in settings.SMTP_RECIPIENT_WHITELIST}
+    if not reply_id or not recipients or not whitelist or not recipients <= whitelist:
+        _err("草稿收件人不是 SMTP 白名单的非空子集，已在网络调用前终止")
+        return False
+    try:
+        resp = _req("POST", f"/api/v1/replies/{reply_id}/approve-send")
+    except Exception as exc:
+        _err(f"受控发送失败: {exc}")
+        return False
+    if not resp.get("success"):
+        _err(f"受控发送被拒绝: {resp.get('message', 'unknown error')}")
+        return False
+    send_status = resp.get("data", {}).get("reply", {}).get("send_status")
+    _ok(f"受控发送调用完成，send_status={send_status}")
+    return send_status == "sent"
 
 
 def phase_config_reset() -> bool:
@@ -354,6 +384,16 @@ def main() -> int:
     print(f"  后端地址: {BASE}")
     print("=" * 72)
 
+    if os.getenv("RUN_REAL_MAIL_INTEGRATION_TESTS") != "1":
+        print("真实邮箱测试未显式启用，退出。")
+        return 0
+    if not os.getenv("INTEGRATION_ADMIN_USERNAME") or not os.getenv("INTEGRATION_ADMIN_PASSWORD"):
+        print("缺少集成测试登录环境变量，退出。")
+        return 2
+    if not (settings.IMAP_USER and settings.IMAP_PASSWORD and settings.SMTP_RECIPIENT_WHITELIST):
+        print("IMAP 指定账号或 SMTP 白名单未配置，退出。")
+        return 2
+
     # --- Phase A ---
     if not phase_login():
         print("\n登录失败，后续测试无法继续。")
@@ -363,13 +403,8 @@ def main() -> int:
     phase_imap_fetch()
     phase_check_job_logs()
 
-    # --- Phase C ---
-    if not phase_config_enable_auto_send():
-        print("\n无法启用 auto_send，跳过 SMTP 测试。")
-        try:
-            phase_config_reset()
-        except Exception:
-            pass
+    # --- Phase C：保持人工审核模式，草稿生成后再次校验完整收件人集合 ---
+    if not phase_config_reset():
         return 2
 
     ticket = phase_find_ticket()
@@ -379,7 +414,10 @@ def main() -> int:
         phase_verify_config()
         return 3
 
-    phase_create_draft(ticket)
+    draft_data = phase_create_draft(ticket)
+    if draft_data is None or not phase_approve_safe_reply(draft_data):
+        phase_config_reset()
+        return 4
 
     # --- 恢复配置 ---
     phase_config_reset()

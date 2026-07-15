@@ -6,7 +6,12 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from app.integrations.ai_provider import AiExtractResponse, AiReplyDraftResponse, DeepSeekProvider
+from app.integrations.ai_provider import (
+    AiExtractResponse,
+    AiReplyDraftResponse,
+    DeepSeekProvider,
+    _normalize_response_payload,
+)
 from app.services.ai import _key_result, _status_for
 
 
@@ -37,6 +42,28 @@ def test_ai_extract_schema_accepts_sample_output() -> None:
 def test_ai_extract_schema_rejects_invalid_confidence() -> None:
     with pytest.raises(ValidationError):
         AiExtractResponse.model_validate({"confidence_score": 1.2})
+
+
+def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
+    normalized = _normalize_response_payload(
+        {
+            "extracted_fields": None,
+            "extracted_items": {"items": [{"sn": "SN001"}]},
+            "missing_fields": ["contact_phone"],
+            "conflict_fields": None,
+            "confidence_score": 86,
+            "field_confidences": {"sn": "92", "contact_phone": None},
+            "confidence_reasons": "SN present",
+            "original_evidence": "SN001",
+        },
+        AiExtractResponse,
+    )
+    parsed = AiExtractResponse.model_validate(normalized)
+    assert parsed.extracted_items == [{"sn": "SN001"}]
+    assert parsed.missing_fields == {"contact_phone": "需要补充"}
+    assert parsed.confidence_score == 0.86
+    assert parsed.field_confidences == {"sn": 0.92, "contact_phone": 0.0}
+    assert parsed.confidence_reasons == ["SN present"]
 
 
 def test_ai_reply_schema_accepts_sample_output() -> None:

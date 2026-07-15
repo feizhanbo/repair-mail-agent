@@ -68,3 +68,23 @@ def test_payload_from_eml_bytes_rejects_missing_sender() -> None:
 
     with pytest.raises(ValueError, match="EML_FROM_REQUIRED"):
         payload_from_eml_bytes(message.as_bytes(), mailbox_account="inbox@example.com")
+
+
+def test_content_id_image_without_disposition_is_inline() -> None:
+    message = EmailMessage()
+    message["From"] = "customer@example.com"
+    message["To"] = "repair@example.com"
+    message.set_content("See inline screenshot")
+    message.make_mixed()
+    part = EmailMessage()
+    part.set_content(b"image-bytes", maintype="image", subtype="png", cte="base64")
+    part["Content-ID"] = "<foxmail-image>"
+    part.set_param("name", "screenshot.png", header="Content-Type")
+    message.attach(part)
+
+    payload = payload_from_eml_bytes(message.as_bytes(), mailbox_account="inbox@example.com")
+
+    assert len(payload.attachments) == 1
+    assert payload.attachments[0]["file_name"] == "screenshot.png"
+    assert payload.attachments[0]["content_id"] == "foxmail-image"
+    assert payload.attachments[0]["is_inline"] is True

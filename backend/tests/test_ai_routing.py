@@ -55,8 +55,13 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
         assert expires_seconds == 1800
         return "https://oss.example.com/signed-image"
 
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return b"image-bytes"
+
     monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
     monkeypatch.setattr(attachment_parser, "generate_presigned_url_for_object", fake_presigned_url)
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
     attachment = EmailAttachment(
         email_id=1,
         file_name="fault.png",

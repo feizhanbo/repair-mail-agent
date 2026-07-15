@@ -3,15 +3,17 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
-from app.core.response import page
+from app.core.response import ok, page
 from app.models import AiCallLog
 from app.services.common import model_to_dict, paginate_scalars
+from app.services.ai import read_ai_log_detail
+from app.services.audit import log_operation
 
 router = APIRouter()
 
@@ -36,6 +38,35 @@ AI_LOG_FIELDS = (
     "log_record_hash",
     "created_at",
 )
+
+
+@router.get("/{ai_log_id}/detail")
+async def get_ai_log_detail(
+    ai_log_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    ai_log = await session.get(AiCallLog, ai_log_id)
+    if ai_log is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI_LOG_NOT_FOUND")
+    try:
+        detail = await read_ai_log_detail(ai_log)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="AI_LOG_DETAIL_EXPIRED") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await log_operation(
+        session,
+        user_id=current_user.id,
+        operation_type="ai_log_detail_viewed",
+        target_type="ai_call_log",
+        target_id=ai_log.id,
+        email_id=ai_log.email_id,
+        ticket_id=ai_log.ticket_id,
+        after_data={"trace_id": ai_log.trace_id, "record_hash": ai_log.log_record_hash},
+    )
+    await session.commit()
+    return ok(detail)
 
 
 @router.get("")

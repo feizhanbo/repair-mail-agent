@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import imaplib
 import time
+from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import JobRunLog
 from app.models.mail_fetch import MailFetchRecord
 from app.services import emails as email_service
+from app.services.attachment_precheck import filter_decorative_attachments
+from app.services.email_archival import EmailArchivalError, archive_email_bundle
 from app.services.common import utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload, precheck_imap_uid
-from app.services.storage import upload_bytes_to_oss
+from app.services.jobs import enqueue_job
 
 
 class ImapConfigurationError(RuntimeError):
@@ -23,6 +28,27 @@ class ImapConfigurationError(RuntimeError):
 
 class ImapFetchError(RuntimeError):
     pass
+
+
+_mail_io_semaphore = asyncio.Semaphore(max(1, settings.MAIL_IO_CONCURRENCY))
+_RETRY_MINUTES = (5, 15, 60, 180, 720)
+
+
+async def _mail_io(func, *args, **kwargs):
+    async with _mail_io_semaphore:
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _commit(session: AsyncSession) -> None:
+    commit = getattr(session, "commit", None)
+    if commit is not None:
+        await commit()
+
+
+async def _rollback(session: AsyncSession) -> None:
+    rollback = getattr(session, "rollback", None)
+    if rollback is not None:
+        await rollback()
 
 
 def _imap_configured() -> bool:
@@ -75,11 +101,14 @@ async def fetch_imap_emails(
     archive_to_oss: bool = True,
     user_id: int | None = None,
 ) -> dict[str, Any]:
+    if not archive_to_oss:
+        raise ImapConfigurationError("OSS_ARCHIVE_REQUIRED")
     started = time.monotonic()
     job = JobRunLog(
         job_name="imap_fetch_now",
         job_type="imap_fetch",
         status="running",
+        started_at=utcnow(),
         processed_count=0,
         success_count=0,
         failed_count=0,
@@ -99,11 +128,11 @@ async def fetch_imap_emails(
     skipped_count = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
-        client = _connect()
-        typ, _ = client.select(folder_name, readonly=True)
+        client = await _mail_io(_connect)
+        typ, _ = await _mail_io(client.select, folder_name, readonly=True)
         if typ != "OK":
             raise ImapFetchError("IMAP_SELECT_FAILED")
-        uids = _uid_search(client, message_id=message_id, unseen_only=unseen_only)
+        uids = await _mail_io(_uid_search, client, message_id=message_id, unseen_only=unseen_only)
         if limit > 0:
             uids = uids[-limit:]
         job.processed_count = len(uids)
@@ -121,11 +150,13 @@ async def fetch_imap_emails(
                     fetched.append({"uid": uid, "fetch_status": uid_precheck.status, "precheck": uid_precheck.to_dict()})
                     continue
 
-                raw = _uid_fetch_raw(client, uid)
+                raw = await _mail_io(_uid_fetch_raw, client, uid)
                 payload = payload_from_eml_bytes(raw, mailbox_account=settings.IMAP_USER, folder_name=folder_name)
                 payload.raw_eml_sha256 = hashlib.sha256(raw).hexdigest()
                 payload.imap_uid = uid
                 payload.fetch_job_run_id = job.id
+                blobs = attachment_blobs_from_eml_bytes(raw)
+                blobs, _attachment_precheck = filter_decorative_attachments(payload, blobs)
                 payload_precheck = await precheck_email_payload(session, payload)
                 if not payload_precheck.accepted:
                     skipped_count += 1
@@ -152,30 +183,47 @@ async def fetch_imap_emails(
                             "precheck": payload_precheck.to_dict(),
                         }
                     )
+                    await _commit(session)
                     continue
 
-                if archive_to_oss:
-                    raw_object = await upload_bytes_to_oss(
+                try:
+                    await archive_email_bundle(
                         session,
-                        content=raw,
-                        original_file_name=f"imap-{uid}.eml",
-                        content_type="message/rfc822",
-                        source_type="raw_eml",
+                        payload=payload,
+                        raw_eml=raw,
+                        raw_file_name=f"imap-{uid}.eml",
+                        attachment_blobs=blobs,
+                        source="imap",
                         user_id=user_id,
+                        correlation_id=job.correlation_id,
                     )
-                    payload.raw_eml_oss_object_id = raw_object.id
-                    blobs = attachment_blobs_from_eml_bytes(raw)
-                    for attachment, blob in zip(payload.attachments, blobs, strict=False):
-                        attachment_object = await upload_bytes_to_oss(
-                            session,
-                            content=blob["content"],
-                            original_file_name=blob["file_name"],
-                            content_type=blob.get("content_type"),
-                            source_type="email_attachment",
-                            user_id=user_id,
-                        )
-                        attachment["oss_object_id"] = attachment_object.id
-                ingest_result = await email_service.ingest_email(session, payload=payload, user_id=user_id, auto_parse=auto_parse)
+                    await _commit(session)
+                except EmailArchivalError:
+                    # Preserve successful/failed OSS object metadata for an idempotent retry.
+                    await _commit(session)
+                    raise
+                ingest_result = await email_service.ingest_email(
+                    session,
+                    payload=payload,
+                    user_id=user_id,
+                    auto_parse=False,
+                    rule_analysis=payload_precheck.rule_analysis,
+                )
+                if auto_parse and not ingest_result.get("duplicate"):
+                    email_id = int(ingest_result["email"]["id"])
+                    await enqueue_job(
+                        session,
+                        job_type="email_parse",
+                        resource_type="email",
+                        resource_id=email_id,
+                        idempotency_key=f"email_parse:{email_id}:initial",
+                        correlation_id=job.correlation_id,
+                        metadata={
+                            "user_id": user_id,
+                            "reason": "initial IMAP asynchronous parse",
+                            "rule_parse_result_id": ingest_result["rule_parse_result_id"],
+                        },
+                    )
                 session.add(
                     MailFetchRecord(
                         mailbox_account=settings.IMAP_USER,
@@ -199,13 +247,42 @@ async def fetch_imap_emails(
                     }
                 )
                 job.success_count += 1
+                await _commit(session)
             except Exception as exc:
-                failures.append({"uid": uid, "error": exc.__class__.__name__})
+                await _rollback(session)
+                existing_failure = await session.scalar(
+                    select(MailFetchRecord).where(
+                        MailFetchRecord.mailbox_account == settings.IMAP_USER,
+                        MailFetchRecord.folder_name == folder_name,
+                        MailFetchRecord.imap_uid == uid,
+                    )
+                )
+                attempt_count = (existing_failure.attempt_count if existing_failure else 0) + 1
+                retry_index = min(attempt_count - 1, len(_RETRY_MINUTES) - 1)
+                next_retry_at = utcnow() + timedelta(minutes=_RETRY_MINUTES[retry_index])
+                error_code = exc.code if isinstance(exc, EmailArchivalError) else exc.__class__.__name__
+                if existing_failure is None:
+                    existing_failure = MailFetchRecord(
+                        mailbox_account=settings.IMAP_USER,
+                        folder_name=folder_name,
+                        imap_uid=uid,
+                        message_id="",
+                        fetch_job_run_id=job.id,
+                    )
+                    session.add(existing_failure)
+                existing_failure.fetch_status = "retry_wait" if attempt_count < settings.IMAP_MAX_RETRIES else "failed"
+                existing_failure.attempt_count = attempt_count
+                existing_failure.last_attempt_at = utcnow()
+                existing_failure.next_retry_at = next_retry_at if attempt_count < settings.IMAP_MAX_RETRIES else None
+                existing_failure.error_message = error_code
+                failures.append({"uid": uid, "error": error_code})
                 job.failed_count += 1
+                await _commit(session)
         job.status = "success" if not failures else "partial_success"
     except Exception as exc:
         job.status = "failed"
         job.error_message = exc.__class__.__name__
+        await _commit(session)
         raise
     finally:
         job.finished_at = utcnow()
@@ -215,11 +292,11 @@ async def fetch_imap_emails(
         job.metadata_json = metadata
         if client is not None:
             try:
-                client.close()
+                await _mail_io(client.close)
             except Exception:
                 pass
             try:
-                client.logout()
+                await _mail_io(client.logout)
             except Exception:
                 pass
 

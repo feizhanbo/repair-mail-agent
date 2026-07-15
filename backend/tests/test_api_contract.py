@@ -86,13 +86,22 @@ def test_expected_business_routes_are_registered() -> None:
     routes = {f"{','.join(sorted(route.methods or []))} {route.path}" for route in app.routes}
     assert "POST /api/v1/auth/login" in routes
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
+    assert "POST /api/v1/emails/{email_id}/reparse/jobs" in routes
     assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
+    assert "POST /api/v1/emails/ingest/jobs" in routes
+    assert "POST /api/v1/emails/ingest-eml/jobs" in routes
+    assert "POST /api/v1/emails/fetch/jobs" in routes
     assert "GET /api/v1/emails/export" in routes
     assert "GET /api/v1/emails/{email_id}/raw-eml-url" in routes
     assert "GET /api/v1/emails/attachments/{attachment_id}/download-url" in routes
     assert "PATCH /api/v1/tickets/{ticket_id}/fields" in routes
+    assert "GET /api/v1/tickets/{ticket_id}/timeline" in routes
+    assert "POST /api/v1/tickets/{ticket_id}/confirm-export" in routes
     assert "POST /api/v1/manual-review/tasks/{task_id}/reparse" in routes
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes
+    assert "POST /api/v1/replies/{reply_id}/approve-send/jobs" in routes
+    assert "GET /api/v1/jobs/{job_id}" in routes
+    assert "POST /api/v1/exports/jobs" in routes
     assert "GET /api/v1/ai-logs" in routes
     assert "GET /api/v1/system/info" in routes
     assert "GET /api/v1/system/config" in routes

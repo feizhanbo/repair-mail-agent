@@ -1,0 +1,282 @@
+- generic [ref=f8e1]:
+  - generic [ref=f8e3]:
+    - complementary [ref=f8e4]:
+      - generic [ref=f8e5]:
+        - heading "邮件报修系统" [level=4] [ref=f8e7]
+        - menu [ref=f8e8]:
+          - menuitem "dashboard 首页看板" [ref=f8e9] [cursor=pointer]:
+            - img "dashboard" [ref=f8e10]
+            - generic [ref=f8e13]: 首页看板
+          - menuitem "mail 邮件中心" [ref=f8e14] [cursor=pointer]:
+            - img "mail" [ref=f8e15]
+            - generic [ref=f8e18]: 邮件中心
+          - menuitem "profile 工单中心" [ref=f8e19] [cursor=pointer]:
+            - img "profile" [ref=f8e20]
+            - generic [ref=f8e23]: 工单中心
+          - menuitem "team 人工复核" [ref=f8e24] [cursor=pointer]:
+            - img "team" [ref=f8e25]
+            - generic [ref=f8e28]: 人工复核
+          - menuitem "safety-certificate 回复管理" [ref=f8e29] [cursor=pointer]:
+            - img "safety-certificate" [ref=f8e30]
+            - generic [ref=f8e33]: 回复管理
+          - menuitem "bar-chart 统计分析" [ref=f8e34] [cursor=pointer]:
+            - img "bar-chart" [ref=f8e35]
+            - generic [ref=f8e38]: 统计分析
+          - menuitem "database 基础资料" [ref=f8e39] [cursor=pointer]:
+            - img "database" [ref=f8e40]
+            - generic [ref=f8e43]: 基础资料
+          - menuitem "user 用户管理" [ref=f8e44] [cursor=pointer]:
+            - img "user" [ref=f8e45]
+            - generic [ref=f8e48]: 用户管理
+          - menuitem "database 数据库浏览" [ref=f8e49] [cursor=pointer]:
+            - img "database" [ref=f8e50]
+            - generic [ref=f8e53]: 数据库浏览
+          - menuitem "message 站内消息" [ref=f8e54] [cursor=pointer]:
+            - img "message" [ref=f8e55]
+            - generic [ref=f8e58]: 站内消息
+          - menuitem "robot AI 日志" [ref=f8e59] [cursor=pointer]:
+            - img "robot" [ref=f8e60]
+            - generic [ref=f8e63]: AI 日志
+          - menuitem "setting 系统配置" [ref=f8e64] [cursor=pointer]:
+            - img "setting" [ref=f8e65]
+            - generic [ref=f8e68]: 系统配置
+    - generic [ref=f8e69]:
+      - banner [ref=f8e70]:
+        - button "折叠侧边栏" [ref=f8e71] [cursor=pointer]:
+          - img "menu-fold" [ref=f8e73]
+        - generic [ref=f8e76]:
+          - generic [ref=f8e78]:
+            - button "通知中心" [ref=f8e79] [cursor=pointer]:
+              - img "bell" [ref=f8e81]
+            - superscript [ref=f8e206]:
+              - generic [ref=f8e207]: "2"
+          - button "System Administrator" [ref=f8e85] [cursor=pointer]
+          - button "退出" [ref=f8e88] [cursor=pointer]:
+            - img "logout" [ref=f8e90]
+      - main [ref=f8e93]:
+        - generic [ref=f8e94]:
+          - generic [ref=f8e95]:
+            - heading "邮件中心" [level=2] [ref=f8e96]
+            - generic [ref=f8e99]:
+              - button "download 导出" [ref=f8e101] [cursor=pointer]:
+                - img "download" [ref=f8e103]
+                - generic [ref=f8e106]: 导出
+              - button "upload 导入 EML" [ref=f8e111] [cursor=pointer]:
+                - img "upload" [ref=f8e113]
+                - generic [ref=f8e116]: 导入 EML
+              - button "plus 手动入库" [ref=f8e118] [cursor=pointer]:
+                - img "plus" [ref=f8e120]
+                - generic [ref=f8e124]: 手动入库
+          - generic [ref=f8e125]:
+            - generic [ref=f8e126]:
+              - generic [ref=f8e132]:
+                - img "search" [ref=f8e134]
+                - textbox "主题" [ref=f8e137]
+              - textbox "发件人" [ref=f8e145]
+              - textbox "Message-ID" [ref=f8e153]
+              - generic [ref=f8e162] [cursor=pointer]:
+                - combobox [ref=f8e164]
+                - generic: 邮件意图
+              - generic [ref=f8e172] [cursor=pointer]:
+                - combobox [ref=f8e174]
+                - generic: 解析状态
+              - generic [ref=f8e180]:
+                - textbox "开始日期" [ref=f8e182]
+                - generic "to" [ref=f8e184]:
+                  - img "swap-right" [ref=f8e185]
+                - textbox "结束日期" [ref=f8e189]
+                - generic:
+                  - img "calendar"
+              - generic [ref=f8e190]:
+                - button "筛 选" [ref=f8e192] [cursor=pointer]
+                - button "重 置" [ref=f8e195] [cursor=pointer]
+            - generic [ref=f8e209]:
+              - table [ref=f8e213]:
+                - rowgroup [ref=f8e221]:
+                  - row [ref=f8e222]:
+                    - columnheader "主题"
+                    - columnheader "发件人" [ref=f8e223]
+                    - columnheader "意图" [ref=f8e224]
+                    - columnheader "解析" [ref=f8e225]
+                    - columnheader "线程" [ref=f8e226]
+                    - columnheader "收信时间" [ref=f8e227]
+                    - columnheader "操作" [ref=f8e228]
+                - rowgroup [ref=f8e229]:
+                  - row [ref=f8e230]:
+                    - cell "RMA2026070908天水华天科技股份有限公司"
+                    - cell "miya.fang@accotest.com" [ref=f8e231]
+                    - cell "rma_form_submission" [ref=f8e232]
+                    - cell "needs_manual" [ref=f8e234]
+                    - cell "7" [ref=f8e236]
+                    - cell "2026-07-15 07:47" [ref=f8e237]
+                    - cell [ref=f8e238]:
+                      - generic [ref=f8e239]:
+                        - button "详情" [ref=f8e241] [cursor=pointer]
+                        - button [ref=f8e244] [cursor=pointer]:
+                          - img "reload" [ref=f8e246]
+                  - row [ref=f8e249]:
+                    - cell "RMA2026070908天水华天科技股份有限公司"
+                    - cell "miya.fang@accotest.com" [ref=f8e250]
+                    - cell "rma_update" [ref=f8e251]
+                    - cell "needs_manual" [ref=f8e253]
+                    - cell "7" [ref=f8e255]
+                    - cell "2026-07-15 03:09" [ref=f8e256]
+                    - cell [ref=f8e257]:
+                      - generic [ref=f8e258]:
+                        - button "详情" [ref=f8e260] [cursor=pointer]
+                        - button [ref=f8e263] [cursor=pointer]:
+                          - img "reload" [ref=f8e265]
+              - list [ref=f8e268]:
+                - listitem "上一页" [ref=f8e269]:
+                  - button [disabled] [ref=f8e270]:
+                    - img "left" [ref=f8e271]
+                - listitem "1" [ref=f8e274] [cursor=pointer]
+                - listitem "下一页" [ref=f8e276]:
+                  - button [disabled] [ref=f8e277]:
+                    - img "right" [ref=f8e278]
+  - dialog "邮件详情" [ref=f8e282]:
+    - generic [ref=f8e284]:
+      - button "关闭" [ref=f8e285] [cursor=pointer]:
+        - img "close" [ref=f8e286]
+      - generic [ref=f8e289]: 邮件详情
+    - generic [ref=f8e291]:
+      - table [ref=f8e294]:
+        - rowgroup [ref=f8e295]:
+          - row [ref=f8e296]:
+            - rowheader "主题" [ref=f8e297]
+            - cell "RMA2026070908天水华天科技股份有限公司" [ref=f8e298]
+          - row [ref=f8e299]:
+            - rowheader "发件人" [ref=f8e300]
+            - cell "miya.fang@accotest.com" [ref=f8e301]
+          - row [ref=f8e302]:
+            - rowheader "收件人" [ref=f8e303]
+            - cell "yang.guo@accotest.com, lin.li@ht-tech.com, tim.zhou@accotest.com" [ref=f8e304]
+          - row [ref=f8e305]:
+            - rowheader "Message-ID" [ref=f8e306]
+            - cell "<rma-current-chain-20260715@local.test>" [ref=f8e307]
+          - row [ref=f8e308]:
+            - rowheader "原始EML" [ref=f8e309]
+            - cell [ref=f8e310]:
+              - button "download Download" [ref=f8e312] [cursor=pointer]:
+                - img "download" [ref=f8e314]
+                - generic [ref=f8e317]: Download
+          - row [ref=f8e318]:
+            - rowheader "正文" [ref=f8e319]
+            - cell "郭洋： 收到 连荣： RMA表已更新，请见附件，谢谢 Best Regards! ------------------------------..." [ref=f8e320]
+          - row [ref=f8e321]:
+            - rowheader "正文预览" [ref=f8e322]
+            - cell [ref=f8e323]:
+              - button [ref=f8e325] [cursor=pointer]:
+                - img "eye" [ref=f8e327]
+      - generic [ref=f8e330]:
+        - heading "附件" [level=5] [ref=f8e331]
+        - table [ref=f8e338]:
+          - rowgroup [ref=f8e346]:
+            - row [ref=f8e347]:
+              - columnheader [ref=f8e348]
+              - columnheader "文件名" [ref=f8e349]
+              - columnheader "类型" [ref=f8e350]
+              - columnheader "大小" [ref=f8e351]
+              - columnheader "状态" [ref=f8e352]
+              - columnheader "操作" [ref=f8e353]
+          - rowgroup [ref=f8e354]:
+            - row [ref=f8e355]:
+              - cell [ref=f8e356]:
+                - button "展开行" [ref=f8e357] [cursor=pointer]
+              - cell "RMA2026070908天水华天科技股份有限公司).pdf" [ref=f8e358]
+              - cell "application/pdf" [ref=f8e359]
+              - cell "112127" [ref=f8e360]
+              - cell "parsed" [ref=f8e361]
+              - cell [ref=f8e363]:
+                - generic [ref=f8e364]:
+                  - button [ref=f8e366] [cursor=pointer]:
+                    - img "eye" [ref=f8e368]
+                  - button [ref=f8e372] [cursor=pointer]:
+                    - img "download" [ref=f8e374]
+            - row [ref=f8e377]:
+              - cell [ref=f8e378]:
+                - button "展开行" [ref=f8e379] [cursor=pointer]
+              - cell "reply_34466_1107(07-09-11-39-24)(2).jpg" [ref=f8e380]
+              - cell "image/jpeg" [ref=f8e381]
+              - cell "120789" [ref=f8e382]
+              - cell "需人工复核" [ref=f8e383]
+              - cell [ref=f8e385]:
+                - generic [ref=f8e386]:
+                  - button [ref=f8e388] [cursor=pointer]:
+                    - img "eye" [ref=f8e390]
+                  - button [ref=f8e394] [cursor=pointer]:
+                    - img "download" [ref=f8e396]
+            - row [ref=f8e399]:
+              - cell [ref=f8e400]:
+                - button "展开行" [ref=f8e401] [cursor=pointer]
+              - cell "reply_34466_1107(07-09-11-39-24)(2).png" [ref=f8e402]
+              - cell "image/png" [ref=f8e403]
+              - cell "258273" [ref=f8e404]
+              - cell "parsed" [ref=f8e405]
+              - cell [ref=f8e407]:
+                - generic [ref=f8e408]:
+                  - button [ref=f8e410] [cursor=pointer]:
+                    - img "eye" [ref=f8e412]
+                  - button [ref=f8e416] [cursor=pointer]:
+                    - img "download" [ref=f8e418]
+            - row [ref=f8e421]:
+              - cell [ref=f8e422]:
+                - button "展开行" [ref=f8e423] [cursor=pointer]
+              - cell "reply_34466_1107(07-09-11-39-24)(1).png" [ref=f8e424]
+              - cell "image/png" [ref=f8e425]
+              - cell "790965" [ref=f8e426]
+              - cell "parsed" [ref=f8e427]
+              - cell [ref=f8e429]:
+                - generic [ref=f8e430]:
+                  - button [ref=f8e432] [cursor=pointer]:
+                    - img "eye" [ref=f8e434]
+                  - button [ref=f8e438] [cursor=pointer]:
+                    - img "download" [ref=f8e440]
+            - row [ref=f8e443]:
+              - cell [ref=f8e444]:
+                - button "展开行" [ref=f8e445] [cursor=pointer]
+              - cell "reply_34466_1107(07-09-11-39-24).png" [ref=f8e446]
+              - cell "image/png" [ref=f8e447]
+              - cell "1292526" [ref=f8e448]
+              - cell "parsed" [ref=f8e449]
+              - cell [ref=f8e451]:
+                - generic [ref=f8e452]:
+                  - button [ref=f8e454] [cursor=pointer]:
+                    - img "eye" [ref=f8e456]
+                  - button [ref=f8e460] [cursor=pointer]:
+                    - img "download" [ref=f8e462]
+      - generic [ref=f8e465]:
+        - heading "解析候选" [level=5] [ref=f8e466]
+        - table [ref=f8e473]:
+          - rowgroup [ref=f8e479]:
+            - row [ref=f8e480]:
+              - columnheader "解析器" [ref=f8e481]
+              - columnheader "意图" [ref=f8e482]
+              - columnheader "置信度" [ref=f8e483]
+              - columnheader "应用状态" [ref=f8e484]
+              - columnheader "缺失字段" [ref=f8e485]
+          - rowgroup [ref=f8e486]:
+            - row [ref=f8e487]:
+              - cell "ai" [ref=f8e488]
+              - cell "rma_form_submission" [ref=f8e489]
+              - cell "0.9" [ref=f8e490]
+              - cell "需人工复核" [ref=f8e491]
+              - 'cell "{ \"phone\": \"需要补充\", \"currency\": \"需要补充\", \"approved_by\": \"需要补充\", \"requested_by\": \"需要补充\", \"software_revision\": \"需要补充\", \"failure_description\": \"需要补充\" }" [ref=f8e493]'
+            - row [ref=f8e495]:
+              - cell "rule" [ref=f8e496]
+              - cell "customer_reply" [ref=f8e497]
+              - cell "0.85" [ref=f8e498]
+              - cell "规则候选" [ref=f8e499]
+              - cell "-" [ref=f8e501]
+  - generic [ref=f8e502]:
+    - dialog "RMA2026070908天水华天科技股份有限公司).pdf":
+      - generic [ref=f8e503]:
+        - button "Close" [ref=f8e504] [cursor=pointer]:
+          - generic "关闭" [ref=f8e505]:
+            - img "close" [ref=f8e506]
+        - generic [ref=f8e509]: RMA2026070908天水华天科技股份有限公司).pdf
+        - generic [ref=f8e512]:
+          - figure "第 1 页" [ref=f8e513]:
+            - img "PDF 第 1 页" [ref=f8e514]
+          - figure "第 2 页" [ref=f8e516]:
+            - img "PDF 第 2 页" [ref=f8e517]

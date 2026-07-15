@@ -97,6 +97,8 @@ async def transition_ticket(
     operator_type: str = "user",
     reason: str | None = None,
     metadata: dict[str, Any] | None = None,
+    manual_task_type: str | None = None,
+    manual_task_priority: str | None = None,
 ) -> RepairTicket:
     from_status_code = ticket.current_status_code
     if from_status_code == "closed":
@@ -148,9 +150,9 @@ async def transition_ticket(
         await create_manual_task_if_missing(
             session,
             ticket=ticket,
-            task_type=task_type_for_event(trigger_event),
+            task_type=manual_task_type or task_type_for_event(trigger_event),
             trigger_reason=reason or transition.condition_desc,
-            priority="high" if trigger_event in {"system_error", "field_conflict"} else "normal",
+            priority=manual_task_priority or ("high" if trigger_event in {"system_error", "field_conflict"} else "normal"),
             email_id=ticket.source_email_id,
         )
     return ticket

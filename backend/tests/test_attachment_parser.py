@@ -51,6 +51,33 @@ def _attachment(*, file_name: str, content_type: str, size: int, object_id: int 
     )
 
 
+def _png_header(width: int, height: int) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+
+def test_qwen_attachment_schema_normalizes_common_shape_drift() -> None:
+    parsed = attachment_parser.AttachmentParseJson.model_validate(
+        {
+            "file_type": "pdf",
+            "summary": {"value": "repair form"},
+            "key_points": "SN found",
+            "extracted_fields": [],
+            "extracted_items": {"sn": "SN001"},
+            "raw_text": ["page 1"],
+            "warnings": {"code": "TRUNCATED"},
+            "truncated": "true",
+        }
+    )
+
+    assert '"value": "repair form"' in parsed.summary
+    assert parsed.key_points == ["SN found"]
+    assert parsed.extracted_fields == {}
+    assert parsed.extracted_items == [{"sn": "SN001"}]
+    assert '"page 1"' in parsed.raw_text
+    assert parsed.warnings == ['{"code": "TRUNCATED"}']
+    assert parsed.truncated is True
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("file_name", "content_type", "content", "expected_type", "expected_prompt_fragment"),
@@ -104,7 +131,7 @@ async def test_supported_text_like_attachments_extract_then_use_qwen(
     attachment = _attachment(file_name=file_name, content_type=content_type, size=len(content))
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
-    assert seen["model"] == "qwen-vl-plus"
+    assert seen["model"] == "qwen-plus"
     assert any(expected_prompt_fragment in prompt for prompt in seen["prompts"])
     assert attachment.parse_status == "parsed"
     assert attachment.parse_error is None
@@ -136,8 +163,13 @@ async def test_image_attachment_uses_presigned_url_and_qwen_visual(monkeypatch: 
         assert expires_seconds == 1800
         return "https://oss.example.com/signed-image"
 
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return _png_header(800, 600)
+
     monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
     monkeypatch.setattr(attachment_parser, "generate_presigned_url_for_object", fake_presigned)
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
 
     attachment = _attachment(file_name="fault.jpg", content_type="image/jpeg", size=1024)
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
@@ -151,7 +183,7 @@ async def test_image_attachment_uses_presigned_url_and_qwen_visual(monkeypatch: 
 
 
 @pytest.mark.anyio
-async def test_pdf_textless_attachment_uses_visual_url_and_records_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pdf_textless_attachment_renders_pages_for_qwen_visual(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
@@ -171,26 +203,48 @@ async def test_pdf_textless_attachment_uses_visual_url_and_records_truncation(mo
         assert oss_object_id == 12
         return b"%PDF"
 
-    async def fake_presigned(_session, *, oss_object_id: int, expires_seconds: int) -> str:
-        del expires_seconds
-        assert oss_object_id == 12
-        return "https://oss.example.com/signed-pdf"
-
     monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
     monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
-    monkeypatch.setattr(attachment_parser, "generate_presigned_url_for_object", fake_presigned)
     monkeypatch.setattr(attachment_parser, "_extract_pdf_text", lambda _content, *, max_pages: ("", 18))
-    monkeypatch.setattr(attachment_parser, "_first_pdf_pages", lambda _content, *, max_pages: None)
+    monkeypatch.setattr(attachment_parser, "render_pdf_pages", lambda _content, *, max_pages: ([b"png-page"], 18))
 
     attachment = _attachment(file_name="scan.pdf", content_type="application/pdf", size=1024)
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
-    assert seen["urls"] == ["https://oss.example.com/signed-pdf"]
+    assert seen["urls"] == ["data:image/png;base64,cG5nLXBhZ2U="]
     assert attachment.parse_status == "parsed"
     assert result is not None
     assert result["file_type"] == "pdf"
     assert result["truncated"] is True
     assert "PDF_TRUNCATED_TO_15_PAGES" in result["warnings"]
+
+
+@pytest.mark.anyio
+async def test_small_inline_image_is_archived_but_skips_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "INLINE_IMAGE_MIN_PARSE_WIDTH", 256)
+    monkeypatch.setattr(settings, "INLINE_IMAGE_MIN_PARSE_HEIGHT", 128)
+
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return _png_header(88, 18)
+
+    async def fail_presigned(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("decorative inline image must not call Qwen")
+
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
+    monkeypatch.setattr(attachment_parser, "generate_presigned_url_for_object", fail_presigned)
+    attachment = _attachment(file_name="signature.png", content_type="image/png", size=4484)
+    attachment.is_inline = True
+
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    assert attachment.oss_object_id == 12
+    assert attachment.parse_status == "skipped_decorative"
+    assert attachment.parse_error is None
+    assert result is not None
+    assert result["warnings"] == ["INLINE_DECORATIVE_SKIPPED"]
+    assert result["extracted_fields"] == {"image_width": 88, "image_height": 18}
 
 
 @pytest.mark.anyio

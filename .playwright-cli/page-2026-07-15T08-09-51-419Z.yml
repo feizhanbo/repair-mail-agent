@@ -1,0 +1,106 @@
+- generic [ref=f9e3]:
+  - complementary [ref=f9e4]:
+    - generic [ref=f9e5]:
+      - heading "邮件报修系统" [level=4] [ref=f9e7]
+      - menu [ref=f9e8]:
+        - menuitem "dashboard 首页看板" [ref=f9e9] [cursor=pointer]:
+          - img "dashboard" [ref=f9e10]
+          - generic [ref=f9e13]: 首页看板
+        - menuitem "mail 邮件中心" [ref=f9e14] [cursor=pointer]:
+          - img "mail" [ref=f9e15]
+          - generic [ref=f9e18]: 邮件中心
+        - menuitem "profile 工单中心" [ref=f9e19] [cursor=pointer]:
+          - img "profile" [ref=f9e20]
+          - generic [ref=f9e23]: 工单中心
+        - menuitem "team 人工复核" [ref=f9e24] [cursor=pointer]:
+          - img "team" [ref=f9e25]
+          - generic [ref=f9e28]: 人工复核
+        - menuitem "safety-certificate 回复管理" [ref=f9e29] [cursor=pointer]:
+          - img "safety-certificate" [ref=f9e30]
+          - generic [ref=f9e33]: 回复管理
+        - menuitem "bar-chart 统计分析" [ref=f9e34] [cursor=pointer]:
+          - img "bar-chart" [ref=f9e35]
+          - generic [ref=f9e38]: 统计分析
+        - menuitem "database 基础资料" [ref=f9e39] [cursor=pointer]:
+          - img "database" [ref=f9e40]
+          - generic [ref=f9e43]: 基础资料
+        - menuitem "user 用户管理" [ref=f9e44] [cursor=pointer]:
+          - img "user" [ref=f9e45]
+          - generic [ref=f9e48]: 用户管理
+        - menuitem "database 数据库浏览" [ref=f9e49] [cursor=pointer]:
+          - img "database" [ref=f9e50]
+          - generic [ref=f9e53]: 数据库浏览
+        - menuitem "message 站内消息" [ref=f9e54] [cursor=pointer]:
+          - img "message" [ref=f9e55]
+          - generic [ref=f9e58]: 站内消息
+        - menuitem "robot AI 日志" [ref=f9e59] [cursor=pointer]:
+          - img "robot" [ref=f9e60]
+          - generic [ref=f9e63]: AI 日志
+        - menuitem "setting 系统配置" [ref=f9e64] [cursor=pointer]:
+          - img "setting" [ref=f9e65]
+          - generic [ref=f9e68]: 系统配置
+  - generic [ref=f9e69]:
+    - banner [ref=f9e70]:
+      - button "折叠侧边栏" [ref=f9e71] [cursor=pointer]:
+        - img "menu-fold" [ref=f9e73]
+      - generic [ref=f9e76]:
+        - button "通知中心" [ref=f9e79] [cursor=pointer]:
+          - img "bell" [ref=f9e81]
+        - button "System Administrator" [ref=f9e85] [cursor=pointer]
+        - button "退出" [ref=f9e88] [cursor=pointer]:
+          - img "logout" [ref=f9e90]
+    - main [ref=f9e93]:
+      - generic [ref=f9e94]:
+        - generic [ref=f9e95]:
+          - heading "邮件中心" [level=2] [ref=f9e96]
+          - generic [ref=f9e99]:
+            - button "download 导出" [ref=f9e101] [cursor=pointer]:
+              - img "download" [ref=f9e103]
+              - generic [ref=f9e106]: 导出
+            - button "upload 导入 EML" [ref=f9e111] [cursor=pointer]:
+              - img "upload" [ref=f9e113]
+              - generic [ref=f9e116]: 导入 EML
+            - button "plus 手动入库" [ref=f9e118] [cursor=pointer]:
+              - img "plus" [ref=f9e120]
+              - generic [ref=f9e124]: 手动入库
+        - generic [ref=f9e125]:
+          - generic [ref=f9e126]:
+            - generic [ref=f9e132]:
+              - img "search" [ref=f9e134]
+              - textbox "主题" [ref=f9e137]
+            - textbox "发件人" [ref=f9e145]
+            - textbox "Message-ID" [ref=f9e153]
+            - generic [ref=f9e162] [cursor=pointer]:
+              - combobox [ref=f9e164]
+              - generic: 邮件意图
+            - generic [ref=f9e172] [cursor=pointer]:
+              - combobox [ref=f9e174]
+              - generic: 解析状态
+            - generic [ref=f9e180]:
+              - textbox "开始日期" [ref=f9e182]
+              - generic "to" [ref=f9e184]:
+                - img "swap-right" [ref=f9e185]
+              - textbox "结束日期" [ref=f9e189]
+              - generic:
+                - img "calendar"
+            - generic [ref=f9e190]:
+              - button "筛 选" [ref=f9e192] [cursor=pointer]
+              - button "重 置" [ref=f9e195] [cursor=pointer]
+          - generic [ref=f9e198]:
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - table:
+                      - rowgroup:
+                        - row "主题 发件人 意图 解析 线程 收信时间 操作":
+                          - columnheader "主题"
+                          - columnheader "发件人"
+                          - columnheader "意图"
+                          - columnheader "解析"
+                          - columnheader "线程"
+                          - columnheader "收信时间"
+                          - columnheader "操作"
+                      - rowgroup:
+                        - row "暂无邮件":
+                          - cell "暂无邮件"

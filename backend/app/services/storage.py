@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import mimetypes
 import re
-from datetime import datetime
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import OssObject
+from app.models import Email, EmailAttachment, JobRunLog, OssObject
+from app.services.common import utcnow
 
 
 class StorageConfigurationError(RuntimeError):
@@ -17,6 +20,9 @@ class StorageConfigurationError(RuntimeError):
 
 class StorageUploadError(RuntimeError):
     pass
+
+
+_oss_semaphore = asyncio.Semaphore(max(1, settings.OSS_IO_CONCURRENCY))
 
 
 def _oss_configured() -> bool:
@@ -30,9 +36,24 @@ def _safe_file_name(name: str | None) -> str:
 
 
 def _object_key(*, source_type: str, original_file_name: str | None, sha256_hash: str) -> str:
-    today = datetime.utcnow()
+    safe_source = _safe_file_name(source_type)
     safe_name = _safe_file_name(original_file_name)
-    return f"{source_type}/{today:%Y/%m/%d}/{sha256_hash[:2]}/{sha256_hash}-{safe_name}"
+    return f"{safe_source}/{sha256_hash[:2]}/{sha256_hash}-{safe_name}"
+
+
+def normalized_content_type(file_name: str | None, declared: str | None) -> str | None:
+    value = (declared or "").split(";", 1)[0].strip().lower()
+    if value and value not in {"application/octet-stream", "binary/octet-stream"}:
+        return value
+    guessed, _ = mimetypes.guess_type(file_name or "")
+    return guessed or value or None
+
+
+def _build_bucket(*, endpoint: str, bucket_name: str):
+    import oss2
+
+    auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
+    return oss2.Bucket(auth, endpoint, bucket_name)
 
 
 async def upload_bytes_to_oss(
@@ -47,13 +68,17 @@ async def upload_bytes_to_oss(
     if not _oss_configured():
         raise StorageConfigurationError("OSS_NOT_CONFIGURED")
 
+    content_type = normalized_content_type(original_file_name, content_type)
     sha256_hash = hashlib.sha256(content).hexdigest()
     object_key = _object_key(source_type=source_type, original_file_name=original_file_name, sha256_hash=sha256_hash)
     existing = await session.scalar(select(OssObject).where(OssObject.bucket == settings.OSS_BUCKET, OssObject.object_key == object_key))
+    metadata_requires_reupload = False
     if existing is not None and existing.upload_status == "success":
-        return existing
-
-    import oss2
+        if not content_type or existing.content_type == content_type:
+            return existing
+        metadata_requires_reupload = True
+        existing.upload_status = "pending"
+        existing.content_type = content_type
 
     safe_name = _safe_file_name(original_file_name)
     if existing is None:
@@ -74,6 +99,19 @@ async def upload_bytes_to_oss(
         await session.flush()
     else:
         oss_object = existing
+        if oss_object.upload_status == "pending" and not metadata_requires_reupload:
+            try:
+                async with _oss_semaphore:
+                    exists = await asyncio.to_thread(
+                        _build_bucket(endpoint=settings.OSS_ENDPOINT, bucket_name=settings.OSS_BUCKET).object_exists,
+                        object_key,
+                    )
+                if exists:
+                    oss_object.upload_status = "success"
+                    oss_object.error_message = None
+                    return oss_object
+            except Exception:
+                pass
         oss_object.upload_status = "pending"
         oss_object.error_message = None
         oss_object.file_size = len(content)
@@ -81,10 +119,14 @@ async def upload_bytes_to_oss(
         oss_object.created_by_user_id = user_id
 
     try:
-        auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
-        bucket = oss2.Bucket(auth, settings.OSS_ENDPOINT, settings.OSS_BUCKET)
         headers = {"Content-Type": content_type} if content_type else None
-        result = bucket.put_object(object_key, content, headers=headers)
+        async with _oss_semaphore:
+            result = await asyncio.to_thread(
+                _build_bucket(endpoint=settings.OSS_ENDPOINT, bucket_name=settings.OSS_BUCKET).put_object,
+                object_key,
+                content,
+                headers=headers,
+            )
     except Exception as exc:
         oss_object.upload_status = "failed"
         oss_object.error_message = "OSS upload failed"
@@ -107,14 +149,15 @@ async def generate_presigned_url(
     if not _oss_configured():
         raise StorageConfigurationError("OSS_NOT_CONFIGURED")
 
-    import oss2
-
-    _bucket = bucket or settings.OSS_BUCKET
-    _endpoint = endpoint or settings.OSS_ENDPOINT
-
-    auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
-    oss_bucket = oss2.Bucket(auth, _endpoint, _bucket)
-    return oss_bucket.sign_url("GET", object_key, expires_seconds)
+    bucket_name = bucket or settings.OSS_BUCKET
+    endpoint_name = endpoint or settings.OSS_ENDPOINT
+    async with _oss_semaphore:
+        return await asyncio.to_thread(
+            _build_bucket(endpoint=endpoint_name, bucket_name=bucket_name).sign_url,
+            "GET",
+            object_key,
+            expires_seconds,
+        )
 
 
 async def generate_presigned_url_for_object(
@@ -150,12 +193,40 @@ async def download_oss_object_bytes(
         raise ValueError(f"OssObject with id {oss_object_id} not found")
     if oss_object.upload_status != "success":
         raise StorageUploadError("OSS_OBJECT_NOT_READY")
+    if oss_object.upload_status != "success":
+        raise StorageUploadError("OSS_OBJECT_NOT_READY")
 
-    import oss2
-
-    auth = oss2.Auth(settings.OSS_ACCESS_KEY, settings.OSS_SECRET_KEY)
-    bucket = oss2.Bucket(auth, oss_object.endpoint or settings.OSS_ENDPOINT, oss_object.bucket)
     try:
-        return bucket.get_object(oss_object.object_key).read()
+        def _download() -> bytes:
+            bucket_client = _build_bucket(
+                endpoint=oss_object.endpoint or settings.OSS_ENDPOINT,
+                bucket_name=oss_object.bucket,
+            )
+            return bucket_client.get_object(oss_object.object_key).read()
+
+        async with _oss_semaphore:
+            return await asyncio.to_thread(_download)
     except Exception as exc:
         raise StorageUploadError("OSS_DOWNLOAD_FAILED") from exc
+
+
+async def find_orphan_oss_objects(
+    session: AsyncSession,
+    *,
+    older_than_hours: int | None = None,
+    limit: int = 100,
+) -> list[OssObject]:
+    cutoff = utcnow() - timedelta(hours=older_than_hours or settings.OSS_ORPHAN_MIN_AGE_HOURS)
+    statement = (
+        select(OssObject)
+        .where(
+            OssObject.created_at < cutoff,
+            ~exists(select(Email.id).where(Email.raw_eml_oss_object_id == OssObject.id)),
+            ~exists(select(EmailAttachment.id).where(EmailAttachment.oss_object_id == OssObject.id)),
+            ~exists(select(JobRunLog.id).where(JobRunLog.input_oss_object_id == OssObject.id)),
+            ~exists(select(JobRunLog.id).where(JobRunLog.output_oss_object_id == OssObject.id)),
+        )
+        .order_by(OssObject.created_at.asc())
+        .limit(max(1, min(limit, 1000)))
+    )
+    return list((await session.execute(statement)).scalars().all())

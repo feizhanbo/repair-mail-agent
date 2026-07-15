@@ -70,12 +70,27 @@ export type JobRunLog = {
   job_name: string;
   job_type: string;
   status: string;
+  resource_type?: string | null;
+  resource_id?: number | null;
+  correlation_id?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   processed_count?: number;
   success_count?: number;
   failed_count?: number;
+  attempt_count?: number;
+  max_attempts?: number;
+  next_run_at?: string | null;
+  error_code?: string | null;
+  result_json?: JsonRecord | null;
+  input_oss_object_id?: number | null;
+  output_oss_object_id?: number | null;
   error_message?: string | null;
+};
+
+export type AsyncIngestResult = {
+  ingest: EmailIngestResult;
+  job?: JobRunLog | null;
 };
 
 export type DashboardSummary = {
@@ -195,11 +210,34 @@ export type ObjectDownloadUrl = {
   expires_seconds: number;
 };
 
+export type ContentPreview = {
+  email_id?: number;
+  attachment_id?: number;
+  file_name?: string;
+  file_type?: string | null;
+  parse_status?: string;
+  mode: 'html' | 'text' | 'image' | 'pdf' | 'pdf_pages' | 'extracted';
+  url?: string | null;
+  text?: string | null;
+  html?: string | null;
+  extracted_json?: JsonRecord | null;
+  pages?: string[];
+  page_count?: number;
+  truncated?: boolean;
+};
+
 export type EmailFlowTraceEvent = {
   event_type: string;
   created_at?: string | null;
   summary?: string | null;
   data?: JsonRecord | null;
+  stage?: string;
+  event?: string;
+  status?: string | null;
+  source_type?: string;
+  source_id?: number | null;
+  correlation_id?: string | null;
+  details?: JsonRecord;
 };
 
 export type EmailFlowTrace = EmailDetail & {
@@ -470,6 +508,9 @@ export type AiLog = {
   trace_id: string;
   email_id?: number | null;
   ticket_id?: number | null;
+  attachment_id?: number | null;
+  job_run_id?: number | null;
+  correlation_id?: string | null;
   call_type: string;
   provider_name?: string | null;
   model_name: string;
@@ -479,6 +520,11 @@ export type AiLog = {
   parsed_key_result?: JsonRecord | null;
   confidence_score?: number | string | null;
   latency_ms?: number | null;
+  attempt_count?: number;
+  error_code?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
   status: string;
   error_message?: string | null;
   log_file_path?: string | null;
@@ -532,6 +578,7 @@ export type SystemInfo = {
   env: string;
   auto_send_enabled: boolean;
   reply_send_mode: 'human_review' | 'auto_send';
+  auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
   max_follow_up: number;
   confidence_threshold: number;
@@ -544,11 +591,22 @@ export type SystemInfo = {
 export type SystemConfig = {
   auto_send_enabled: boolean;
   reply_send_mode: 'human_review' | 'auto_send';
+  auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
   max_follow_up: number;
   confidence_threshold: number;
   environment_note?: string;
   integrations: JsonRecord;
+};
+
+export type SystemRuntimeStatus = {
+  latest_imap_job?: JobRunLog | null;
+  failed_job_count: number;
+  retry_job_count: number;
+  imap_retry_count: number;
+  oss_orphan_count: number;
+  oss_orphans_truncated: boolean;
+  ai_provider_status: Record<string, { status: string; model: string; error_code?: string | null; latency_ms?: number | null; created_at?: string | null } | null>;
 };
 
 export type ReplyTemplate = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -14,17 +15,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_session
+from app.core.request_context import get_correlation_id
 from app.core.response import ok, page
 from app.models import Email, EmailAttachment
 from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
 from app.services import imap_fetcher
 from app.services.audit import log_operation
+from app.services.attachment_precheck import filter_decorative_attachments
+from app.services.email_archival import EmailArchivalError, archive_email_bundle
 from app.services.email_flow_trace import build_email_flow_trace
+from app.services.email_preview import build_attachment_preview, build_email_preview
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
-from app.services.storage import generate_presigned_url_for_object, upload_bytes_to_oss
+from app.services.jobs import enqueue_job, serialize_job
+from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +91,64 @@ def _manual_raw_eml(payload: EmailIngestRequest) -> bytes:
     return msg.as_bytes()
 
 
+def _manual_attachment_blobs(payload: EmailIngestRequest) -> list[dict]:
+    blobs: list[dict] = []
+    for attachment in payload.attachments:
+        content = _attachment_content_bytes(attachment)
+        if content is None:
+            raise ValueError("ATTACHMENT_CONTENT_REQUIRED")
+        blobs.append(
+            {
+                "file_name": attachment.get("file_name") or "attachment",
+                "content_type": attachment.get("content_type") or "application/octet-stream",
+                "content": content,
+                "is_inline": bool(attachment.get("is_inline")),
+                "content_id": attachment.get("content_id"),
+            }
+        )
+    return blobs
+
+
+def _filter_attachment_blobs(payload: EmailIngestRequest, blobs: list[dict]) -> list[dict]:
+    filtered, _ = filter_decorative_attachments(payload, blobs)
+    return filtered
+
+
+async def _archive_or_raise_http(
+    session: AsyncSession,
+    *,
+    payload: EmailIngestRequest,
+    raw_eml: bytes,
+    raw_file_name: str,
+    attachment_blobs: list[dict],
+    source: str,
+    user_id: int,
+) -> None:
+    try:
+        await archive_email_bundle(
+            session,
+            payload=payload,
+            raw_eml=raw_eml,
+            raw_file_name=raw_file_name,
+            attachment_blobs=attachment_blobs,
+            source=source,
+            user_id=user_id,
+            correlation_id=get_correlation_id(),
+        )
+        # OSS metadata is durable before the formal email transaction starts.
+        await session.commit()
+    except EmailArchivalError as exc:
+        await session.commit()
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+        if exc.stage == "validate":
+            http_status = (
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                if "TOO_LARGE" in exc.code or exc.code == "TOO_MANY_ATTACHMENTS"
+                else status.HTTP_400_BAD_REQUEST
+            )
+        raise HTTPException(status_code=http_status, detail=exc.code) from exc
+
+
 async def _record_precheck_skip(
     session: AsyncSession,
     *,
@@ -97,6 +161,9 @@ async def _record_precheck_skip(
         user_id=user_id,
         operation_type="email_precheck_skipped",
         target_type="email",
+        target_id=precheck.duplicate_email_id,
+        correlation_id=get_correlation_id(),
+        email_id=precheck.duplicate_email_id,
         description=precheck.reason,
         after_data={"source": source, "precheck": precheck.to_dict()},
     )
@@ -175,7 +242,7 @@ async def export_emails(
         "latest_conflict_fields",
     ]
     return Response(
-        content=xlsx_bytes(rows, fieldnames),
+        content=await asyncio.to_thread(xlsx_bytes, rows, fieldnames),
         media_type=EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="emails-export.xlsx"'},
     )
@@ -208,6 +275,8 @@ async def raw_eml_download_url(
         url = await generate_presigned_url_for_object(session, oss_object_id=email.raw_eml_oss_object_id, expires_seconds=expires_seconds)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
+    except StorageUploadError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
     return ok(
         {
             "object_id": email.raw_eml_oss_object_id,
@@ -235,6 +304,8 @@ async def attachment_download_url(
         url = await generate_presigned_url_for_object(session, oss_object_id=attachment.oss_object_id, expires_seconds=expires_seconds)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
+    except StorageUploadError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
     return ok(
         {
             "attachment_id": attachment.id,
@@ -244,6 +315,26 @@ async def attachment_download_url(
             "expires_seconds": expires_seconds,
         }
     )
+
+
+@router.get("/attachments/{attachment_id}/preview")
+async def attachment_preview(
+    attachment_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await build_attachment_preview(session, attachment_id))
+
+
+@router.get("/{email_id}/preview")
+async def email_preview(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await build_email_preview(session, email_id))
 
 
 @router.get("/{email_id}")
@@ -264,46 +355,93 @@ async def ingest_email(
 ) -> dict:
     try:
         raw_eml = _manual_raw_eml(payload)
+        attachment_blobs = _manual_attachment_blobs(payload)
+        attachment_blobs = _filter_attachment_blobs(payload, attachment_blobs)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ATTACHMENT_CONTENT_INVALID") from exc
     payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
         else:
-            await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest", precheck=precheck)
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok(result, "email skipped by precheck")
 
-    try:
-        raw_object = await upload_bytes_to_oss(
-            session,
-            content=raw_eml,
-            original_file_name="ingest.eml",
-            content_type="message/rfc822",
-            source_type="raw_eml",
-            user_id=current_user.id,
-        )
-        payload.raw_eml_oss_object_id = raw_object.id
-        for attachment in payload.attachments:
-            attachment_content = _attachment_content_bytes(attachment)
-            if attachment_content:
-                attachment_object = await upload_bytes_to_oss(
-                    session,
-                    content=attachment_content,
-                    original_file_name=attachment.get("file_name"),
-                    content_type=attachment.get("content_type"),
-                    source_type="email_attachment",
-                    user_id=current_user.id,
-                )
-                attachment["oss_object_id"] = attachment_object.id
-    except Exception:
-        logger.exception("OSS archival failed for /ingest endpoint, continuing without archival")
-    result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
+    await _archive_or_raise_http(
+        session,
+        payload=payload,
+        raw_eml=raw_eml,
+        raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs,
+        source="manual_ingest",
+        user_id=current_user.id,
+    )
+    result = await email_service.ingest_email(
+        session,
+        payload=payload,
+        user_id=current_user.id,
+        rule_analysis=precheck.rule_analysis,
+    )
     await session.commit()
     return ok(result, "email ingested")
+
+
+@router.post("/ingest/jobs")
+async def ingest_email_job(
+    payload: EmailIngestRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    try:
+        raw_eml = _manual_raw_eml(payload)
+        attachment_blobs = _manual_attachment_blobs(payload)
+        attachment_blobs = _filter_attachment_blobs(payload, attachment_blobs)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ATTACHMENT_CONTENT_INVALID") from exc
+    payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
+    precheck = await precheck_email_payload(session, payload)
+    if not precheck.accepted:
+        await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest_job", precheck=precheck)
+        if precheck.status == "duplicate_message_skipped":
+            result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)
+        else:
+            result = {"skipped": True, "precheck": precheck.to_dict()}
+        await session.commit()
+        return ok({"ingest": result, "job": None}, "email skipped by precheck")
+    await _archive_or_raise_http(
+        session,
+        payload=payload,
+        raw_eml=raw_eml,
+        raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs,
+        source="manual_ingest_job",
+        user_id=current_user.id,
+    )
+    result = await email_service.ingest_email(
+        session,
+        payload=payload,
+        user_id=current_user.id,
+        auto_parse=False,
+        rule_analysis=precheck.rule_analysis,
+    )
+    email_id = int(result["email"]["id"])
+    job = await enqueue_job(
+        session,
+        job_type="email_parse",
+        resource_type="email",
+        resource_id=email_id,
+        idempotency_key=f"email_parse:{email_id}:initial",
+        metadata={
+            "user_id": current_user.id,
+            "reason": "initial asynchronous parse",
+            "rule_parse_result_id": result["rule_parse_result_id"],
+        },
+    )
+    await session.commit()
+    return ok({"ingest": result, "job": serialize_job(job)}, "email archived and parse queued")
 
 
 @router.post("/ingest-eml")
@@ -323,44 +461,100 @@ async def ingest_eml(
     try:
         payload = payload_from_eml_bytes(content, mailbox_account=mailbox_account, folder_name=folder_name)
         payload.raw_eml_sha256 = _sha256_bytes(content)
+        blobs = attachment_blobs_from_eml_bytes(content)
+        blobs = _filter_attachment_blobs(payload, blobs)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
         else:
-            await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload", precheck=precheck)
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok(result, "eml skipped by precheck")
 
-    try:
-        raw_object = await upload_bytes_to_oss(
-            session,
-            content=content,
-            original_file_name=file.filename or "ingest.eml",
-            content_type="message/rfc822",
-            source_type="raw_eml",
-            user_id=current_user.id,
-        )
-        payload.raw_eml_oss_object_id = raw_object.id
-        blobs = attachment_blobs_from_eml_bytes(content)
-        for attachment, blob in zip(payload.attachments, blobs, strict=False):
-            attachment_object = await upload_bytes_to_oss(
-                session,
-                content=blob["content"],
-                original_file_name=blob["file_name"],
-                content_type=blob.get("content_type"),
-                source_type="email_attachment",
-                user_id=current_user.id,
-            )
-            attachment["oss_object_id"] = attachment_object.id
-    except Exception:
-        logger.exception("OSS archival failed for /ingest-eml endpoint, continuing without archival")
-    result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
+    await _archive_or_raise_http(
+        session,
+        payload=payload,
+        raw_eml=content,
+        raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs,
+        source="eml_upload",
+        user_id=current_user.id,
+    )
+    result = await email_service.ingest_email(
+        session,
+        payload=payload,
+        user_id=current_user.id,
+        auto_parse=auto_parse,
+        rule_analysis=precheck.rule_analysis,
+    )
     await session.commit()
     return ok(result, "eml ingested")
+
+
+@router.post("/ingest-eml/jobs")
+async def ingest_eml_job(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    file: UploadFile = File(...),
+    mailbox_account: str = Form("manual-eml"),
+    folder_name: str | None = Form("INBOX"),
+) -> dict:
+    if file.filename and not file.filename.lower().endswith(".eml"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EML_FILE_REQUIRED")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EML_FILE_EMPTY")
+    try:
+        payload = payload_from_eml_bytes(content, mailbox_account=mailbox_account, folder_name=folder_name)
+        payload.raw_eml_sha256 = _sha256_bytes(content)
+        blobs = attachment_blobs_from_eml_bytes(content)
+        blobs = _filter_attachment_blobs(payload, blobs)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    precheck = await precheck_email_payload(session, payload)
+    if not precheck.accepted:
+        await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload_job", precheck=precheck)
+        if precheck.status == "duplicate_message_skipped":
+            result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)
+        else:
+            result = {"skipped": True, "precheck": precheck.to_dict()}
+        await session.commit()
+        return ok({"ingest": result, "job": None}, "eml skipped by precheck")
+    await _archive_or_raise_http(
+        session,
+        payload=payload,
+        raw_eml=content,
+        raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs,
+        source="eml_upload_job",
+        user_id=current_user.id,
+    )
+    result = await email_service.ingest_email(
+        session,
+        payload=payload,
+        user_id=current_user.id,
+        auto_parse=False,
+        rule_analysis=precheck.rule_analysis,
+    )
+    email_id = int(result["email"]["id"])
+    job = await enqueue_job(
+        session,
+        job_type="email_parse",
+        resource_type="email",
+        resource_id=email_id,
+        idempotency_key=f"email_parse:{email_id}:initial",
+        metadata={
+            "user_id": current_user.id,
+            "reason": "initial asynchronous EML parse",
+            "rule_parse_result_id": result["rule_parse_result_id"],
+        },
+    )
+    await session.commit()
+    return ok({"ingest": result, "job": serialize_job(job)}, "eml archived and parse queued")
 
 
 @router.post("/fetch-now")
@@ -376,6 +570,8 @@ async def fetch_imap_now(
 ) -> dict:
     if not ({"admin", "supervisor"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    if not archive_to_oss:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OSS_ARCHIVE_REQUIRED")
     result = await imap_fetcher.fetch_imap_emails(
         session,
         folder_name=folder_name,
@@ -390,6 +586,38 @@ async def fetch_imap_now(
     return ok(result, "imap fetched")
 
 
+@router.post("/fetch/jobs")
+async def fetch_imap_job(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    folder_name: str = Query("INBOX", min_length=1, max_length=255),
+    limit: int = Query(10, ge=1, le=100),
+    unseen_only: bool = Query(True),
+    message_id: str | None = Query(default=None, max_length=500),
+    auto_parse: bool = Query(True),
+) -> dict:
+    if not ({"admin", "supervisor"} & set(current_user.roles)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    correlation_id = get_correlation_id() or "job"
+    job = await enqueue_job(
+        session,
+        job_type="imap_fetch",
+        resource_type="mailbox",
+        resource_id=None,
+        idempotency_key=f"imap_fetch:{correlation_id}",
+        metadata={
+            "folder_name": folder_name,
+            "limit": limit,
+            "unseen_only": unseen_only,
+            "message_id": message_id,
+            "auto_parse": auto_parse,
+            "user_id": current_user.id,
+        },
+    )
+    await session.commit()
+    return ok(serialize_job(job), "imap fetch queued")
+
+
 @router.post("/{email_id}/reparse")
 async def reparse_email(
     email_id: int,
@@ -400,3 +628,25 @@ async def reparse_email(
     result = await email_service.reparse_email(session, email_id=email_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()
     return ok(result, "email reparsed")
+
+
+@router.post("/{email_id}/reparse/jobs")
+async def reparse_email_job(
+    email_id: int,
+    payload: EmailReparseRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    if await session.get(Email, email_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+    correlation_id = get_correlation_id() or "job"
+    job = await enqueue_job(
+        session,
+        job_type="email_reparse",
+        resource_type="email",
+        resource_id=email_id,
+        idempotency_key=f"email_reparse:{email_id}:{correlation_id}",
+        metadata={"user_id": current_user.id, "reason": payload.reason or "asynchronous reparse"},
+    )
+    await session.commit()
+    return ok(serialize_job(job), "email reparse queued")

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import csv
 import io
+import json
 import re
 import zipfile
 from html import unescape
 from pathlib import PurePath
 from typing import Any
+from uuid import uuid4
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -18,10 +22,12 @@ from app.integrations.ai_provider import AiProviderError
 from app.integrations.qwen_provider import QwenProvider
 from app.models import EmailAttachment
 from app.services.common import utcnow
-from app.services.storage import download_oss_object_bytes, generate_presigned_url_for_object, upload_bytes_to_oss
+from app.services.logging_safety import safe_error_code
+from app.services.storage import download_oss_object_bytes, generate_presigned_url_for_object
 
 
 SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "html", "image", "pdf"}
+_file_parse_semaphore = asyncio.Semaphore(max(1, settings.FILE_PARSE_CONCURRENCY))
 
 
 class AttachmentParseJson(BaseModel):
@@ -33,6 +39,45 @@ class AttachmentParseJson(BaseModel):
     raw_text: str = ""
     warnings: list[str] = Field(default_factory=list)
     truncated: bool = False
+
+    @field_validator("summary", "raw_text", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    @field_validator("key_points", "warnings", mode="before")
+    @classmethod
+    def normalize_string_list(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [item if isinstance(item, str) else json.dumps(item, ensure_ascii=False, default=str) for item in value]
+        return [value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)]
+
+    @field_validator("extracted_fields", mode="before")
+    @classmethod
+    def normalize_fields(cls, value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @field_validator("extracted_items", mode="before")
+    @classmethod
+    def normalize_items(cls, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    @field_validator("truncated", mode="before")
+    @classmethod
+    def normalize_truncated(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "是"}
+        return bool(value)
 
 
 def attachment_type(attachment: EmailAttachment) -> str | None:
@@ -53,20 +98,33 @@ def attachment_type(attachment: EmailAttachment) -> str | None:
     return None
 
 
-def _qwen_configured() -> bool:
+def _qwen_configured(*, visual: bool = False) -> bool:
     return (
         settings.MULTIMODAL_PROVIDER.lower() == "qwen"
         and bool(settings.QWEN_API_KEY)
-        and bool(settings.QWEN_VL_MODEL or settings.QWEN_MODEL)
+        and bool(settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL)
     )
 
 
-def _qwen_provider() -> QwenProvider:
+def _qwen_provider(*, visual: bool = False) -> QwenProvider:
     return QwenProvider(
         api_key=settings.QWEN_API_KEY,
         base_url=settings.QWEN_BASE_URL,
-        model=settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
+        model=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
         timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+    )
+
+
+async def _file_io(func, *args, **kwargs):
+    async with _file_parse_semaphore:
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _qwen_retryable(error: AiProviderError) -> bool:
+    code = str(error).upper()
+    return any(
+        marker in code
+        for marker in ("TIMEOUT", "HTTP_429", "HTTP_5", "OUTPUT_NOT_JSON", "OUTPUT_SCHEMA_INVALID")
     )
 
 
@@ -117,7 +175,24 @@ def _extract_csv(content: bytes) -> str:
     return "\n".join(rows)
 
 
+def _validate_zip_archive(content: bytes) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            members = archive.infolist()
+    except Exception as exc:
+        raise ValueError("ARCHIVE_INVALID") from exc
+    if len(members) > 1000:
+        raise ValueError("ARCHIVE_MEMBER_LIMIT_EXCEEDED")
+    expanded_size = sum(member.file_size for member in members)
+    compressed_size = sum(max(1, member.compress_size) for member in members)
+    if expanded_size > 100 * 1024 * 1024:
+        raise ValueError("ARCHIVE_EXPANDED_SIZE_EXCEEDED")
+    if expanded_size / max(1, compressed_size) > 100:
+        raise ValueError("ARCHIVE_COMPRESSION_RATIO_EXCEEDED")
+
+
 def _extract_docx(content: bytes) -> str:
+    _validate_zip_archive(content)
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             xml = archive.read("word/document.xml")
@@ -135,6 +210,7 @@ def _extract_docx(content: bytes) -> str:
 
 
 def _extract_xlsx(content: bytes) -> str:
+    _validate_zip_archive(content)
     try:
         from openpyxl import load_workbook  # type: ignore
     except Exception as exc:
@@ -174,30 +250,64 @@ def _extract_pdf_text(content: bytes, *, max_pages: int) -> tuple[str, int | Non
         return "", _pdf_page_count(content)
     try:
         reader = PdfReader(io.BytesIO(content))
+        if reader.is_encrypted:
+            raise ValueError("PDF_ENCRYPTED")
         page_count = len(reader.pages)
         texts = [(reader.pages[index].extract_text() or "") for index in range(min(page_count, max_pages))]
         return "\n".join(part.strip() for part in texts if part.strip()), page_count
+    except ValueError:
+        raise
     except Exception:
-        return "", _pdf_page_count(content)
+        raise ValueError("PDF_READ_FAILED")
 
 
-def _first_pdf_pages(content: bytes, *, max_pages: int) -> bytes | None:
+def render_pdf_pages(content: bytes, *, max_pages: int) -> tuple[list[bytes], int]:
     try:
-        from pypdf import PdfReader, PdfWriter  # type: ignore
-    except Exception:
-        return None
+        import fitz  # type: ignore
+    except Exception as exc:
+        raise ValueError("PDF_RENDERER_NOT_AVAILABLE") from exc
     try:
-        reader = PdfReader(io.BytesIO(content))
-        if len(reader.pages) <= max_pages:
-            return None
-        writer = PdfWriter()
-        for index in range(max_pages):
-            writer.add_page(reader.pages[index])
-        buffer = io.BytesIO()
-        writer.write(buffer)
-        return buffer.getvalue()
-    except Exception:
-        return None
+        document = fitz.open(stream=content, filetype="pdf")
+        if document.needs_pass:
+            raise ValueError("PDF_ENCRYPTED")
+        page_count = document.page_count
+        pages = [
+            document.load_page(index).get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False).tobytes("png")
+            for index in range(min(page_count, max_pages))
+        ]
+        document.close()
+        return pages, page_count
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("PDF_RENDER_FAILED") from exc
+
+
+def _image_dimensions(content: bytes) -> tuple[int, int] | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n") and len(content) >= 24:
+        return int.from_bytes(content[16:20], "big"), int.from_bytes(content[20:24], "big")
+    if content[:6] in {b"GIF87a", b"GIF89a"} and len(content) >= 10:
+        return int.from_bytes(content[6:8], "little"), int.from_bytes(content[8:10], "little")
+    if content.startswith(b"\xff\xd8"):
+        index = 2
+        start_of_frame = set(range(0xC0, 0xC4)) | set(range(0xC5, 0xC8)) | set(range(0xC9, 0xCC)) | set(range(0xCD, 0xD0))
+        while index + 9 < len(content):
+            if content[index] != 0xFF:
+                index += 1
+                continue
+            marker = content[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 2 > len(content):
+                break
+            segment_size = int.from_bytes(content[index:index + 2], "big")
+            if marker in start_of_frame and index + 7 < len(content):
+                height = int.from_bytes(content[index + 3:index + 5], "big")
+                width = int.from_bytes(content[index + 5:index + 7], "big")
+                return width, height
+            index += max(segment_size, 2)
+    return None
 
 
 def _fallback_json(file_type: str, text: str, *, warnings: list[str], truncated: bool) -> AttachmentParseJson:
@@ -212,8 +322,89 @@ def _fallback_json(file_type: str, text: str, *, warnings: list[str], truncated:
     )
 
 
-async def _qwen_text_parse(*, file_type: str, file_name: str, text: str, warnings: list[str], truncated: bool) -> AttachmentParseJson:
-    if not _qwen_configured():
+async def _invoke_qwen(
+    session: AsyncSession,
+    *,
+    attachment: EmailAttachment,
+    call_type: str,
+    visual: bool,
+    input_payload: dict[str, Any],
+    invoke,
+) -> AttachmentParseJson:
+    if not _qwen_configured(visual=visual):
+        raise AiProviderError("QWEN_VL_NOT_CONFIGURED" if visual else "QWEN_TEXT_NOT_CONFIGURED")
+
+    max_attempts = max(1, min(3, settings.AI_MAX_RETRIES + 1))
+    last_error: AiProviderError | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            completion = await invoke(_qwen_provider(visual=visual))
+            if hasattr(session, "add"):
+                from app.services.ai import persist_ai_log
+
+                await persist_ai_log(
+                    session,
+                    trace_id=getattr(completion, "trace_id", uuid4().hex),
+                    call_type=call_type,
+                    input_payload=input_payload,
+                    request_payload=getattr(completion, "request_payload", None),
+                    output_payload=getattr(completion, "response_payload", None),
+                    parsed=completion.parsed,
+                    latency_ms=getattr(completion, "latency_ms", None),
+                    input_summary=f"attachment_id={attachment.id}; file_type={input_payload.get('file_type')}",
+                    output_summary=f"attachment_type={completion.parsed.file_type}; warnings={len(completion.parsed.warnings)}",
+                    email_id=attachment.email_id,
+                    attachment_id=attachment.id,
+                    provider_name="qwen",
+                    model_name=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
+                    attempt_count=attempt,
+                )
+            return completion.parsed
+        except AiProviderError as exc:
+            last_error = exc
+            error_code = safe_error_code(exc, "QWEN_CALL_FAILED")
+            if hasattr(session, "add"):
+                from app.services.ai import persist_ai_log
+
+                await persist_ai_log(
+                    session,
+                    trace_id=getattr(exc, "trace_id", uuid4().hex),
+                    call_type=call_type,
+                    input_payload=input_payload,
+                    request_payload=getattr(exc, "request_payload", None),
+                    output_payload=(
+                        getattr(exc, "response_payload", None)
+                        or {"raw_output": getattr(exc, "raw_output", None)}
+                    ),
+                    parsed=None,
+                    latency_ms=getattr(exc, "latency_ms", None),
+                    input_summary=f"attachment_id={attachment.id}; file_type={input_payload.get('file_type')}",
+                    output_summary=error_code,
+                    email_id=attachment.email_id,
+                    attachment_id=attachment.id,
+                    provider_name="qwen",
+                    model_name=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
+                    attempt_count=attempt,
+                    error_message=error_code,
+                )
+            if attempt >= max_attempts or not _qwen_retryable(exc):
+                break
+            await asyncio.sleep(settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+    assert last_error is not None
+    raise last_error
+
+
+async def _qwen_text_parse(
+    session: AsyncSession,
+    *,
+    attachment: EmailAttachment,
+    file_type: str,
+    file_name: str,
+    text: str,
+    warnings: list[str],
+    truncated: bool,
+) -> AttachmentParseJson:
+    if not _qwen_configured(visual=False):
         raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
     summary, key_points = _local_summary(text)
     prompt = (
@@ -222,39 +413,61 @@ async def _qwen_text_parse(*, file_type: str, file_name: str, text: str, warning
         f"file_name={file_name}\nfile_type={file_type}\ntruncated={truncated}\n"
         f"local_summary={summary}\nlocal_key_points={key_points}\ncontent:\n{text}"
     )
-    completion = await _qwen_provider().chat_json(
-        messages=[
+    messages = [
             {
                 "role": "system",
                 "content": "你是维修邮件附件解析助手，只输出 JSON，不编造附件中没有的信息。",
             },
             {"role": "user", "content": prompt},
-        ],
-        response_model=AttachmentParseJson,
-        temperature=0.1,
+        ]
+    parsed = await _invoke_qwen(
+        session,
+        attachment=attachment,
+        call_type="attachment_text_parse",
+        visual=False,
+        input_payload={"file_type": file_type, "text": text, "truncated": truncated},
+        invoke=lambda provider: provider.chat_json(
+            messages=messages,
+            response_model=AttachmentParseJson,
+            temperature=0.1,
+        ),
     )
-    parsed = completion.parsed
     parsed.file_type = parsed.file_type or file_type
     parsed.warnings = [*warnings, *(parsed.warnings or [])]
     parsed.truncated = bool(parsed.truncated or truncated)
     return parsed
 
 
-async def _qwen_visual_parse(*, file_type: str, file_name: str, url: str, warnings: list[str], truncated: bool) -> AttachmentParseJson:
-    if not _qwen_configured():
+async def _qwen_visual_parse(
+    session: AsyncSession,
+    *,
+    attachment: EmailAttachment,
+    file_type: str,
+    file_name: str,
+    urls: list[str],
+    warnings: list[str],
+    truncated: bool,
+) -> AttachmentParseJson:
+    if not _qwen_configured(visual=True):
         raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
     prompt = (
         "请识别并提取图片或 PDF 附件中的维修报修相关信息。只能输出 JSON，字段固定为 "
         "file_type, summary, key_points, extracted_fields, extracted_items, raw_text, warnings, truncated。"
         f"文件名：{file_name}；文件类型：{file_type}；是否截断：{truncated}。"
     )
-    completion = await _qwen_provider().vl_chat(
-        image_urls=[url],
-        prompt=prompt,
-        response_model=AttachmentParseJson,
-        temperature=0.1,
+    parsed = await _invoke_qwen(
+        session,
+        attachment=attachment,
+        call_type="attachment_visual_parse",
+        visual=True,
+        input_payload={"file_type": file_type, "visual_count": len(urls), "truncated": truncated},
+        invoke=lambda provider: provider.vl_chat(
+            image_urls=urls,
+            prompt=prompt,
+            response_model=AttachmentParseJson,
+            temperature=0.1,
+        ),
     )
-    parsed = completion.parsed
     parsed.file_type = parsed.file_type or file_type
     parsed.warnings = [*warnings, *(parsed.warnings or [])]
     parsed.truncated = bool(parsed.truncated or truncated)
@@ -264,24 +477,10 @@ async def _qwen_visual_parse(*, file_type: str, file_name: str, url: str, warnin
 async def _visual_url_for_attachment(
     session: AsyncSession,
     attachment: EmailAttachment,
-    *,
-    pdf_content: bytes | None = None,
-    truncated: bool = False,
 ) -> str:
     object_id = attachment.oss_object_id
     if object_id is None:
         raise ValueError("ATTACHMENT_NOT_ARCHIVED")
-    if pdf_content is not None and truncated:
-        preview = _first_pdf_pages(pdf_content, max_pages=settings.PDF_MAX_PARSE_PAGES)
-        if preview:
-            preview_object = await upload_bytes_to_oss(
-                session,
-                content=preview,
-                original_file_name=f"{attachment.file_name}.first-{settings.PDF_MAX_PARSE_PAGES}.pdf",
-                content_type="application/pdf",
-                source_type="email_attachment_preview",
-            )
-            object_id = preview_object.id
     return await generate_presigned_url_for_object(session, oss_object_id=object_id, expires_seconds=1800)
 
 
@@ -337,36 +536,68 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
     text = ""
     try:
         if file_type == "image":
+            content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
+            dimensions = _image_dimensions(content)
+            if attachment.is_inline and dimensions and (
+                dimensions[0] < settings.INLINE_IMAGE_MIN_PARSE_WIDTH
+                or dimensions[1] < settings.INLINE_IMAGE_MIN_PARSE_HEIGHT
+            ):
+                parsed = _fallback_json(
+                    file_type,
+                    "",
+                    warnings=["INLINE_DECORATIVE_SKIPPED"],
+                    truncated=False,
+                )
+                parsed.extracted_fields = {"image_width": dimensions[0], "image_height": dimensions[1]}
+                return _mark_attachment(
+                    attachment,
+                    status="skipped_decorative",
+                    parsed=parsed,
+                    text=None,
+                )
             url = await _visual_url_for_attachment(session, attachment)
-            parsed = await _qwen_visual_parse(file_type=file_type, file_name=attachment.file_name, url=url, warnings=warnings, truncated=False)
+            parsed = await _qwen_visual_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, urls=[url], warnings=warnings, truncated=False)
             return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text)
 
         content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
         if file_type == "txt":
-            text = _extract_txt(content)
+            text = await _file_io(_extract_txt, content)
         elif file_type == "csv":
-            text = _extract_csv(content)
+            text = await _file_io(_extract_csv, content)
         elif file_type == "html":
-            text = _extract_html(content)
+            text = await _file_io(_extract_html, content)
         elif file_type == "docx":
-            text = _extract_docx(content)
+            text = await _file_io(_extract_docx, content)
         elif file_type == "xlsx":
-            text = _extract_xlsx(content)
+            text = await _file_io(_extract_xlsx, content)
         elif file_type == "pdf":
-            text, page_count = _extract_pdf_text(content, max_pages=settings.PDF_MAX_PARSE_PAGES)
+            text, page_count = await _file_io(_extract_pdf_text, content, max_pages=settings.PDF_MAX_PARSE_PAGES)
             if page_count and page_count > settings.PDF_MAX_PARSE_PAGES:
                 truncated = True
                 warnings.append(f"PDF_TRUNCATED_TO_{settings.PDF_MAX_PARSE_PAGES}_PAGES")
             if not text.strip():
-                url = await _visual_url_for_attachment(session, attachment, pdf_content=content, truncated=truncated)
-                parsed = await _qwen_visual_parse(file_type=file_type, file_name=attachment.file_name, url=url, warnings=warnings, truncated=truncated)
+                rendered_pages, rendered_page_count = await _file_io(
+                    render_pdf_pages,
+                    content,
+                    max_pages=settings.PDF_MAX_PARSE_PAGES,
+                )
+                if rendered_page_count > settings.PDF_MAX_PARSE_PAGES and not truncated:
+                    truncated = True
+                    warnings.append(f"PDF_TRUNCATED_TO_{settings.PDF_MAX_PARSE_PAGES}_PAGES")
+                if not rendered_pages:
+                    raise ValueError("PDF_RENDER_EMPTY")
+                urls = [
+                    f"data:image/png;base64,{base64.b64encode(page).decode('ascii')}"
+                    for page in rendered_pages
+                ]
+                parsed = await _qwen_visual_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, urls=urls, warnings=warnings, truncated=truncated)
                 return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text)
 
         text, text_truncated = _truncate_text(text)
         truncated = truncated or text_truncated
         if text_truncated:
             warnings.append("TEXT_TRUNCATED_FOR_MODEL_INPUT")
-        parsed = await _qwen_text_parse(file_type=file_type, file_name=attachment.file_name, text=text, warnings=warnings, truncated=truncated)
+        parsed = await _qwen_text_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, text=text, warnings=warnings, truncated=truncated)
         return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text or text)
     except AiProviderError as exc:
         parsed = _fallback_json(file_type, text, warnings=[*warnings, str(exc)], truncated=truncated)

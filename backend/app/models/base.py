@@ -18,6 +18,9 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    # MySQL does not return server defaults on INSERT. Load them inside flush so
+    # async callers never trigger implicit database I/O during serialization.
+    __mapper_args__ = {"eager_defaults": True}
 
 
 def pk_column() -> Any:

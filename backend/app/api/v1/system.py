@@ -10,11 +10,12 @@ from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
-from app.models import ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
+from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
 from app.services.runtime_config import read_runtime_config, write_runtime_config
+from app.services.storage import find_orphan_oss_objects
 
 router = APIRouter()
 
@@ -24,6 +25,7 @@ def _config_payload() -> dict:
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
         "reply_send_mode": runtime["reply_send_mode"],
+        "auto_apply_min_confidence": runtime["auto_apply_min_confidence"],
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
         "max_follow_up": runtime["max_follow_up"],
         "confidence_threshold": runtime["confidence_threshold"],
@@ -42,6 +44,11 @@ def _config_payload() -> dict:
             "multimodal_ai_configured": multimodal_ai_configured(),
             "multimodal_provider": settings.MULTIMODAL_PROVIDER,
             "qwen_vl_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
+            "qwen_text_model": settings.QWEN_MODEL,
+            "email_async_enabled": settings.EMAIL_ASYNC_ENABLED,
+            "imap_async_enabled": settings.IMAP_ASYNC_ENABLED,
+            "smtp_async_enabled": settings.SMTP_ASYNC_ENABLED,
+            "import_export_async_enabled": settings.IMPORT_EXPORT_ASYNC_ENABLED,
             "relay_sn_sync_enabled": settings.RELAY_SN_SYNC_ENABLED,
             "relay_push_enabled": settings.RELAY_PUSH_ENABLED,
             "relay_configured": bool(settings.RELAY_BASE_URL and settings.RELAY_API_KEY),
@@ -86,6 +93,51 @@ async def system_info(
             ],
         }
     )
+
+
+@router.get("/runtime-status")
+async def runtime_status(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    del current_user
+    latest_imap = await session.scalar(
+        select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
+    )
+    failed_jobs = int(
+        await session.scalar(select(func.count()).select_from(JobRunLog).where(JobRunLog.status.in_(["failed", "needs_manual_review"]))) or 0
+    )
+    retry_jobs = int(
+        await session.scalar(select(func.count()).select_from(JobRunLog).where(JobRunLog.status == "retry_wait")) or 0
+    )
+    imap_retry_count = int(
+        await session.scalar(select(func.count()).select_from(MailFetchRecord).where(MailFetchRecord.fetch_status == "retry_wait")) or 0
+    )
+    orphan_objects = await find_orphan_oss_objects(session, limit=1000)
+    provider_status: dict[str, dict | None] = {}
+    for provider in ("deepseek", "qwen"):
+        latest = await session.scalar(
+            select(AiCallLog).where(AiCallLog.provider_name == provider).order_by(AiCallLog.created_at.desc()).limit(1)
+        )
+        provider_status[provider] = (
+            {
+                "status": latest.status,
+                "model": latest.model_name,
+                "error_code": latest.error_code,
+                "latency_ms": latest.latency_ms,
+                "created_at": latest.created_at,
+            }
+            if latest else None
+        )
+    return ok({
+        "latest_imap_job": model_to_dict(latest_imap, ("id", "status", "processed_count", "success_count", "failed_count", "error_code", "created_at", "finished_at")) if latest_imap else None,
+        "failed_job_count": failed_jobs,
+        "retry_job_count": retry_jobs,
+        "imap_retry_count": imap_retry_count,
+        "oss_orphan_count": len(orphan_objects),
+        "oss_orphans_truncated": len(orphan_objects) >= 1000,
+        "ai_provider_status": provider_status,
+    })
 
 
 @router.get("/config")

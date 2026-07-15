@@ -40,6 +40,59 @@ class AiReplyDraftResponse(BaseModel):
 T = TypeVar("T", bound=BaseModel)
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {str(item): "需要补充" for item in value if isinstance(item, (str, int, float))}
+    return {}
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item).strip()]
+    return []
+
+
+def _confidence(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if 1 < number <= 100:
+        number /= 100
+    return max(0.0, min(1.0, number))
+
+
+def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    if response_model is AiExtractResponse:
+        for field in ("extracted_fields", "missing_fields", "conflict_fields", "evidence"):
+            normalized[field] = _as_mapping(normalized.get(field))
+        items = normalized.get("extracted_items")
+        if isinstance(items, dict):
+            items = items.get("items") if isinstance(items.get("items"), list) else [items]
+        normalized["extracted_items"] = items if isinstance(items, list) else []
+        normalized["confidence_score"] = _confidence(normalized.get("confidence_score"))
+        normalized["field_confidences"] = {
+            str(key): _confidence(value)
+            for key, value in _as_mapping(normalized.get("field_confidences")).items()
+        }
+        normalized["confidence_reasons"] = _as_string_list(normalized.get("confidence_reasons"))
+        normalized["original_evidence"] = _as_string_list(normalized.get("original_evidence"))
+        direction = normalized.get("manual_review_direction")
+        normalized["manual_review_direction"] = str(direction) if direction is not None else None
+    elif response_model is AiReplyDraftResponse:
+        normalized["missing_fields"] = _as_mapping(normalized.get("missing_fields"))
+        normalized["confidence_score"] = _confidence(normalized.get("confidence_score"))
+        normalized["suggestions"] = _as_string_list(normalized.get("suggestions"))
+    return normalized
+
+
 @dataclass
 class AiJsonCompletion(Generic[T]):
     trace_id: str
@@ -109,12 +162,14 @@ class DeepSeekProvider:
         latency_ms = int((time.perf_counter() - started) * 1000)
         output_text = _extract_content(response_payload)
         try:
-            parsed_json = json.loads(output_text)
+            parsed_json = _normalize_response_payload(json.loads(output_text), response_model)
             parsed = response_model.model_validate(parsed_json)
         except json.JSONDecodeError as exc:
             raise AiProviderError("AI_PROVIDER_OUTPUT_NOT_JSON") from exc
         except ValidationError as exc:
-            raise AiProviderError("AI_PROVIDER_OUTPUT_SCHEMA_INVALID") from exc
+            error = AiProviderError("AI_PROVIDER_OUTPUT_SCHEMA_INVALID")
+            error.validation_error_types = [item["type"] for item in exc.errors()]  # type: ignore[attr-defined]
+            raise error from exc
 
         return AiJsonCompletion(
             trace_id=trace_id,

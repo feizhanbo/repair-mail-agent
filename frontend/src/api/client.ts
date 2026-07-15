@@ -3,8 +3,10 @@ import { useAuthStore } from '../stores/authStore';
 import type {
   AiLog,
   ApiResponse,
+  AsyncIngestResult,
   BoardCard,
   CurrentUser,
+  ContentPreview,
   DatabaseRowsResponse,
   DatabaseTablesResponse,
   DashboardSummary,
@@ -15,6 +17,7 @@ import type {
   EmailItem,
   LoginRequest,
   LoginResponse,
+  JobRunLog,
   ManualTask,
   ManualTaskDetail,
   ManualTaskReparseResponse,
@@ -27,6 +30,7 @@ import type {
   StatisticsSummary,
   SystemConfig,
   SystemInfo,
+  SystemRuntimeStatus,
   Ticket,
   TicketDetail,
   UserAccount,
@@ -57,6 +61,15 @@ function friendlyServerMessage(status?: number, code?: string): string {
     WORKFLOW_STATUS_NOT_FOUND: '目标状态不可用，请联系管理员',
     TICKET_ALREADY_CLOSED: '工单已关闭，不能继续操作',
     EMAIL_NOT_FOUND: '邮件不存在或已被删除',
+    EML_FILE_REQUIRED: '请选择 .eml 格式的邮件文件',
+    EML_FILE_EMPTY: '邮件文件为空，请重新选择',
+    EML_PARSE_FAILED: '邮件文件格式无法解析',
+    EML_FROM_REQUIRED: '邮件中缺少有效发件人地址',
+    EMAIL_ARCHIVE_TOO_LARGE: '邮件原件或附件总大小超过归档限制',
+    TOO_MANY_ATTACHMENTS: '邮件附件数量超过系统限制',
+    OSS_NOT_CONFIGURED: 'OSS 尚未正确配置，邮件未入库',
+    OSS_ARCHIVAL_FAILED: '邮件归档到 OSS 失败，请稍后重试',
+    JOB_POLL_TIMEOUT: '后台任务处理超时，请在邮件详情中查看最新状态',
     ATTACHMENT_CONTENT_INVALID: '附件内容无法读取，请重新选择文件',
     MANUAL_TASK_NOT_FOUND: '复核任务不存在或已被处理',
     MANUAL_TASK_NOT_CLAIMABLE: '当前任务不能领取',
@@ -90,6 +103,7 @@ function friendlyServerMessage(status?: number, code?: string): string {
   if (status === 403) return '当前账号没有权限执行此操作';
   if (status === 404) return '数据不存在或已被删除';
   if (status === 409) return '数据状态已变化，请刷新后重试';
+  if (status === 413) return '上传文件超过代理或系统允许的大小';
   if (status === 422) return '请检查输入内容是否完整、格式是否正确';
   if (status && status >= 500) return '系统暂时无法处理请求，请稍后再试';
   return '操作失败，请稍后重试';
@@ -110,6 +124,9 @@ apiClient.interceptors.request.use((config) => {
   const token = useAuthStore.getState().token;
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  if (!config.headers['X-Correlation-ID']) {
+    config.headers['X-Correlation-ID'] = crypto.randomUUID();
   }
   return config;
 });
@@ -157,17 +174,29 @@ export const api = {
   emailFlowTrace: (id: number) => getData<EmailFlowTrace>(`/emails/${id}/flow-trace`),
   rawEmlDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/${id}/raw-eml-url`),
   attachmentDownloadUrl: (id: number) => getData<ObjectDownloadUrl>(`/emails/attachments/${id}/download-url`),
+  emailPreview: (id: number) => getData<ContentPreview>(`/emails/${id}/preview`),
+  attachmentPreview: (id: number) => getData<ContentPreview>(`/emails/attachments/${id}/preview`),
   exportEmails: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/emails/export', { params, responseType: 'blob' }),
   ingestEmail: (body: EmailIngestRequest) => postData<EmailIngestResult, EmailIngestRequest>('/emails/ingest', body),
+  ingestEmailJob: (body: EmailIngestRequest) => postData<AsyncIngestResult, EmailIngestRequest>('/emails/ingest/jobs', body),
   ingestEmlFile: (file: File, options?: { mailbox_account?: string; folder_name?: string; auto_parse?: boolean }) => {
     const body = new FormData();
     body.append('file', file);
     body.append('mailbox_account', options?.mailbox_account ?? 'manual-eml');
     body.append('folder_name', options?.folder_name ?? 'INBOX');
     body.append('auto_parse', String(options?.auto_parse ?? true));
-    return postData<EmailIngestResult>('/emails/ingest-eml', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+    return postData<EmailIngestResult>('/emails/ingest-eml', body, { timeout: 600_000 });
+  },
+  ingestEmlFileJob: (file: File, options?: { mailbox_account?: string; folder_name?: string }) => {
+    const body = new FormData();
+    body.append('file', file);
+    body.append('mailbox_account', options?.mailbox_account ?? 'manual-eml');
+    body.append('folder_name', options?.folder_name ?? 'INBOX');
+    return postData<AsyncIngestResult>('/emails/ingest-eml/jobs', body, { timeout: 600_000 });
   },
   reparseEmail: (id: number, body: Record<string, unknown> = {}) => postData(`/emails/${id}/reparse`, body),
+  reparseEmailJob: (id: number, body: Record<string, unknown> = {}) => postData<JobRunLog>(`/emails/${id}/reparse/jobs`, body),
+  fetchEmailJob: (params: Record<string, unknown>) => postData<JobRunLog>('/emails/fetch/jobs', undefined, { params }),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
   exportSelectedTickets: (ids: number[]) => apiClient.post<Blob, Blob>('/tickets/export-selected', { ids }, { responseType: 'blob' }),
@@ -175,6 +204,7 @@ export const api = {
   patchTicketFields: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/fields`, body),
   patchTicketItems: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/items`, body),
   transitionTicket: (id: number, body: Record<string, unknown>) => postData<TicketDetail>(`/tickets/${id}/transition`, body),
+  confirmTicketExport: (id: number, reason?: string) => postData<TicketDetail>(`/tickets/${id}/confirm-export`, { reason }),
   validateTicketSn: (id: number) => postData<TicketDetail>(`/tickets/${id}/validate-sn`),
   applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject' }) => {
     const payload = typeof body === 'string' ? { reason: body } : body;
@@ -190,6 +220,7 @@ export const api = {
   replies: (params: Record<string, unknown>) => getData<PageData<ReplyRecord>>('/replies', { params }),
   draftReply: (ticketId: number, body: Record<string, unknown>) => postData<ReplyRecord>(`/replies/${ticketId}/draft`, body),
   approveReply: (id: number) => postData(`/replies/${id}/approve-send`),
+  approveReplyJob: (id: number) => postData<{ reply: ReplyRecord; job?: JobRunLog | null }>(`/replies/${id}/approve-send/jobs`),
   rejectReply: (id: number, reason: string) => postData(`/replies/${id}/reject`, { reason }),
   snAssets: (params: Record<string, unknown>) => getData<PageData<SnAsset>>('/master-data/sn-assets', { params }),
   importSnAssets: (body: Record<string, unknown>) => postData('/master-data/sn-assets/import', body),
@@ -201,6 +232,11 @@ export const api = {
     body.append('file', file);
     return postData('/master-data/sn-assets/import-file', body, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
+  importSnAssetsFileJob: (file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return postData<JobRunLog>('/master-data/sn-assets/import-file/jobs', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   boardCards: (params: Record<string, unknown>) => getData<PageData<BoardCard>>('/master-data/board-cards', { params }),
   importBoardCards: (body: Record<string, unknown>) => postData('/master-data/board-cards/import', body),
   boardCardsTemplate: () => apiClient.get<Blob, Blob>('/master-data/board-cards/template', { responseType: 'blob' }),
@@ -211,10 +247,21 @@ export const api = {
     body.append('file', file);
     return postData('/master-data/board-cards/import-file', body, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
+  importBoardCardsFileJob: (file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return postData<JobRunLog>('/master-data/board-cards/import-file/jobs', body, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  job: (id: number) => getData<JobRunLog>(`/jobs/${id}`),
+  jobs: (params: Record<string, unknown>) => getData<PageData<JobRunLog>>('/jobs', { params }),
+  jobDownloadUrl: (id: number) => getData<{ job_id: number; object_id: number; url: string; expires_seconds: number }>(`/jobs/${id}/download-url`),
+  createExportJob: (body: { kind: string; filters?: Record<string, unknown>; ids?: number[] }) => postData<JobRunLog>('/exports/jobs', body),
   aiLogs: (params: Record<string, unknown>) => getData<PageData<AiLog>>('/ai-logs', { params }),
+  aiLogDetail: (id: number) => getData<Record<string, unknown>>(`/ai-logs/${id}/detail`),
   notifications: (params: Record<string, unknown>) => getData<PageData<NotificationEvent>>('/notifications', { params }),
   markNotificationRead: (id: number) => postData<NotificationEvent>(`/notifications/${id}/read`),
   systemInfo: () => getData<SystemInfo>('/system/info'),
+  systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
   updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'reply_send_mode' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
     patchData<SystemConfig>('/system/config', body),

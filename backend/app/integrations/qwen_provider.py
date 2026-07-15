@@ -75,10 +75,18 @@ class QwenProvider:
         except json.JSONDecodeError as exc:
             error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
             error.raw_output = output_text  # type: ignore[attr-defined]
+            error.trace_id = trace_id  # type: ignore[attr-defined]
+            error.request_payload = payload  # type: ignore[attr-defined]
+            error.response_payload = response_payload  # type: ignore[attr-defined]
+            error.latency_ms = latency_ms  # type: ignore[attr-defined]
             raise error from exc
         except ValidationError as exc:
             error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
             error.raw_output = output_text  # type: ignore[attr-defined]
+            error.trace_id = trace_id  # type: ignore[attr-defined]
+            error.request_payload = payload  # type: ignore[attr-defined]
+            error.response_payload = response_payload  # type: ignore[attr-defined]
+            error.latency_ms = latency_ms  # type: ignore[attr-defined]
             raise error from exc
 
         return AiJsonCompletion(
@@ -151,10 +159,18 @@ class QwenProvider:
         except json.JSONDecodeError as exc:
             error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
             error.raw_output = output_text  # type: ignore[attr-defined]
+            error.trace_id = trace_id  # type: ignore[attr-defined]
+            error.request_payload = payload  # type: ignore[attr-defined]
+            error.response_payload = response_payload  # type: ignore[attr-defined]
+            error.latency_ms = latency_ms  # type: ignore[attr-defined]
             raise error from exc
         except ValidationError as exc:
             error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
             error.raw_output = output_text  # type: ignore[attr-defined]
+            error.trace_id = trace_id  # type: ignore[attr-defined]
+            error.request_payload = payload  # type: ignore[attr-defined]
+            error.response_payload = response_payload  # type: ignore[attr-defined]
+            error.latency_ms = latency_ms  # type: ignore[attr-defined]
             raise error from exc
 
         return AiJsonCompletion(

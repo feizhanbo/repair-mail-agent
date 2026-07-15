@@ -4,6 +4,7 @@ import { Button, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table,
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
+import { waitForJob } from '../utils/jobs';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -59,7 +60,11 @@ export default function RepliesPage() {
     onError: handleMutationError,
   });
   const approveMutation = useMutation({
-    mutationFn: (id: number) => api.approveReply(id),
+    mutationFn: async (id: number) => {
+      if (import.meta.env.VITE_SMTP_ASYNC_ENABLED !== 'true') return api.approveReply(id);
+      const result = await api.approveReplyJob(id);
+      return result.job ? waitForJob(result.job) : result;
+    },
     onSuccess: () => {
       message.success('回复已审核');
       setSelected(null);

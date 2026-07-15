@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import html
@@ -114,10 +115,13 @@ async def import_sn_assets(
     source_file_name: str | None,
     source_file_hash: str | None,
     user_id: int,
+    job: JobRunLog | None = None,
 ) -> dict[str, Any]:
-    job = JobRunLog(job_name="sn_assets_import", job_type="master_data_import", status="running", processed_count=len(items), metadata_json={})
-    session.add(job)
-    await session.flush()
+    owns_job = job is None
+    if job is None:
+        job = JobRunLog(job_name="sn_assets_import", job_type="master_data_import", status="running", processed_count=len(items), metadata_json={})
+        session.add(job)
+        await session.flush()
     created = 0
     updated = 0
     for item in items:
@@ -139,10 +143,11 @@ async def import_sn_assets(
             for key, value in payload.items():
                 setattr(row, key, value)
             updated += 1
-    job.status = "success"
-    job.finished_at = utcnow()
+    if owns_job:
+        job.status = "success"
+        job.finished_at = utcnow()
     job.success_count = created + updated
-    job.metadata_json = {"created": created, "updated": updated, "source_file_name": source_file_name}
+    job.metadata_json = {"created": created, "updated": updated, "source_file_hash": source_file_hash}
     await log_operation(
         session,
         user_id=user_id,
@@ -197,10 +202,13 @@ async def import_board_cards(
     source_file_name: str | None,
     source_file_hash: str | None,
     user_id: int,
+    job: JobRunLog | None = None,
 ) -> dict[str, Any]:
-    job = JobRunLog(job_name="board_cards_import", job_type="master_data_import", status="running", processed_count=len(items), metadata_json={})
-    session.add(job)
-    await session.flush()
+    owns_job = job is None
+    if job is None:
+        job = JobRunLog(job_name="board_cards_import", job_type="master_data_import", status="running", processed_count=len(items), metadata_json={})
+        session.add(job)
+        await session.flush()
     created = 0
     updated = 0
     for item in items:
@@ -222,10 +230,11 @@ async def import_board_cards(
             for key, value in payload.items():
                 setattr(row, key, value)
             updated += 1
-    job.status = "success"
-    job.finished_at = utcnow()
+    if owns_job:
+        job.status = "success"
+        job.finished_at = utcnow()
     job.success_count = created + updated
-    job.metadata_json = {"created": created, "updated": updated, "source_file_name": source_file_name}
+    job.metadata_json = {"created": created, "updated": updated, "source_file_hash": source_file_hash}
     await log_operation(
         session,
         user_id=user_id,
@@ -755,14 +764,14 @@ async def export_sn_assets(
         SnAsset.updated_at.desc(), SnAsset.id.desc()
     )
     rows = (await session.execute(statement)).scalars().all()
-    return xlsx_bytes([model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
+    return await asyncio.to_thread(xlsx_bytes, [model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
 
 
 async def export_sn_assets_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
     if not ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
     rows = (await session.execute(select(SnAsset).where(SnAsset.id.in_(ids)).order_by(SnAsset.id))).scalars().all()
-    return xlsx_bytes([model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
+    return await asyncio.to_thread(xlsx_bytes, [model_to_dict(row, SN_ASSET_FIELDS) for row in rows], list(SN_ASSET_FIELDS))
 
 
 async def export_board_cards(
@@ -777,11 +786,11 @@ async def export_board_cards(
         BoardCard.updated_at.desc(), BoardCard.id.desc()
     )
     rows = (await session.execute(statement)).scalars().all()
-    return xlsx_bytes([model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))
+    return await asyncio.to_thread(xlsx_bytes, [model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))
 
 
 async def export_board_cards_selected(session: AsyncSession, *, ids: list[int]) -> bytes:
     if not ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPORT_SELECTION_REQUIRED")
     rows = (await session.execute(select(BoardCard).where(BoardCard.id.in_(ids)).order_by(BoardCard.id))).scalars().all()
-    return xlsx_bytes([model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))
+    return await asyncio.to_thread(xlsx_bytes, [model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], list(BOARD_CARD_FIELDS))

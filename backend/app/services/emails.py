@@ -1,22 +1,32 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email, EmailAttachment, EmailThread, ParseResult
+from app.core.request_context import get_correlation_id
+from app.models import Email, EmailAttachment, EmailThread, ParseResult, RepairTicket
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import parse_attachment
-from app.services.audit import log_operation
+from app.services.audit import log_operation, log_system_event
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, to_plain, utcnow
-from app.services.parser import classify_email, clean_email_body, extract_fields
+from app.services.parser import (
+    RuleAnalysisResult,
+    analyze_email_rules,
+    extract_latest_reply_segment,
+    html_to_text,
+    normalize_email_body,
+)
 from app.services.replies import create_reply_draft
-from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result
+from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result, validate_ticket_sn
 
 
 async def list_emails(
@@ -158,9 +168,19 @@ async def _find_thread_for_email(
     *,
     message_id: str,
     in_reply_to: str | None,
+    references_header: str | None,
     normalized_subject: str | None,
     from_domain: str | None,
 ) -> EmailThread:
+    if references_header:
+        for reference_id in reversed(re.findall(r"<[^<>]+>", references_header)):
+            parent = await session.scalar(select(Email).where(Email.message_id == reference_id))
+            if parent and parent.thread_id:
+                thread = await session.get(EmailThread, parent.thread_id)
+                if thread:
+                    thread.merge_confidence = 0.9500
+                    thread.merge_reason = "References matched an existing email."
+                    return thread
     if in_reply_to:
         parent = await session.scalar(select(Email).where(Email.message_id == in_reply_to))
         if parent and parent.thread_id:
@@ -172,7 +192,9 @@ async def _find_thread_for_email(
     if normalized_subject and from_domain:
         thread = await session.scalar(
             select(EmailThread)
+            .join(Email, Email.id == EmailThread.latest_email_id)
             .where(EmailThread.normalized_subject == normalized_subject)
+            .where(Email.from_domain == from_domain)
             .order_by(EmailThread.updated_at.desc(), EmailThread.id.desc())
         )
         if thread:
@@ -198,21 +220,32 @@ async def ingest_email(
     payload: EmailIngestRequest,
     user_id: int | None = None,
     auto_parse: bool = True,
+    rule_analysis: RuleAnalysisResult | None = None,
 ) -> dict[str, Any]:
     message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
-    duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))
+    duplicate_predicates = [Email.message_id == message_id]
+    if payload.raw_eml_sha256:
+        duplicate_predicates.append(Email.source_content_sha256 == payload.raw_eml_sha256)
+    duplicate = await session.scalar(select(Email).where(or_(*duplicate_predicates)))
     if duplicate is not None:
         return {"duplicate": True, "email": serialize_email(duplicate)}
+    if payload.raw_eml_oss_object_id is None or any(
+        attachment.get("oss_object_id") is None for attachment in payload.attachments
+    ):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OSS_ARCHIVAL_REQUIRED")
 
     normalized_subject = normalize_subject(payload.subject)
     from_domain = address_domain(payload.from_address)
+    processing_trace_id = get_correlation_id() or uuid4().hex
     thread = await _find_thread_for_email(
         session,
         message_id=message_id,
         in_reply_to=payload.in_reply_to,
+        references_header=payload.references_header,
         normalized_subject=normalized_subject,
         from_domain=from_domain,
     )
+    created_at = utcnow()
     email = Email(
         thread_id=thread.id,
         mail_direction="inbound",
@@ -222,6 +255,8 @@ async def ingest_email(
         fetch_job_run_id=payload.fetch_job_run_id,
         message_id=message_id,
         raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
+        processing_trace_id=processing_trace_id,
+        source_content_sha256=payload.raw_eml_sha256,
         raw_headers={"raw_eml_sha256": payload.raw_eml_sha256} if payload.raw_eml_sha256 else None,
         in_reply_to=payload.in_reply_to,
         references_header=payload.references_header,
@@ -235,17 +270,21 @@ async def ingest_email(
         received_at=payload.received_at or utcnow(),
         text_body=payload.text_body,
         html_body=payload.html_body,
-        clean_body=payload.text_body,
-        latest_reply_segment=payload.text_body,
+        clean_body=normalize_email_body(payload.text_body or html_to_text(payload.html_body)),
+        latest_reply_segment=extract_latest_reply_segment(payload.text_body or html_to_text(payload.html_body)),
         parse_status="pending",
+        created_at=created_at,
+        updated_at=created_at,
     )
-    body = clean_email_body(email)
-    intent_type, confidence, reason = classify_email(email, body)
-    email.intent_type = intent_type
-    if intent_type == "irrelevant":
+    analysis = rule_analysis or analyze_email_rules(email)
+    email.intent_type = analysis.intent_type
+    if analysis.intent_type == "irrelevant":
         email.parse_status = "skipped"
     session.add(email)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_DUPLICATE") from exc
     thread.latest_email_id = email.id
     thread.email_count = (thread.email_count or 0) + 1
 
@@ -266,30 +305,92 @@ async def ingest_email(
                 parse_error=attachment_payload.get("parse_error"),
             )
         )
+    parse_payload = analysis.to_parse_payload()
+    rule_parse = ParseResult(
+        email_id=email.id,
+        ticket_id=None,
+        parser_type="rule",
+        parser_version="pre-archive-v2",
+        intent_type=parse_payload["intent_type"],
+        extracted_fields=parse_payload["extracted_fields"],
+        extracted_items=parse_payload["extracted_items"],
+        missing_fields=parse_payload["missing_fields"],
+        conflict_fields=parse_payload["conflict_fields"],
+        confidence_score=parse_payload["confidence_score"],
+        field_confidences=parse_payload["field_confidences"],
+        evidence=parse_payload["evidence"],
+        apply_status="candidate_only",
+    )
+    session.add(rule_parse)
+    await session.flush()
     await log_operation(
         session,
         user_id=user_id,
         operation_type="email_ingested",
         target_type="email",
         target_id=email.id,
-        description=reason,
-        after_data={"intent_type": intent_type, "classification_confidence": confidence},
+        correlation_id=processing_trace_id,
+        email_id=email.id,
+        description=analysis.classification_reason,
+        after_data={
+            "intent_type": analysis.intent_type,
+            "classification_confidence": analysis.classification_confidence,
+            "rule_parse_result_id": rule_parse.id,
+        },
     )
-    result: dict[str, Any] = {"duplicate": False, "email": serialize_email(email), "classification": {"confidence": confidence, "reason": reason}}
+    await log_system_event(
+        session,
+        event_type="email_processing",
+        module_name="emails",
+        correlation_id=processing_trace_id,
+        email_id=email.id,
+        event_stage="formal_ingest",
+        event_status="success",
+        target_type="email",
+        target_id=email.id,
+        message="Email and attachment metadata created after complete archival",
+        details={
+            "attachment_count": len(payload.attachments),
+            "intent_type": analysis.intent_type,
+            "rule_parse_result_id": rule_parse.id,
+        },
+    )
+    result: dict[str, Any] = {
+        "duplicate": False,
+        "email": serialize_email(email),
+        "rule_parse_result_id": rule_parse.id,
+        "classification": {
+            "confidence": analysis.classification_confidence,
+            "reason": analysis.classification_reason,
+        },
+    }
     if auto_parse:
-        result["parse"] = await reparse_email(session, email_id=email.id, user_id=user_id, reason="邮件入库后规则预解析并提交 AI 判断。")
+        result["parse"] = await reparse_email(
+            session,
+            email_id=email.id,
+            user_id=user_id,
+            reason="复用归档前规则解析结果并提交 AI 判断。",
+            rule_parse_result_id=rule_parse.id,
+        )
     return result
 
 
-def _parse_requires_manual(parse_result: ParseResult | None) -> bool:
+def _parse_requires_manual(
+    parse_result: ParseResult | None,
+    attachments: list[EmailAttachment] | None = None,
+) -> bool:
     if parse_result is None:
         return True
     confidence = float(parse_result.confidence_score or 0)
     return (
         parse_result.intent_type in {None, "", "unknown"}
-        or confidence < settings.CONFIDENCE_THRESHOLD
+        or confidence < settings.AUTO_APPLY_MIN_CONFIDENCE
         or bool(parse_result.missing_fields)
         or bool(parse_result.conflict_fields)
+        or any(
+            attachment.parse_status in {"needs_manual_review", "unsupported", "failed"}
+            for attachment in (attachments or [])
+        )
     )
 
 
@@ -303,8 +404,8 @@ def _manual_reason(parse_result: ParseResult | None) -> str:
     reasons: list[str] = []
     if parse_result.intent_type in {None, "", "unknown"}:
         reasons.append("邮件类型不明确")
-    if parse_result.confidence_score is None or float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:
-        reasons.append(f"AI 置信度低于阈值 {settings.CONFIDENCE_THRESHOLD}")
+    if parse_result.confidence_score is None or float(parse_result.confidence_score) < settings.AUTO_APPLY_MIN_CONFIDENCE:
+        reasons.append(f"AI 置信度低于自动采纳阈值 {settings.AUTO_APPLY_MIN_CONFIDENCE}")
     if parse_result.missing_fields:
         reasons.append("存在缺失字段：" + "、".join(sorted(parse_result.missing_fields.keys())))
     if parse_result.conflict_fields:
@@ -339,8 +440,23 @@ async def _try_create_reply_draft(
             related_email_id=email_id,
             missing_fields=parse_result.missing_fields if parse_result else None,
         )
-    except HTTPException:
-        return None
+    except HTTPException as exc:
+        error_code = str(exc.detail) if isinstance(exc.detail, str) else "REPLY_DRAFT_FAILED"
+        await log_system_event(
+            session,
+            event_type="reply_draft_generation",
+            module_name="emails",
+            email_id=email_id,
+            ticket_id=ticket_id,
+            event_stage="reply_draft",
+            event_status="failed",
+            target_type="ticket",
+            target_id=ticket_id,
+            error_code=error_code,
+            severity="error",
+            message="Reply draft generation failed without blocking email parsing",
+        )
+        return {"created": False, "error_code": error_code}
 
 
 async def reparse_email(
@@ -349,45 +465,57 @@ async def reparse_email(
     email_id: int,
     user_id: int | None = None,
     reason: str | None = None,
+    durable_attachment_stages: bool = False,
+    rule_parse_result_id: int | None = None,
 ) -> dict[str, Any]:
     email = await session.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
 
-    body = clean_email_body(email)
-    intent_type, classification_confidence, classification_reason = classify_email(email, body)
-    extracted = extract_fields(email)
-    email.clean_body = extracted["body"]
-    email.latest_reply_segment = extracted["body"]
-    email.intent_type = intent_type
+    conversation_body = normalize_email_body(email.text_body or html_to_text(email.html_body) or email.clean_body)
+    email.clean_body = conversation_body
+    email.latest_reply_segment = extract_latest_reply_segment(conversation_body)
+    rule_parse = await session.get(ParseResult, rule_parse_result_id) if rule_parse_result_id else None
+    if rule_parse is not None and (rule_parse.email_id != email.id or rule_parse.parser_type != "rule"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="RULE_PARSE_RESULT_MISMATCH")
+    if rule_parse is None:
+        analysis = analyze_email_rules(email)
+        email.latest_reply_segment = analysis.body
+        email.intent_type = analysis.intent_type
+        parse_payload = analysis.to_parse_payload()
+        rule_parse = ParseResult(
+            email_id=email.id,
+            ticket_id=None,
+            parser_type="rule",
+            parser_version="pre-archive-v2",
+            intent_type=parse_payload["intent_type"],
+            extracted_fields=parse_payload["extracted_fields"],
+            extracted_items=parse_payload["extracted_items"],
+            missing_fields=parse_payload["missing_fields"],
+            conflict_fields=parse_payload["conflict_fields"],
+            confidence_score=parse_payload["confidence_score"],
+            field_confidences=parse_payload["field_confidences"],
+            evidence={**parse_payload["evidence"], "mode": "explicit_reparse"},
+            apply_status="candidate_only",
+        )
+        session.add(rule_parse)
+        await session.flush()
+    else:
+        email.intent_type = rule_parse.intent_type
     email.parse_status = "parsing"
-
-    rule_parse = ParseResult(
+    await log_system_event(
+        session,
+        event_type="email_processing",
+        module_name="emails",
+        correlation_id=email.processing_trace_id,
         email_id=email.id,
-        ticket_id=None,
-        parser_type="rule",
-        parser_version="basic-v1",
-        intent_type=intent_type,
-        extracted_fields=extracted["fields"],
-        extracted_items={"items": extracted["items"]},
-        missing_fields=extracted["missing_fields"],
-        conflict_fields=extracted["conflict_fields"],
-        confidence_score=min(float(extracted["confidence_score"]), classification_confidence),
-        field_confidences=extracted["field_confidences"],
-        evidence={
-            **extracted["evidence"],
-            "classification": {
-                "intent_type": intent_type,
-                "confidence": classification_confidence,
-                "reason": classification_reason,
-            },
-            "mode": "rule_precheck",
-            "candidate_only": True,
-        },
-        apply_status="candidate_only",
+        event_stage="parse",
+        event_status="running",
+        target_type="email",
+        target_id=email.id,
+        message="Email parsing started",
     )
-    session.add(rule_parse)
-    await session.flush()
+
     await log_operation(
         session,
         user_id=user_id,
@@ -395,7 +523,10 @@ async def reparse_email(
         target_type="email",
         target_id=email.id,
         description=reason,
-        after_data={"parse_result_id": rule_parse.id, "mode": "llm_required"},
+        after_data={
+            "parse_result_id": rule_parse.id,
+            "mode": "reuse_pre_archive_rule" if rule_parse_result_id else "explicit_reparse",
+        },
     )
 
     attachments = (
@@ -404,11 +535,24 @@ async def reparse_email(
 
     multimodal_results: list[dict[str, Any]] = []
     for attachment in attachments:
-        attachment_result = await parse_attachment(session, attachment)
+        if attachment.parse_status in {"parsed", "skipped_decorative", "unsupported"}:
+            attachment_result = attachment.extracted_json
+        else:
+            attachment_result = await parse_attachment(session, attachment)
         if attachment_result:
             multimodal_results.append(attachment_result)
+        if durable_attachment_stages:
+            await session.commit()
+
+    if durable_attachment_stages:
+        await session.refresh(email)
+        await session.refresh(rule_parse)
+        for attachment in attachments:
+            await session.refresh(attachment)
 
     thread = await session.get(EmailThread, email.thread_id) if email.thread_id else None
+    thread_ticket = await session.get(RepairTicket, thread.ticket_id) if thread and thread.ticket_id else None
+    closed_thread = bool(thread_ticket and thread_ticket.current_status_code == "closed")
     ai_result = await create_ai_parse_candidate(
         session,
         email=email,
@@ -433,10 +577,21 @@ async def reparse_email(
 
     if isinstance(ai_parse, ParseResult):
         email.intent_type = ai_parse.intent_type or email.intent_type
-        if ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse):
+        if closed_thread:
+            closed_reason = "已关闭工单收到新邮件，需要人工判断是否新建工单或重新开启处理。"
+            ticket = await ensure_manual_review_ticket_from_parse_result(
+                session,
+                email=email,
+                parse_result=ai_parse,
+                reason=closed_reason,
+                task_type="closed_thread_new_email",
+            )
+            email.parse_status = "needs_manual"
+            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": closed_reason}
+        elif ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse, list(attachments)):
             ai_parse.apply_status = "auto_skipped"
             email.parse_status = "skipped"
-        elif _parse_requires_manual(ai_parse):
+        elif _parse_requires_manual(ai_parse, list(attachments)):
             ticket = await ensure_manual_review_ticket_from_parse_result(
                 session,
                 email=email,
@@ -467,13 +622,41 @@ async def reparse_email(
                 if isinstance(ai_applied, dict) and isinstance(ai_applied.get("ticket"), dict)
                 else ai_parse.ticket_id
             )
-            draft_result = await _try_create_reply_draft(
-                session,
-                ticket_id=ticket_id,
-                user_id=user_id,
-                email_id=email.id,
-                parse_result=ai_parse,
-            )
+            if ticket_id is not None:
+                validated = await validate_ticket_sn(session, ticket_id=ticket_id, user_id=None)
+                ai_applied = validated
+                validated_ticket = validated.get("ticket") if isinstance(validated, dict) else None
+                validated_status = validated_ticket.get("current_status_code") if isinstance(validated_ticket, dict) else None
+                if validated_status != "ready_for_export":
+                    validation_reason = "SN 校验未全部通过，AI 结果不得自动采纳。"
+                    ticket = await ensure_manual_review_ticket_from_parse_result(
+                        session,
+                        email=email,
+                        parse_result=ai_parse,
+                        reason=validation_reason,
+                        task_type="sn_validation_required",
+                    )
+                    email.parse_status = "needs_manual"
+                    manual_ticket = {
+                        "ticket_id": ticket.id,
+                        "ticket_no": ticket.ticket_no,
+                        "reason": validation_reason,
+                    }
+                    draft_result = await _try_create_reply_draft(
+                        session,
+                        ticket_id=ticket.id,
+                        user_id=user_id,
+                        email_id=email.id,
+                        parse_result=ai_parse,
+                    )
+                else:
+                    draft_result = await _try_create_reply_draft(
+                        session,
+                        ticket_id=ticket_id,
+                        user_id=user_id,
+                        email_id=email.id,
+                        parse_result=ai_parse,
+                    )
     else:
         ticket = await ensure_manual_review_ticket_from_parse_result(
             session,
@@ -492,6 +675,27 @@ async def reparse_email(
             parse_result=rule_parse,
         )
 
+    await log_system_event(
+        session,
+        event_type="email_processing",
+        module_name="emails",
+        correlation_id=email.processing_trace_id,
+        email_id=email.id,
+        ticket_id=ai_parse.ticket_id if isinstance(ai_parse, ParseResult) else None,
+        event_stage="parse",
+        event_status=email.parse_status,
+        target_type="email",
+        target_id=email.id,
+        message="Email parsing completed",
+        details={
+            "attachment_count": len(attachments),
+            "attachment_manual_count": sum(
+                1 for attachment in attachments if attachment.parse_status in {"needs_manual_review", "unsupported", "failed"}
+            ),
+            "manual_ticket_created": bool(manual_ticket),
+            "draft_created": bool(draft_result and draft_result.get("created", True)),
+        },
+    )
     return {
         "parse_result": serialize_parse_result(rule_parse),
         "applied": None,
