@@ -41,10 +41,19 @@ export default function NotificationsPage() {
     onError: (error) => message.error(apiErrorMessage(error)),
   });
 
-  const jumpToTarget = (record: NotificationEvent) => {
-    if (record.target_type === 'manual_review_task') navigate('/manual-review');
-    else if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') navigate('/tickets');
-    else if (record.target_type === 'reply') navigate('/replies');
+  const jumpToTarget = async (record: NotificationEvent) => {
+    try {
+      if (record.delivery_status === 'unread' || record.delivery_status === 'pending') {
+        await api.markNotificationRead(record.id);
+      }
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications-page'] });
+      if (record.target_type === 'manual_review_task') navigate(`/manual-review?task_id=${record.target_id}`);
+      else if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') navigate(`/tickets?ticket_id=${record.target_id}`);
+      else if (record.target_type === 'reply') navigate(`/replies?reply_id=${record.target_id}`);
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
   };
 
   const columns: ColumnsType<NotificationEvent> = [
@@ -60,7 +69,7 @@ export default function NotificationsPage() {
         <Space>
           <Button size="small" onClick={() => setSelected(record)}>详情</Button>
           <Button size="small" disabled={record.delivery_status === 'read'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
-          <Button size="small" onClick={() => jumpToTarget(record)}>跳转</Button>
+          <Button size="small" onClick={() => void jumpToTarget(record)}>跳转</Button>
         </Space>
       ),
     },

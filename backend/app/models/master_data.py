@@ -19,6 +19,8 @@ class SnAsset(TimestampMixin, Base):
         Index("idx_sn_assets_material_name", "material_name"),
         Index("idx_sn_assets_status", "asset_status"),
         Index("idx_sn_assets_source", "source_file_hash", "source_row_no"),
+        Index("idx_sn_assets_external", "source_system", "external_id"),
+        Index("idx_sn_assets_source_updated", "source_system", "source_updated_at"),
     )
 
     id: Mapped[int] = pk_column()
@@ -34,6 +36,9 @@ class SnAsset(TimestampMixin, Base):
     source_file_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     source_row_no: Mapped[int | None] = mapped_column()
     raw_data: Mapped[dict | None] = mapped_column(mysql.JSON)
+    source_system: Mapped[str] = mapped_column(String(30), nullable=False, server_default="local")
+    external_id: Mapped[str | None] = mapped_column(String(191))
+    source_updated_at: Mapped[datetime | None] = datetime_column()
     imported_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_sn_assets_imported_by"))
     imported_at: Mapped[datetime | None] = datetime_column()
 

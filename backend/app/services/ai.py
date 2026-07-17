@@ -30,6 +30,7 @@ field_confidences, evidence, confidence_reasons, manual_review_direction, origin
 置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
 如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
 不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
+不要抽取联系电话或手机号，不要输出 contact_phone 或 phone 字段。
 """.strip()
 
 AI_REPLY_SYSTEM_PROMPT = """
@@ -202,6 +203,54 @@ def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, i
         int(output_tokens) if isinstance(output_tokens, (int, float)) else None,
         int(total_tokens) if isinstance(total_tokens, (int, float)) else None,
     )
+
+
+def _ai_call_context(call_type: str) -> tuple[str, str]:
+    mapping = {
+        "classification_and_extract": ("邮件级 DeepSeek 结构化解析", "识别邮件意图并抽取业务字段"),
+        "field_extract": ("邮件级 DeepSeek 结构化解析", "抽取业务字段和明细"),
+        "generate_reply_draft": ("DeepSeek 回复草稿生成", "生成客户回复草稿"),
+        "attachment_text_parse": ("Qwen 文本类附件解析", "解析文本、表格或文档附件"),
+        "attachment_visual_parse": ("Qwen 图片/PDF 多模态解析", "解析图片或扫描 PDF 附件"),
+    }
+    return mapping.get(call_type, ("AI 调用", call_type))
+
+
+def _ai_problem_reason_and_action(status: str, error_code: str | None) -> tuple[str, str]:
+    code = (error_code or "").upper()
+    if status == "low_confidence":
+        return "模型返回结果置信度低，不能自动应用", "人工复核解析结果，必要时补充邮件正文或附件信息"
+    if "NOT_CONFIGURED" in code or "API_KEY" in code:
+        return "AI 服务配置缺失或不完整", "检查 .env 中对应 provider 的 key、model 和 base_url"
+    if "429" in code or "RATE" in code or "LIMIT" in code:
+        return "模型服务限流", "稍后重试，或降低并发和重试频率"
+    if "TIMEOUT" in code:
+        return "模型调用超时", "检查网络、附件大小和模型响应耗时后重试"
+    if "HTTP_5" in code:
+        return "模型服务端异常", "稍后重试，若持续失败则检查服务商状态"
+    if "INVALID_RESPONSE_JSON" in code or "OUTPUT_NOT_JSON" in code or "SCHEMA" in code:
+        return "模型输出不是有效的项目 JSON 结构", "查看 JSONL 详情，优化 prompt 和输出格式约束"
+    if status == "failed":
+        return f"AI 调用失败，错误码 {error_code or 'UNKNOWN'}", "查看 JSONL 详情和系统配置后重试"
+    return "AI 调用完成", "无需处理"
+
+
+def ai_log_diagnostics(ai_log: AiCallLog) -> dict[str, str]:
+    stage, action = _ai_call_context(ai_log.call_type)
+    reason, suggestion = _ai_problem_reason_and_action(ai_log.status, ai_log.error_code or ai_log.error_message)
+    provider = ai_log.provider_name or "unknown"
+    model = ai_log.model_name or "unknown"
+    if ai_log.status == "success":
+        description = f"模型 {provider}/{model} 在 {stage} 执行 {action} 已成功完成。"
+    else:
+        description = f"模型 {provider}/{model} 在 {stage} 执行 {action} 时失败：{reason}。建议：{suggestion}。"
+    return {
+        "ai_stage": stage,
+        "ai_action": action,
+        "problem_reason": reason,
+        "resolution_suggestion": suggestion,
+        "problem_description": description,
+    }
 
 
 async def persist_ai_log(
@@ -520,15 +569,15 @@ def _valid_email(value: str | None) -> bool:
     return bool(parsed and "@" in parsed and "." in parsed.rsplit("@", 1)[-1])
 
 
-def _valid_phone(value: str | None) -> bool:
-    if not value:
-        return True
-    digits = re.sub(r"\D", "", value)
-    return 6 <= len(digits) <= 20
+_PHONE_CANDIDATE_FIELDS = {"contact_phone", "phone"}
+
+
+def _remove_phone_candidate_fields(value: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): item for key, item in value.items() if str(key) not in _PHONE_CANDIDATE_FIELDS}
 
 
 def _intent_requires_business_fields(intent_type: str | None) -> bool:
-    return intent_type in {"new_repair", "customer_reply", "internal_forward", "unknown"}
+    return intent_type in {"new_repair", "customer_supplement"}
 
 
 async def _enrich_ai_quality(
@@ -540,6 +589,11 @@ async def _enrich_ai_quality(
     fields = dict(parsed.extracted_fields or {})
     missing = dict(parsed.missing_fields or {})
     conflicts = dict(parsed.conflict_fields or {})
+    field_confidences = dict(parsed.field_confidences or {})
+    fields = _remove_phone_candidate_fields(fields)
+    missing = _remove_phone_candidate_fields(missing)
+    conflicts = _remove_phone_candidate_fields(conflicts)
+    field_confidences = _remove_phone_candidate_fields(field_confidences)
     evidence = dict(parsed.evidence or {})
     confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
@@ -557,8 +611,6 @@ async def _enrich_ai_quality(
             missing.setdefault("contact_email", "缺少可用于回复客户的邮箱地址。")
         elif not _valid_email(str(fields.get("contact_email"))):
             conflicts.setdefault("contact_email", "联系邮箱格式异常。")
-        if fields.get("contact_phone") and not _valid_phone(str(fields.get("contact_phone"))):
-            conflicts.setdefault("contact_phone", "联系电话格式异常。")
         if not fields.get("problem_description"):
             missing.setdefault("problem_description", "缺少明确的故障描述。")
 
@@ -585,7 +637,6 @@ async def _enrich_ai_quality(
     evidence["confidence_basis"] = {
         "sn_valid": "sn" not in conflicts and "sn" not in missing,
         "email_valid": "contact_email" not in conflicts and "contact_email" not in missing,
-        "phone_valid": "contact_phone" not in conflicts,
         "intent_clear": parsed.intent_type not in {None, "", "unknown"},
         "has_missing_fields": bool(missing),
         "has_conflict_fields": bool(conflicts),
@@ -603,6 +654,7 @@ async def _enrich_ai_quality(
     parsed.extracted_fields = fields
     parsed.missing_fields = missing
     parsed.conflict_fields = conflicts
+    parsed.field_confidences = field_confidences
     parsed.evidence = evidence
     parsed.confidence_reasons = confidence_reasons
     parsed.manual_review_direction = evidence.get("manual_review_direction")

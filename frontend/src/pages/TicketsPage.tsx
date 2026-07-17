@@ -27,9 +27,12 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState, type Key } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
+import ContentPreviewButton from '../components/ContentPreviewButton';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
+import ParseResultSelectionModal from '../components/ParseResultSelectionModal';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import { useAuthStore } from '../stores/authStore';
@@ -47,17 +50,15 @@ import type {
   TicketLine,
 } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
-import { compactText, formatTime, numberText } from '../utils/format';
+import { compactText, formatFileSizeKb, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
 import { hasAnyRole } from '../utils/roles';
 import { ticketStatusLabels } from '../utils/status';
-
 type TicketFilters = {
   ticket_no?: string;
   customer?: string;
   contact?: string;
   sn?: string;
-  assigned_user_id?: string;
   status_code?: string;
   date_range?: unknown;
 };
@@ -96,7 +97,6 @@ type TicketItemForm = {
 
 const transitionOptions = [
   { to_status_code: 'manual_review', trigger_event: 'manual_review_required', label: '转人工复核' },
-  { to_status_code: 'ready_for_export', trigger_event: 'validation_passed', label: '标记可导出' },
   { to_status_code: 'need_customer_info', trigger_event: 'missing_fields_detected', label: '等待客户补充' },
   { to_status_code: 'closed', trigger_event: 'manual_close', label: '人工关闭' },
   { to_status_code: 'error', trigger_event: 'system_error', label: '标记异常' },
@@ -108,17 +108,22 @@ const lockOptions = [
 ];
 
 export default function TicketsPage() {
+  const [searchParams] = useSearchParams();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedTicketKeys, setSelectedTicketKeys] = useState<Key[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(() => {
+    const value = Number(searchParams.get('ticket_id'));
+    return Number.isInteger(value) && value > 0 ? value : null;
+  });
   const [transitionOpen, setTransitionOpen] = useState(false);
   const [fieldOpen, setFieldOpen] = useState(false);
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
+  const [partialParse, setPartialParse] = useState<ParseResult | null>(null);
   const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
-  const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor']);
+  const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor', 'operator']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
@@ -189,12 +194,15 @@ export default function TicketsPage() {
     onError: handleMutationError,
   });
   const applyParseMutation = useMutation({
-    mutationFn: ({ id, action }: { id: number; action: 'apply' | 'reject' }) => api.applyParseResult(id, {
+    mutationFn: ({ id, action, selected_fields, selected_item_indices }: { id: number; action: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => api.applyParseResult(id, {
       action,
+      selected_fields,
+      selected_item_indices,
       reason: action === 'reject' ? '前端人工拒绝解析候选' : '前端人工采纳解析候选',
     }),
     onSuccess: () => {
       message.success('解析候选状态已更新');
+      setPartialParse(null);
       invalidateDetail();
     },
     onError: handleMutationError,
@@ -216,11 +224,12 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
-  const confirmExportMutation = useMutation({
-    mutationFn: (id: number) => api.confirmTicketExport(id),
+  const validateExportMutation = useMutation({
+    mutationFn: (id: number) => api.validateTicketExport(id),
     onSuccess: () => {
-      message.success('导出完成，工单已结单');
+      message.success('完整安全校验已完成');
       invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
     },
     onError: handleMutationError,
   });
@@ -279,9 +288,6 @@ export default function TicketsPage() {
           </Form.Item>
           <Form.Item name="sn">
             <Input allowClear placeholder="SN" />
-          </Form.Item>
-          <Form.Item name="assigned_user_id">
-            <Input allowClear type="number" placeholder="处理人 ID" />
           </Form.Item>
           <Form.Item name="status_code">
             <Select
@@ -353,22 +359,20 @@ export default function TicketsPage() {
                 SN 校验
               </Button>
               <Button
+                type="primary"
+                icon={<CheckCircleOutlined />}
+                loading={validateExportMutation.isPending}
+                onClick={() => confirmAction('确认执行完整可导出安全校验？', () => validateExportMutation.mutate(detailQuery.data.ticket.id))}
+              >
+                完整安全校验
+              </Button>
+              <Button
                 icon={<MailOutlined />}
                 loading={draftReplyMutation.isPending}
                 onClick={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
               >
                 生成追问
               </Button>
-              {canTransitionTicket && detailQuery.data.ticket.current_status_code === 'ready_for_export' ? (
-                <Button
-                  type="primary"
-                  icon={<CheckCircleOutlined />}
-                  loading={confirmExportMutation.isPending}
-                  onClick={() => confirmAction('确认数据已经导出并关闭工单？', () => confirmExportMutation.mutate(detailQuery.data.ticket.id))}
-                >
-                  确认导出完成
-                </Button>
-              ) : null}
               {canTransitionTicket ? (
                 <Button type="primary" onClick={() => setTransitionOpen(true)}>
                   状态流转
@@ -382,6 +386,7 @@ export default function TicketsPage() {
           <TicketDetailView
             detail={detailQuery.data}
             onApplyParse={(id) => confirmAction('确认采纳该解析候选？', () => applyParseMutation.mutate({ id, action: 'apply' }))}
+            onPartialParse={setPartialParse}
             onRejectParse={(id) => confirmAction('确认拒绝该解析候选？', () => applyParseMutation.mutate({ id, action: 'reject' }))}
             onEditItem={openItemEditor}
           />
@@ -486,6 +491,13 @@ export default function TicketsPage() {
           </Form>
         </Modal>
       ) : null}
+      <ParseResultSelectionModal
+        open={Boolean(partialParse)}
+        parseResult={partialParse}
+        loading={applyParseMutation.isPending}
+        onCancel={() => setPartialParse(null)}
+        onConfirm={(selection) => partialParse && applyParseMutation.mutate({ id: partialParse.id, action: 'partial_apply', ...selection })}
+      />
     </div>
   );
 }
@@ -493,11 +505,13 @@ export default function TicketsPage() {
 function TicketDetailView({
   detail,
   onApplyParse,
+  onPartialParse,
   onRejectParse,
   onEditItem,
 }: {
   detail: TicketDetail;
   onApplyParse: (id: number) => void;
+  onPartialParse: (record: ParseResult) => void;
   onRejectParse: (id: number) => void;
   onEditItem: (item: TicketLine) => void;
 }) {
@@ -523,6 +537,9 @@ function TicketDetailView({
         <Descriptions.Item label="电话">{detail.ticket.contact_phone || '-'}</Descriptions.Item>
         <Descriptions.Item label="邮箱">{detail.ticket.contact_email || '-'}</Descriptions.Item>
         <Descriptions.Item label="报修日期">{detail.ticket.request_date || '-'}</Descriptions.Item>
+        <Descriptions.Item label="SN 核心校验"><StatusTag value={detail.ticket.sn_validation_status || 'pending'} /></Descriptions.Item>
+        <Descriptions.Item label="SQL Server"><StatusTag value={detail.ticket.relay_export_status || 'not_required'} /></Descriptions.Item>
+        <Descriptions.Item label="RMA"><StatusTag value={detail.ticket.rma_status || 'not_required'} /></Descriptions.Item>
         <Descriptions.Item label="寄送地址" span={3}>{detail.ticket.mailing_address || '-'}</Descriptions.Item>
         <Descriptions.Item label="问题描述" span={3}>{compactText(detail.ticket.problem_description, '-')}</Descriptions.Item>
       </Descriptions>
@@ -545,6 +562,22 @@ function TicketDetailView({
                   <Descriptions.Item label="邮件数量">{detail.thread?.email_count ?? '-'}</Descriptions.Item>
                   <Descriptions.Item label="合并置信度">{numberText(detail.thread?.merge_confidence)}</Descriptions.Item>
                 </Descriptions>
+              </div>
+            ),
+          },
+          {
+            key: 'safety',
+            label: '安全闸门',
+            children: (
+              <div className="two-column-grid">
+                <div>
+                  <Typography.Text strong>SN 校验证据</Typography.Text>
+                  <JsonBlock value={detail.ticket.sn_validation_snapshot} />
+                </div>
+                <div>
+                  <Typography.Text strong>完整安全快照</Typography.Text>
+                  <JsonBlock value={detail.ticket.safety_check_snapshot} />
+                </div>
               </div>
             ),
           },
@@ -608,12 +641,13 @@ function TicketDetailView({
                   { title: '创建时间', dataIndex: 'created_at', width: 160, render: formatTime },
                   {
                     title: '操作',
-                    width: 130,
+                      width: 190,
                     render: (_, record) => {
                       const handled = Boolean(record.apply_status && record.apply_status !== 'pending');
                       return (
                         <Space size={0}>
                           <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button>
+                          <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onPartialParse(record)}>部分采纳</Button>
                           <Button type="link" size="small" danger disabled={handled} onClick={() => onRejectParse(record.id)}>拒绝</Button>
                         </Space>
                       );
@@ -672,23 +706,27 @@ function TicketDetailView({
                   { title: '文件名', dataIndex: 'file_name', ellipsis: true },
                   { title: '邮件 ID', dataIndex: 'email_id', width: 90 },
                   { title: '类型', dataIndex: 'content_type', width: 160, render: (value?: string) => value || '-' },
-                  { title: '大小', dataIndex: 'file_size', width: 100, render: formatBytes },
+                  { title: '附件类型', dataIndex: 'is_inline', width: 110, render: (value?: boolean | null) => value ? '正文嵌入附件' : '普通附件' },
+                  { title: '发送时间', dataIndex: 'sent_at', width: 150, render: formatTime },
+                  { title: '大小', dataIndex: 'file_size_kb', width: 100, render: (_value, record) => formatFileSizeKb(record.file_size_kb, record.file_size) },
                   { title: '解析状态', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
                   { title: '解析错误', dataIndex: 'parse_error', ellipsis: true, render: (value?: string) => value || '-' },
                   {
-                    title: '下载',
-                    width: 90,
+                    title: '操作',
+                    width: 120,
                     render: (_, record) => (
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<DownloadOutlined />}
-                        disabled={!record.oss_object_id}
-                        loading={attachmentDownloadMutation.isPending}
-                        onClick={() => attachmentDownloadMutation.mutate(record.id)}
-                      >
-                        下载
-                      </Button>
+                      <Space size={0}>
+                        <ContentPreviewButton kind="attachment" id={record.id} disabled={!record.oss_object_id} />
+                        <Button
+                          type="link"
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          disabled={!record.oss_object_id}
+                          loading={attachmentDownloadMutation.isPending}
+                          onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                          title="下载"
+                        />
+                      </Space>
                     ),
                   },
                 ]}
@@ -771,6 +809,15 @@ function TicketDetailView({
                         <Typography.Text strong>最终内容</Typography.Text>
                         <pre className="json-block">{record.final_body || '-'}</pre>
                       </div>
+                      <div>
+                        <Typography.Text strong>模板与失败信息</Typography.Text>
+                        <JsonBlock value={{
+                          reply_template_version: record.reply_template_version,
+                          rma_template_version: record.rma_template_version,
+                          rma_pdf_oss_object_id: record.rma_pdf_oss_object_id,
+                          error_message: record.error_message,
+                        }} />
+                      </div>
                     </div>
                   ),
                 }}
@@ -843,11 +890,4 @@ function boolText(value?: boolean | null) {
   if (value === true) return '是';
   if (value === false) return '否';
   return '-';
-}
-
-function formatBytes(value?: number | null) {
-  if (!value) return '-';
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }

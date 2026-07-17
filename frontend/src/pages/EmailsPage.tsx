@@ -11,7 +11,7 @@ import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import type { Attachment, EmailIngestAttachment, EmailIngestRequest, EmailIngestResult, EmailItem, ParseResult } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
-import { compactText, formatTime, numberText } from '../utils/format';
+import { compactText, formatFileSizeKb, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
 import { rememberJob, waitForJob } from '../utils/jobs';
 
@@ -208,8 +208,10 @@ export default function EmailsPage() {
               style={{ width: 150 }}
               options={[
                 { value: 'new_repair', label: '新报修' },
-                { value: 'customer_reply', label: '客户补充' },
-                { value: 'internal_forward', label: '内部转发' },
+                { value: 'customer_supplement', label: '客户补充' },
+                { value: 'normal_reply', label: '普通回复/转发' },
+                { value: 'rma_sent', label: 'RMA 已发送' },
+                { value: 'device_received', label: '设备已收到' },
                 { value: 'irrelevant', label: '无关' },
                 { value: 'unknown', label: '未知' },
               ]}
@@ -286,7 +288,9 @@ export default function EmailsPage() {
                 columns={[
                   { title: '文件名', dataIndex: 'file_name', ellipsis: true },
                   { title: '类型', dataIndex: 'content_type', width: 150, render: (value?: string) => value || '-' },
-                  { title: '大小', dataIndex: 'file_size', width: 100, render: numberText },
+                  { title: '附件类型', dataIndex: 'is_inline', width: 110, render: (value?: boolean | null) => value ? '正文嵌入附件' : '普通附件' },
+                  { title: '发送时间', dataIndex: 'sent_at', width: 150, render: formatTime },
+                  { title: '大小', dataIndex: 'file_size_kb', width: 100, render: (_value, record) => formatFileSizeKb(record.file_size_kb, record.file_size) },
                   { title: '状态', dataIndex: 'parse_status', width: 100, render: (value: string) => <StatusTag value={value} /> },
                   {
                     title: '操作',
@@ -393,7 +397,7 @@ export default function EmailsPage() {
               columns={[
                 { title: '文件名', dataIndex: 'file_name', ellipsis: true },
                 { title: '类型', dataIndex: 'content_type', width: 160 },
-                { title: '大小', dataIndex: 'file_size', width: 100, render: numberText },
+                { title: '大小', dataIndex: 'file_size', width: 100, render: (value?: number | null) => formatFileSizeKb(undefined, value) },
                 {
                   title: '操作',
                   width: 80,

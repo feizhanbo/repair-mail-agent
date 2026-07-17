@@ -149,6 +149,7 @@ export type Attachment = {
   file_name: string;
   content_type?: string | null;
   file_size?: number | null;
+  file_size_kb?: number | null;
   file_hash?: string | null;
   is_inline?: boolean | null;
   content_id?: string | null;
@@ -156,6 +157,7 @@ export type Attachment = {
   extracted_text?: string | null;
   extracted_json?: JsonRecord | null;
   parse_error?: string | null;
+  sent_at?: string | null;
   created_at?: string;
 };
 
@@ -292,6 +294,17 @@ export type Ticket = {
   max_followup_count: number;
   confidence_score?: number | string | null;
   assigned_user_id?: number | null;
+  language_code?: string;
+  rma_required?: boolean;
+  relay_export_status?: string;
+  rma_status?: string;
+  sn_validation_status?: string;
+  sn_validation_snapshot?: JsonRecord | null;
+  sn_validation_hash?: string | null;
+  sn_validated_at?: string | null;
+  safety_check_snapshot?: JsonRecord | null;
+  safety_check_hash?: string | null;
+  safety_checked_at?: string | null;
   manual_locked: boolean;
   version: number;
   created_at?: string;
@@ -361,6 +374,10 @@ export type SnValidationResult = {
   result_status: string;
   result_message?: string | null;
   checked_by?: string | null;
+  ticket_version?: number;
+  input_hash?: string | null;
+  source_system?: string | null;
+  evidence_json?: JsonRecord | null;
   checked_at?: string | null;
 };
 
@@ -472,6 +489,10 @@ export type ReplyRecord = {
   draft_body?: string | null;
   final_body?: string | null;
   generate_source: string;
+  reply_template_version?: string | null;
+  rma_template_version?: string | null;
+  rma_pdf_oss_object_id?: number | null;
+  rma_pdf_data_snapshot?: JsonRecord | null;
   review_status: string;
   reviewed_by_user_id?: number | null;
   reviewed_at?: string | null;
@@ -491,6 +512,9 @@ export type SnAsset = {
   material_name?: string | null;
   sn: string;
   asset_status: string;
+  warranty_start_date?: string | null;
+  warranty_end_date?: string | null;
+  source_system?: string | null;
   imported_at?: string | null;
 };
 
@@ -522,6 +546,11 @@ export type AiLog = {
   latency_ms?: number | null;
   attempt_count?: number;
   error_code?: string | null;
+  ai_stage?: string | null;
+  ai_action?: string | null;
+  problem_reason?: string | null;
+  resolution_suggestion?: string | null;
+  problem_description?: string | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   total_tokens?: number | null;

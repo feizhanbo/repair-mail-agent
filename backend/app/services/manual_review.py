@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -13,6 +13,8 @@ from app.services.common import model_to_dict, paginate_scalars, utcnow
 from app.services.emails import reparse_email
 from app.services.replies import create_reply_draft
 from app.services.tickets import get_ticket, get_ticket_detail
+from app.services.ticket_safety import validate_and_mark_ready_for_export
+from app.services.notifications import resolve_notifications_for_target
 from app.services.workflow import transition_ticket
 
 TASK_FIELDS = (
@@ -57,6 +59,7 @@ async def list_tasks(
     assigned_user_id: int | None = None,
     current_user_id: int | None = None,
     scope: str | None = None,
+    category: str | None = None,
     created_start: date | None = None,
     created_end: date | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -65,6 +68,16 @@ async def list_tasks(
         statement = statement.where(ManualReviewTask.status == task_status)
     if task_type:
         statement = statement.where(ManualReviewTask.task_type == task_type)
+    if category == "rma":
+        statement = statement.where(
+            ManualReviewTask.task_type.like("rma_%")
+            | ManualReviewTask.task_type.in_(["warranty_status_unknown", "st_policy_expired"])
+        )
+    elif category == "sql":
+        statement = statement.where(
+            ManualReviewTask.task_type.like("sql_%")
+            | ManualReviewTask.task_type.like("relay_%")
+        )
     if priority:
         statement = statement.where(ManualReviewTask.priority == priority)
     if assigned_user_id:
@@ -72,16 +85,13 @@ async def list_tasks(
     if created_start:
         statement = statement.where(ManualReviewTask.created_at >= created_start)
     if created_end:
-        statement = statement.where(ManualReviewTask.created_at <= created_end)
+        end_exclusive = datetime.combine(created_end + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        statement = statement.where(ManualReviewTask.created_at < end_exclusive)
     if scope == "mine" and current_user_id:
         statement = statement.where(
             (ManualReviewTask.assigned_user_id == current_user_id)
             | (ManualReviewTask.claimed_by_user_id == current_user_id)
         )
-    elif scope == "unassigned":
-        statement = statement.where(ManualReviewTask.assigned_user_id.is_(None), ManualReviewTask.claimed_by_user_id.is_(None))
-    elif scope == "claimed" and current_user_id:
-        statement = statement.where(ManualReviewTask.claimed_by_user_id == current_user_id)
     statement = statement.order_by(ManualReviewTask.created_at.desc(), ManualReviewTask.id.desc())
     tasks, total = await paginate_scalars(session, statement, page, page_size)
     return [serialize_task(task) for task in tasks], total
@@ -199,23 +209,18 @@ async def resolve_task(
     if task.status in {"resolved", "closed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_ALREADY_RESOLVED")
     ticket = await get_ticket(session, task.ticket_id)
-    task.status = "resolved"
-    task.resolved_by_user_id = user_id
-    task.resolved_at = utcnow()
-    task.resolution = resolution
-
     followup_result: dict[str, Any] | None = None
     reparse_result: dict[str, Any] | None = None
     if next_action == "transition_ready_for_export":
-        if ticket.current_status_code == "manual_review":
-            await transition_ticket(
-                session,
-                ticket=ticket,
-                to_status_code="ready_for_export",
-                trigger_event="manual_resolved",
-                user_id=user_id,
-                reason=resolution,
-            )
+        safety_result = await validate_and_mark_ready_for_export(session, ticket_id=ticket.id, user_id=user_id)
+        if safety_result["status"] == "safety_failed":
+            return {
+                "task": serialize_task(task),
+                "ticket": await get_ticket_detail(session, ticket.id),
+                "safety_result": safety_result,
+                "followup_result": None,
+                "reparse_result": None,
+            }
     elif next_action == "wait_customer_info":
         if ticket.current_status_code == "manual_review":
             await transition_ticket(
@@ -261,6 +266,11 @@ async def resolve_task(
     elif next_action != "keep_manual_review":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_NEXT_ACTION_INVALID")
 
+    task.status = "resolved"
+    task.resolved_by_user_id = user_id
+    task.resolved_at = utcnow()
+    task.resolution = resolution
+
     await log_operation(
         session,
         user_id=user_id,
@@ -279,6 +289,11 @@ async def resolve_task(
                 else None
             ),
         },
+    )
+    await resolve_notifications_for_target(
+        session,
+        target_type="manual_review_task",
+        target_id=task.id,
     )
     return {
         "task": serialize_task(task),

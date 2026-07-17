@@ -1,6 +1,6 @@
-import { EyeOutlined } from '@ant-design/icons';
+import { EyeOutlined, FullscreenOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Button, Empty, Modal, Spin, Typography } from 'antd';
+import { Button, Empty, Modal, Space, Spin, Typography } from 'antd';
 import { useState } from 'react';
 import { api } from '../api/client';
 import type { ContentPreview } from '../types/api';
@@ -13,22 +13,41 @@ type Props = {
 };
 
 function PreviewContent({ preview }: { preview: ContentPreview }) {
+  const [zoom, setZoom] = useState(1);
+  const controls = (
+    <Space size={4} style={{ marginBottom: 8 }}>
+      <Button size="small" icon={<ZoomOutOutlined />} onClick={() => setZoom((value) => Math.max(0.25, Number((value - 0.25).toFixed(2))))} title="缩小" />
+      <Button size="small" icon={<FullscreenOutlined />} onClick={() => setZoom(1)} title="适应窗口" />
+      <Button size="small" icon={<ZoomInOutlined />} onClick={() => setZoom((value) => Math.min(3, Number((value + 0.25).toFixed(2))))} title="放大" />
+      <Typography.Text type="secondary">{Math.round(zoom * 100)}%</Typography.Text>
+    </Space>
+  );
   if (preview.mode === 'image' && preview.url) {
-    return <img src={preview.url} alt={preview.file_name || '附件预览'} style={{ display: 'block', maxHeight: '65vh', maxWidth: '100%', margin: '0 auto' }} />;
+    return (
+      <div>
+        {controls}
+        <div style={{ maxHeight: '65vh', overflow: 'auto', textAlign: 'center' }}>
+          <img src={preview.url} alt={preview.file_name || '附件预览'} style={{ display: 'inline-block', maxWidth: zoom === 1 ? '100%' : 'none', width: `${zoom * 100}%` }} />
+        </div>
+      </div>
+    );
   }
   if (preview.mode === 'pdf' && preview.url) {
     return <iframe title={preview.file_name || 'PDF 预览'} src={preview.url} sandbox="allow-same-origin allow-downloads" style={{ width: '100%', height: '65vh', border: 0 }} />;
   }
   if (preview.mode === 'pdf_pages') {
     return (
-      <div style={{ maxHeight: '68vh', overflow: 'auto', background: '#f3f4f6', padding: 12 }}>
-        {(preview.pages || []).map((page, index) => (
-          <figure key={index} style={{ margin: '0 0 12px' }}>
-            <img src={page} alt={`PDF 第 ${index + 1} 页`} style={{ display: 'block', width: '100%', background: '#fff' }} />
-            <figcaption style={{ paddingTop: 4, textAlign: 'center' }}>第 {index + 1} 页</figcaption>
-          </figure>
-        ))}
-        {preview.truncated ? <Typography.Text type="secondary">预览前 {preview.pages?.length || 0} 页，共 {preview.page_count} 页</Typography.Text> : null}
+      <div>
+        {controls}
+        <div style={{ maxHeight: '68vh', overflow: 'auto', background: '#f3f4f6', padding: 12 }}>
+          {(preview.pages || []).map((page, index) => (
+            <figure key={index} style={{ margin: '0 0 12px', textAlign: 'center' }}>
+              <img src={page} alt={`PDF 第 ${index + 1} 页`} style={{ display: 'inline-block', width: `${zoom * 100}%`, maxWidth: zoom === 1 ? '100%' : 'none', background: '#fff' }} />
+              <figcaption style={{ paddingTop: 4, textAlign: 'center' }}>第 {index + 1} 页</figcaption>
+            </figure>
+          ))}
+          {preview.truncated ? <Typography.Text type="secondary">预览前 {preview.pages?.length || 0} 页，共 {preview.page_count} 页</Typography.Text> : null}
+        </div>
       </div>
     );
   }

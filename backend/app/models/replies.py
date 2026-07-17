@@ -35,6 +35,7 @@ class ReplyRecord(TimestampMixin, Base):
         Index("idx_reply_records_status", "send_status"),
         Index("idx_reply_records_related_email", "related_email_id"),
         Index("idx_reply_records_outgoing_email", "outgoing_email_id"),
+        Index("idx_reply_records_rma_pdf", "rma_pdf_oss_object_id"),
         Index("idx_reply_records_ticket_round", "ticket_id", "followup_round"),
         Index("idx_reply_records_review_status", "review_status", "created_at"),
     )
@@ -54,6 +55,10 @@ class ReplyRecord(TimestampMixin, Base):
     final_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
     generate_source: Mapped[str] = mapped_column(String(30), nullable=False, server_default="system")
     ai_call_log_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("ai_call_logs.id", name="fk_reply_records_ai_log"))
+    rma_pdf_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_reply_records_rma_pdf"))
+    reply_template_version: Mapped[str | None] = mapped_column(String(100))
+    rma_template_version: Mapped[str | None] = mapped_column(String(100))
+    rma_pdf_data_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     review_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     reviewed_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_reply_records_reviewer"))
     reviewed_at: Mapped[datetime | None] = datetime_column()

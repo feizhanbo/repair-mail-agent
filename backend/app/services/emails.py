@@ -26,7 +26,39 @@ from app.services.parser import (
     normalize_email_body,
 )
 from app.services.replies import create_reply_draft
-from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result, validate_ticket_sn
+from app.services.ticket_safety import validate_and_mark_ready_for_export
+from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result
+
+
+def attachment_file_size_kb(file_size: int | None) -> int | None:
+    if file_size is None:
+        return None
+    return max(1, (int(file_size) + 1023) // 1024)
+
+
+def serialize_attachment(attachment: EmailAttachment, email: Email | None = None) -> dict[str, Any]:
+    data = model_to_dict(
+        attachment,
+        (
+            "id",
+            "email_id",
+            "oss_object_id",
+            "file_name",
+            "content_type",
+            "file_size",
+            "file_hash",
+            "is_inline",
+            "content_id",
+            "parse_status",
+            "extracted_text",
+            "extracted_json",
+            "parse_error",
+            "created_at",
+        ),
+    )
+    data["file_size_kb"] = attachment_file_size_kb(attachment.file_size)
+    data["sent_at"] = to_plain((email.sent_at or email.received_at) if email else None)
+    return data
 
 
 async def list_emails(
@@ -137,28 +169,7 @@ async def get_email_detail(session: AsyncSession, email_id: int) -> dict[str, An
     ).scalars().all()
     return {
         "email": serialize_email(email),
-        "attachments": [
-            model_to_dict(
-                attachment,
-                (
-                    "id",
-                    "email_id",
-                    "oss_object_id",
-                    "file_name",
-                    "content_type",
-                    "file_size",
-                    "file_hash",
-                    "is_inline",
-                    "content_id",
-                    "parse_status",
-                    "extracted_text",
-                    "extracted_json",
-                    "parse_error",
-                    "created_at",
-                ),
-            )
-            for attachment in attachments
-        ],
+        "attachments": [serialize_attachment(attachment, email) for attachment in attachments],
         "parse_results": [serialize_parse_result(parse_result) for parse_result in parse_results],
     }
 
@@ -591,6 +602,22 @@ async def reparse_email(
         elif ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse, list(attachments)):
             ai_parse.apply_status = "auto_skipped"
             email.parse_status = "skipped"
+        elif ai_parse.intent_type == "device_received" and thread_ticket is None:
+            # A receipt reply without its original repair thread is evidence only.
+            # It must not manufacture customer provenance or a new RMA ticket.
+            ai_parse.apply_status = "deferred_event"
+            ai_parse.accepted = False
+            email.parse_status = "parsed"
+            await log_operation(
+                session,
+                user_id=user_id,
+                operation_type="device_received_orphaned",
+                target_type="email",
+                target_id=email.id,
+                email_id=email.id,
+                description="收货事件未命中原始报修工单，仅保留延迟事件证据。",
+                after_data={"references_header": email.references_header, "message_id": email.message_id},
+            )
         elif _parse_requires_manual(ai_parse, list(attachments)):
             ticket = await ensure_manual_review_ticket_from_parse_result(
                 session,
@@ -623,12 +650,12 @@ async def reparse_email(
                 else ai_parse.ticket_id
             )
             if ticket_id is not None:
-                validated = await validate_ticket_sn(session, ticket_id=ticket_id, user_id=None)
-                ai_applied = validated
-                validated_ticket = validated.get("ticket") if isinstance(validated, dict) else None
-                validated_status = validated_ticket.get("current_status_code") if isinstance(validated_ticket, dict) else None
-                if validated_status != "ready_for_export":
-                    validation_reason = "SN 校验未全部通过，AI 结果不得自动采纳。"
+                validated = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=None)
+                ai_applied = {**ai_applied, "export_validation": validated}
+                if validated.get("status") != "ready_for_export":
+                    validation_reason = (
+                        "SN 核心校验或完整安全校验未通过，AI 结果已保留但不得进入可导出状态。"
+                    )
                     ticket = await ensure_manual_review_ticket_from_parse_result(
                         session,
                         email=email,
@@ -657,6 +684,20 @@ async def reparse_email(
                         email_id=email.id,
                         parse_result=ai_parse,
                     )
+    elif rule_parse.intent_type == "device_received" and thread_ticket is None:
+        rule_parse.apply_status = "deferred_event"
+        rule_parse.accepted = False
+        email.parse_status = "parsed"
+        await log_operation(
+            session,
+            user_id=user_id,
+            operation_type="device_received_orphaned",
+            target_type="email",
+            target_id=email.id,
+            email_id=email.id,
+            description="收货事件未命中原始报修工单，仅保留延迟事件证据。",
+            after_data={"references_header": email.references_header, "message_id": email.message_id},
+        )
     else:
         ticket = await ensure_manual_review_ticket_from_parse_result(
             session,

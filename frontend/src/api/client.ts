@@ -72,10 +72,7 @@ function friendlyServerMessage(status?: number, code?: string): string {
     JOB_POLL_TIMEOUT: '后台任务处理超时，请在邮件详情中查看最新状态',
     ATTACHMENT_CONTENT_INVALID: '附件内容无法读取，请重新选择文件',
     MANUAL_TASK_NOT_FOUND: '复核任务不存在或已被处理',
-    MANUAL_TASK_NOT_CLAIMABLE: '当前任务不能领取',
-    MANUAL_TASK_NOT_RELEASABLE: '当前任务不能释放',
-    MANUAL_TASK_ASSIGNED_TO_OTHER: '任务已分配给其他处理人',
-    MANUAL_TASK_CLAIMED_BY_OTHER: '任务已被其他处理人领取',
+    TASK_ASSIGNMENT_DISABLED: '当前采用系统自动负责人，不再支持领取、释放或人工分配',
     MANUAL_TASK_ALREADY_RESOLVED: '任务已完成，请刷新列表',
     MANUAL_TASK_NEXT_ACTION_INVALID: '请选择有效的后续动作',
     REPLY_NOT_FOUND: '回复记录不存在或已被删除',
@@ -204,17 +201,14 @@ export const api = {
   patchTicketFields: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/fields`, body),
   patchTicketItems: (id: number, body: Record<string, unknown>) => patchData<TicketDetail>(`/tickets/${id}/items`, body),
   transitionTicket: (id: number, body: Record<string, unknown>) => postData<TicketDetail>(`/tickets/${id}/transition`, body),
-  confirmTicketExport: (id: number, reason?: string) => postData<TicketDetail>(`/tickets/${id}/confirm-export`, { reason }),
   validateTicketSn: (id: number) => postData<TicketDetail>(`/tickets/${id}/validate-sn`),
-  applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject' }) => {
+  validateTicketExport: (id: number) => postData(`/tickets/${id}/validate-export`),
+  applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => {
     const payload = typeof body === 'string' ? { reason: body } : body;
     return postData<TicketDetail>(`/parse-results/${id}/apply`, payload ?? { action: 'apply' });
   },
   manualTasks: (params: Record<string, unknown>) => getData<PageData<ManualTask>>('/manual-review/tasks', { params }),
   manualTaskDetail: (id: number) => getData<ManualTaskDetail>(`/manual-review/tasks/${id}`),
-  claimTask: (id: number) => postData<ManualTask>(`/manual-review/tasks/${id}/claim`),
-  releaseTask: (id: number) => postData<ManualTask>(`/manual-review/tasks/${id}/release`),
-  assignTask: (id: number, body: { assigned_user_id?: number | null; reason?: string }) => postData<ManualTask>(`/manual-review/tasks/${id}/assign`, body),
   resolveTask: (id: number, body: Record<string, unknown>) => postData(`/manual-review/tasks/${id}/resolve`, body),
   reparseTask: (id: number, body: Record<string, unknown>) => postData<ManualTaskReparseResponse>(`/manual-review/tasks/${id}/reparse`, body),
   replies: (params: Record<string, unknown>) => getData<PageData<ReplyRecord>>('/replies', { params }),

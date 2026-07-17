@@ -26,9 +26,9 @@ function eventIcon(eventType: string) {
 }
 
 function targetPath(record: NotificationEvent) {
-  if (record.target_type === 'manual_review_task') return '/manual-review';
-  if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') return '/tickets';
-  if (record.target_type === 'reply') return '/replies';
+  if (record.target_type === 'manual_review_task') return `/manual-review?task_id=${record.target_id}`;
+  if (record.target_type === 'repair_ticket' || record.target_type === 'ticket') return `/tickets?ticket_id=${record.target_id}`;
+  if (record.target_type === 'reply') return `/replies?reply_id=${record.target_id}`;
   return '/notifications';
 }
 
@@ -51,7 +51,19 @@ export default function NotificationCenterPage() {
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const list = query.data?.items ?? [];
-  const unread = list.filter((item) => item.delivery_status !== 'read').length;
+  const unread = list.filter((item) => item.delivery_status === 'unread' || item.delivery_status === 'pending').length;
+  const jumpToTarget = async (item: NotificationEvent) => {
+    try {
+      if (item.delivery_status === 'unread' || item.delivery_status === 'pending') {
+        await api.markNotificationRead(item.id);
+      }
+      void queryClient.invalidateQueries({ queryKey: ['notification-center'] });
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      navigate(targetPath(item));
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
+  };
 
   return (
     <div className="page-stack">
@@ -81,7 +93,7 @@ export default function NotificationCenterPage() {
               <List.Item
                 className={item.delivery_status === 'read' ? 'notification-row is-read' : 'notification-row'}
                 actions={[
-                  <Button key="detail" type="link" onClick={() => navigate(targetPath(item))}>跳转</Button>,
+                  <Button key="detail" type="link" onClick={() => void jumpToTarget(item)}>跳转</Button>,
                   <Button
                     key="read"
                     type="link"

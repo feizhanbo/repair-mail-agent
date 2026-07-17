@@ -20,3 +20,13 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Local diagnostics and generated verification artifacts
+backend/reset_admin.py
+backend/start_server.py
+backend/test_db.py
+test_login.py
+test_proxy.py
+tunnel.py
+tmp/
+output/pdf/
+

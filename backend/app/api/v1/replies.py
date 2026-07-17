@@ -73,7 +73,7 @@ async def update_reply(
 async def approve_send(
     reply_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await reply_service.approve_reply(session, reply_id=reply_id, user_id=current_user.id)
     await session.commit()
@@ -84,7 +84,7 @@ async def approve_send(
 async def approve_send_job(
     reply_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     reply = await reply_service.approve_reply_for_async(session, reply_id=reply_id, user_id=current_user.id)
     if reply.send_status == "sent":
@@ -107,7 +107,7 @@ async def reject_reply(
     reply_id: int,
     payload: ReplyRejectRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     result = await reply_service.reject_reply(session, reply_id=reply_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()

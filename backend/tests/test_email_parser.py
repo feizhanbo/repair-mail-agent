@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from app.models import Email
+from app.services.eml import payload_from_eml_bytes
 from app.services.parser import (
     classify_email,
     extract_fields,
@@ -35,10 +40,10 @@ def test_reply_references_drive_classification_while_history_supplies_sn() -> No
     intent, confidence, _reason = classify_email(email, email.latest_reply_segment or "")
     extracted = extract_fields(email)
 
-    assert intent == "customer_reply"
+    assert intent == "normal_reply"
     assert confidence == 0.85
     assert extracted["items"][0]["sn"] == "15CN2240103920"
-    assert extracted["fields"]["problem_description"] == "收到，RMA表已更新。"
+    assert extracted["fields"]["problem_description"] == "高频源损坏"
 
 
 def test_rebuilding_conversation_keeps_history_after_latest_reply_was_saved() -> None:
@@ -58,3 +63,45 @@ def test_rebuilding_conversation_keeps_history_after_latest_reply_was_saved() ->
 
     assert email.latest_reply_segment == "收到"
     assert extracted["items"][0]["sn"] == "15CN2240103920"
+
+def test_rule_parser_does_not_extract_phone_candidate_fields() -> None:
+    email = Email(
+        mailbox_account="manual-eml",
+        message_id="<phone@example.com>",
+        from_address="customer@example.com",
+        subject="RMA SN: 15CN2240103920",
+        clean_body="故障：无法开机\n联系电话：13800138000\nSN: 15CN2240103920",
+    )
+
+    extracted = extract_fields(email)
+
+    assert "contact_phone" not in extracted["fields"]
+    assert "contact_phone" not in extracted["missing_fields"]
+    assert "contact_phone" not in extracted["field_confidences"]
+
+
+GIVEN_REPLY_EML = Path(r"D:\refile\testdata\test\回复_ RMA2026070903通富微电子股份有限公司.eml")
+
+
+@pytest.mark.skipif(not GIVEN_REPLY_EML.is_file(), reason="user-provided EML fixture is not available")
+def test_given_reply_eml_recovers_thread_history_without_creating_a_new_repair() -> None:
+    payload = payload_from_eml_bytes(GIVEN_REPLY_EML.read_bytes(), mailbox_account="offline-test")
+    email = Email(
+        mailbox_account=payload.mailbox_account,
+        message_id=payload.message_id,
+        references_header=payload.references_header,
+        in_reply_to=payload.in_reply_to,
+        from_address=payload.from_address,
+        subject=payload.subject,
+        text_body=payload.text_body,
+        clean_body=normalize_email_body(payload.text_body),
+    )
+    email.latest_reply_segment = extract_latest_reply_segment(email.clean_body)
+
+    intent, _, _ = classify_email(email, email.latest_reply_segment)
+    extracted = extract_fields(email)
+
+    assert payload.references_header and "<4675f26c4ff842268b19536529c4e154@tfme.com>" in payload.references_header
+    assert intent == "device_received"
+    assert "M81231701100057" in {item["sn"] for item in extracted["items"]}
+    assert "测试值异常" in extracted["fields"]["problem_description"]

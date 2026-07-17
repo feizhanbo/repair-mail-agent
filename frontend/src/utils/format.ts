@@ -17,3 +17,15 @@ export function numberText(value?: number | string | null) {
   }
   return String(value);
 }
+
+export function fileSizeKbFromBytes(value?: number | null) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  return Math.max(1, Math.ceil(value / 1024));
+}
+
+export function formatFileSizeKb(fileSizeKb?: number | null, fileSizeBytes?: number | null) {
+  const value = fileSizeKb ?? fileSizeKbFromBytes(fileSizeBytes);
+  return value === undefined || value === null ? '-' : `${value} KB`;
+}

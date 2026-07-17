@@ -57,9 +57,9 @@ class RuleAnalysisResult:
             "conflict_field_keys": sorted(self.conflict_fields),
         }
 
-SN_PATTERN = re.compile(r"(?:SN|S/N|序列号|设备编号)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,})", re.IGNORECASE)
+SN_PATTERN = re.compile(r"(?:SN(?:号|號)?|S/N|序列号|设备编号)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,})", re.IGNORECASE)
+LONG_SN_PATTERN = re.compile(r"\b[A-Z0-9]{12,}\b", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-PHONE_PATTERN = re.compile(r"(?:电话|手机|联系方式|联系电话)\s*[:：]?\s*([0-9+\-()\s]{6,})")
 HISTORY_MARKER = re.compile(
     r"^(?:-{2,}\s*Original Message\s*-{2,}|原始邮件|发件人[：:]|From\s*:|On .+ wrote:)",
     re.IGNORECASE,
@@ -68,6 +68,20 @@ SIGNATURE_MARKER = re.compile(
     r"^(?:Best Regards!?|Thanks\s*&\s*Best Regards|Sent from my|此致|祝好)[\s!！。]*$",
     re.IGNORECASE,
 )
+
+
+def _problem_text_from_line(line: str) -> str:
+    """Remove transport labels from a fault-evidence line without losing its text."""
+    value = line.strip()
+    value = SN_PATTERN.sub("", value, count=1).strip(" -—:：;,，")
+    value = re.sub(
+        r"^(?:故障(?:描述|现象)?|问题(?:描述)?|failure|fault)\s*[:：-]?\s*",
+        "",
+        value,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    return value or line.strip()
 
 
 def html_to_text(html: str | None) -> str | None:
@@ -99,16 +113,22 @@ def clean_email_body(email: Email) -> str:
 def classify_email(email: Email, body: str) -> tuple[str, float, str]:
     subject = email.subject or ""
     text = f"{subject}\n{body}".lower()
+    receipt_terms = ("我们收到货了", "请入库", "已收到设备", "设备已收到", "received the unit", "received the device")
+    if any(keyword in text for keyword in receipt_terms):
+        return "device_received", 0.95, "最新回复确认维修设备已经收到。"
+    if email.mail_direction == "outbound" and "rma" in text:
+        return "rma_sent", 0.9, "系统外发的 RMA 邮件。"
     if email.in_reply_to or email.references_header:
-        return "customer_reply", 0.85, "存在 In-Reply-To 或 References，按回复链邮件处理。"
+        supplement_terms = ("补充", "sn", "s/n", "序列号", "故障", "地址", "电话", "fault", "serial", "address")
+        if any(term in text for term in supplement_terms):
+            return "customer_supplement", 0.88, "回复链包含新增报修信息。"
+        return "normal_reply", 0.85, "存在 In-Reply-To 或 References，按普通回复处理。"
     if any(keyword in text for keyword in ("退订", "unsubscribe", "广告", "newsletter")):
         return "irrelevant", 0.9, "命中无关邮件关键词。"
     if any(keyword in text for keyword in ("fwd:", "fw:", "转发")):
-        return "internal_forward", 0.65, "主题疑似内部转发。"
+        return "normal_reply", 0.65, "主题疑似转发，按不触发 RMA 的普通链路邮件处理。"
     if any(keyword in text for keyword in ("报修", "维修", "故障", "repair", "rma", "sn")):
         return "new_repair", 0.8, "命中报修关键词。"
-    if any(keyword in text for keyword in ("收到", "已收到", "签收", "received", "到货", "收货")):
-        return "customer_receipt_confirmed", 0.9, "客户确认收到维修后设备。"
     return "unknown", 0.45, "未命中明确分类规则。"
 
 
@@ -117,18 +137,24 @@ def extract_fields(email: Email) -> dict[str, Any]:
     conversation = normalize_email_body(email.clean_body or email.text_body or body)
     subject = email.subject or ""
     combined = f"{subject}\n{body}\n{conversation}"
-    sns = list(dict.fromkeys(match.group(1).strip().upper() for match in SN_PATTERN.finditer(combined)))
+    labeled_sns = [match.group(1).strip().upper() for match in SN_PATTERN.finditer(combined)]
+    long_sns = [
+        match.group(0).strip().upper()
+        for match in LONG_SN_PATTERN.finditer(combined)
+        if not match.group(0).upper().startswith(("RMA", "HTTP", "MESSAGE"))
+        and sum(char.isdigit() for char in match.group(0)) >= 6
+        and any(char.isalpha() for char in match.group(0))
+    ]
+    sns = list(dict.fromkeys([*labeled_sns, *long_sns]))
     contact_emails = list(dict.fromkeys(EMAIL_PATTERN.findall(combined)))
-    phone_match = PHONE_PATTERN.search(combined)
     problem_lines = [
-        line.strip()
-        for line in body.splitlines()
-        if any(keyword in line for keyword in ("故障", "问题", "现象", "不能", "无法", "异常", "损坏"))
+        _problem_text_from_line(line)
+        for line in combined.splitlines()
+        if any(keyword in line.lower() for keyword in ("故障", "问题", "现象", "不能", "无法", "异常", "损坏", "failure", "fault"))
     ]
     problem_description = "\n".join(problem_lines[:3]) or (body[:500] if body else None)
     fields: dict[str, Any] = {
         "contact_email": contact_emails[0] if contact_emails else None,
-        "contact_phone": phone_match.group(1).strip() if phone_match else None,
         "problem_description": problem_description,
     }
     items = [{"line_no": index + 1, "sn": sn, "failure_description": problem_description} for index, sn in enumerate(sns)]
@@ -171,6 +197,8 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     body = clean_email_body(email)
     intent_type, classification_confidence, classification_reason = classify_email(email, body)
     extracted = extract_fields(email)
+    if intent_type not in {"new_repair", "customer_supplement"}:
+        extracted["missing_fields"] = {}
     return RuleAnalysisResult(
         intent_type=intent_type,
         classification_confidence=classification_confidence,

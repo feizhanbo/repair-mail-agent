@@ -37,7 +37,7 @@ async def _count(session: AsyncSession, statement) -> int:
 @router.get("/summary")
 async def statistics_summary(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     period: Annotated[str, Query(pattern="^(week|month|year)$")] = "week",
     start_date: date | None = None,
     end_date: date | None = None,

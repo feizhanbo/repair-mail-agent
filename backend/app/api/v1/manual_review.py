@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
@@ -25,7 +25,8 @@ async def list_tasks(
     task_type: str | None = None,
     priority: str | None = None,
     assigned_user_id: int | None = None,
-    scope: str | None = Query(None, pattern="^(mine|unassigned|claimed|all)$"),
+    scope: str | None = Query(None, pattern="^(mine|all)$"),
+    category: str | None = Query(None, pattern="^(rma|sql)$"),
     created_start: date | None = None,
     created_end: date | None = None,
 ) -> dict:
@@ -41,6 +42,7 @@ async def list_tasks(
         assigned_user_id=assigned_user_id,
         current_user_id=current_user.id,
         scope=scope,
+        category=category,
         created_start=created_start,
         created_end=created_end,
     )
@@ -57,44 +59,35 @@ async def get_task(
     return ok(await manual_review_service.get_task_detail(session, task_id))
 
 
-@router.post("/tasks/{task_id}/claim")
+@router.post("/tasks/{task_id}/claim", deprecated=True)
 async def claim_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
-    result = await manual_review_service.claim_task(session, task_id=task_id, user_id=current_user.id)
-    await session.commit()
-    return ok(result, "manual task claimed")
+    del task_id, session, current_user
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
 
 
-@router.post("/tasks/{task_id}/assign")
+@router.post("/tasks/{task_id}/assign", deprecated=True)
 async def assign_task(
     task_id: int,
     payload: ManualTaskAssignRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
-    result = await manual_review_service.assign_task(
-        session,
-        task_id=task_id,
-        assigned_user_id=payload.assigned_user_id,
-        operator_user_id=current_user.id,
-        reason=payload.reason,
-    )
-    await session.commit()
-    return ok(result, "manual task assigned")
+    del task_id, payload, session, current_user
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
 
 
-@router.post("/tasks/{task_id}/release")
+@router.post("/tasks/{task_id}/release", deprecated=True)
 async def release_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
-    result = await manual_review_service.release_task(session, task_id=task_id, user_id=current_user.id)
-    await session.commit()
-    return ok(result, "manual task released")
+    del task_id, session, current_user
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
 
 
 @router.post("/tasks/{task_id}/resolve")

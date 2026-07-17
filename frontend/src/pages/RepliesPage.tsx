@@ -2,7 +2,8 @@ import { PlusOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import { waitForJob } from '../utils/jobs';
 import JsonBlock from '../components/JsonBlock';
@@ -27,6 +28,7 @@ type DraftForm = {
 };
 
 export default function RepliesPage() {
+  const [searchParams] = useSearchParams();
   const [filters, setFilters] = useState<ReplyFilters>({});
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<ReplyRecord | null>(null);
@@ -34,7 +36,7 @@ export default function RepliesPage() {
   const queryClient = useQueryClient();
   const currentRoles = useAuthStore((state) => state.user?.roles);
   const canDraftReplies = hasAnyRole(currentRoles, ['admin', 'supervisor', 'operator']);
-  const canReviewReplies = hasAnyRole(currentRoles, ['admin', 'supervisor']);
+  const canReviewReplies = hasAnyRole(currentRoles, ['admin', 'supervisor', 'operator']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
@@ -49,6 +51,13 @@ export default function RepliesPage() {
     queryKey: ['replies', filters, page],
     queryFn: () => api.replies({ ...filters, page, page_size: 20 }),
   });
+  useEffect(() => {
+    const replyId = Number(searchParams.get('reply_id'));
+    if (!selected && Number.isInteger(replyId) && replyId > 0) {
+      const match = repliesQuery.data?.items.find((item) => item.id === replyId);
+      if (match) setSelected(match);
+    }
+  }, [repliesQuery.data?.items, searchParams, selected]);
   const draftMutation = useMutation({
     mutationFn: (values: DraftForm) => api.draftReply(values.ticket_id, { reply_type: values.reply_type, language: values.language ?? 'zh-CN' }),
     onSuccess: () => {

@@ -85,6 +85,42 @@ class Settings(BaseSettings):
     RELAY_PUSH_ENABLED: bool = False
     RELAY_TIMEOUT_SECONDS: float = 10.0
 
+    RELAY_SQLSERVER_ENABLED: bool = False
+    RELAY_SQLSERVER_HOST: str = ""
+    RELAY_SQLSERVER_PORT: int = 1433
+    RELAY_SQLSERVER_DATABASE: str = ""
+    RELAY_SQLSERVER_USER: str = ""
+    RELAY_SQLSERVER_PASSWORD: str = ""
+    RELAY_SQLSERVER_DRIVER: str = "ODBC Driver 18 for SQL Server"
+    RELAY_SQLSERVER_ENCRYPT: bool = True
+    RELAY_SQLSERVER_TRUST_SERVER_CERTIFICATE: bool = False
+    RELAY_SQLSERVER_SN_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_SN_TABLE: str = ""
+    RELAY_SQLSERVER_SN_PRIMARY_KEY: str = ""
+    RELAY_SQLSERVER_SN_UPDATED_AT_COLUMN: str = ""
+    RELAY_SQLSERVER_SN_COLUMN_MAP: dict[str, str] = {
+        "sn": "sn",
+        "customer_code": "customer_code",
+        "customer_name": "customer_name",
+        "material_code": "material_code",
+        "material_name": "material_name",
+        "asset_status": "asset_status",
+    }
+    RELAY_SQLSERVER_RESULT_MODE: str = "table"
+    RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_RESULT_TARGET: str = ""
+    RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN: str = ""
+    RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY: str = "ticket_no"
+    RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {}
+    RELAY_SQLSERVER_BATCH_SIZE: int = 500
+    RELAY_SQLSERVER_SYNC_INTERVAL_MINUTES: int = 5
+    RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
+
+    INTERNAL_EMAIL_DOMAINS: list[str] = ["accotest.com"]
+    ROUTING_DOMESTIC_USERNAME: str = "miya"
+    ROUTING_FOREIGN_USERNAME: str = "demi"
+    RMA_AUTO_SEND_ENABLED: bool = True
+
     EMAIL_ASYNC_ENABLED: bool = False
     IMAP_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
@@ -100,6 +136,13 @@ class Settings(BaseSettings):
     MAX_FOLLOW_UP: int = 3
     CONFIDENCE_THRESHOLD: float = 0.7
     RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")
+
+    RMA_AUTHORIZATION_ENABLED: bool = True
+    RMA_PDF_TEMPLATE_PATH: str = str(BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_v1.pdf")
+    RMA_PDF_DEFAULT_CURRENCY: str = ""
+    RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
+    RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
+    RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
 
     DEFAULT_ADMIN_USERNAME: str = "admin"
     DEFAULT_ADMIN_PASSWORD: str = "change-me-admin"

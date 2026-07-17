@@ -11,7 +11,6 @@ import StatusTag from '../components/StatusTag';
 import type { AiLog } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
-import { useAuthStore } from '../stores/authStore';
 
 type AiLogFilters = {
   ticket_id?: string;
@@ -28,7 +27,6 @@ export default function AiLogsPage() {
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [detailId, setDetailId] = useState<number | null>(null);
-  const isAdmin = useAuthStore((state) => state.user?.roles.includes('admin'));
   const [filterForm] = Form.useForm<AiLogFilters>();
   const logsQuery = useQuery({
     queryKey: ['ai-logs', filters, page],
@@ -37,7 +35,7 @@ export default function AiLogsPage() {
   const detailQuery = useQuery({
     queryKey: ['ai-log-detail', detailId],
     queryFn: () => api.aiLogDetail(detailId as number),
-    enabled: Boolean(detailId && isAdmin),
+    enabled: Boolean(detailId),
   });
   const columns: ColumnsType<AiLog> = [
     { title: 'Trace', dataIndex: 'trace_id', width: 160, ellipsis: true },
@@ -47,6 +45,7 @@ export default function AiLogsPage() {
     { title: '邮件', dataIndex: 'email_id', width: 90, render: numberText },
     { title: '模型', dataIndex: 'model_name', width: 170 },
     { title: 'Prompt', dataIndex: 'prompt_version', width: 170 },
+    { title: '问题描述', dataIndex: 'problem_description', width: 360, ellipsis: true, render: (value?: string | null) => compactText(value, '-') },
     { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <StatusTag value={value} /> },
     { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
     { title: '耗时', dataIndex: 'latency_ms', width: 90, render: (value?: number | null) => (value ? `${value} ms` : '-') },
@@ -55,7 +54,7 @@ export default function AiLogsPage() {
     {
       title: '明细',
       width: 80,
-      render: (_, record) => isAdmin ? <Button type="link" size="small" onClick={() => setDetailId(record.id)}>查看</Button> : '-',
+      render: (_, record) => <Button type="link" size="small" onClick={() => setDetailId(record.id)}>查看</Button>,
     },
   ];
 
@@ -128,6 +127,12 @@ export default function AiLogsPage() {
             expandedRowRender: (record) => (
               <div className="drawer-stack">
                 <Descriptions column={2} size="small" bordered>
+                  <Descriptions.Item label="AI环节">{record.ai_stage || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="AI动作">{record.ai_action || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="具体原因" span={2}>{record.problem_reason || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="处理建议" span={2}>{record.resolution_suggestion || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="Error Code">{record.error_code || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="错误信息">{record.error_message || '-'}</Descriptions.Item>
                   <Descriptions.Item label="输入摘要">{record.input_summary || '-'}</Descriptions.Item>
                   <Descriptions.Item label="输出摘要">{record.output_summary || '-'}</Descriptions.Item>
                   <Descriptions.Item label="错误信息" span={2}>{record.error_message || '-'}</Descriptions.Item>

@@ -14,6 +14,8 @@ from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, Reply
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
+from app.services.external_relay import relay_configuration_status
+from app.services.rma_test_preflight import build_rma_test_preflight
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 from app.services.storage import find_orphan_oss_objects
 
@@ -52,6 +54,7 @@ def _config_payload() -> dict:
             "relay_sn_sync_enabled": settings.RELAY_SN_SYNC_ENABLED,
             "relay_push_enabled": settings.RELAY_PUSH_ENABLED,
             "relay_configured": bool(settings.RELAY_BASE_URL and settings.RELAY_API_KEY),
+            "sqlserver_relay": relay_configuration_status(),
         },
     }
 
@@ -146,15 +149,32 @@ async def get_config(current_user: Annotated[CurrentUser, Depends(require_roles(
     return ok(_config_payload())
 
 
+@router.get("/integrations/sqlserver/status")
+async def sqlserver_status(
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    del current_user
+    return ok(relay_configuration_status())
+
+
 @router.patch("/config")
 async def update_config(
     payload: SystemConfigUpdateRequest,
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     values = payload.model_dump(exclude_unset=True)
     write_runtime_config(values)
     return ok(_config_payload(), "system config updated")
+
+
+@router.post("/rma-test/preflight")
+async def rma_test_preflight(
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    del current_user
+    # This endpoint only builds and reparses local bytes. It never opens SMTP.
+    return ok(build_rma_test_preflight().result, "RMA test email offline preflight completed")
 
 
 def _reply_template_payload(template: ReplyTemplate) -> dict:
@@ -193,7 +213,7 @@ async def list_reply_templates(
 async def create_reply_template(
     payload: ReplyTemplateCreateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     values = payload.model_dump()
     exists = await session.scalar(
@@ -213,7 +233,7 @@ async def update_reply_template(
     template_id: int,
     payload: ReplyTemplateUpdateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     template = await session.get(ReplyTemplate, template_id)
     if template is None:
@@ -231,7 +251,7 @@ async def update_reply_template(
 async def delete_reply_template(
     template_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     template = await session.get(ReplyTemplate, template_id)

@@ -18,7 +18,7 @@ from app.services.logging_safety import safe_error_code, sanitize_log_payload
 
 JOB_TYPES = {
     "email_parse", "email_reparse", "imap_fetch", "smtp_send", "auto_followup",
-    "master_data_import", "export_generate",
+    "master_data_import", "export_generate", "relay_ticket_export", "rma_authorization",
 }
 TERMINAL_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 NON_RETRYABLE_ERROR_PARTS = {
@@ -173,6 +173,26 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
         if job.resource_id is None or user_id is None:
             raise ValueError("JOB_RESOURCE_REQUIRED")
         return await approve_reply(session, reply_id=job.resource_id, user_id=user_id)
+    if job.job_type == "relay_ticket_export":
+        from app.services.relay_jobs import execute_ticket_relay_export
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await execute_ticket_relay_export(session, export_id=job.resource_id)
+    if job.job_type == "rma_authorization":
+        from app.services.replies import create_and_send_rma_authorization
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await create_and_send_rma_authorization(
+            session,
+            ticket_id=job.resource_id,
+            user_id=user_id,
+            expected_version=int(metadata.get("ticket_version") or 0),
+            expected_safety_hash=str(metadata.get("safety_check_hash") or ""),
+            expected_sn_validation_hash=str(metadata.get("sn_validation_hash") or ""),
+            expected_rma_template_version=str(metadata.get("rma_template_version") or ""),
+        )
     if job.job_type == "auto_followup":
         from app.services.replies import create_reply_draft
 
@@ -257,11 +277,33 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
     started = utcnow()
     try:
         result = await _execute_job_command(session, job)
-        job.status = "success"
-        job.success_count = 1
-        job.result_json = sanitize_log_payload(result)
-        job.error_code = None
-        job.error_message = None
+        business_status = str(result.get("status") or "") if isinstance(result, dict) else ""
+        if business_status == "superseded":
+            job.status = "superseded"
+            job.result_json = sanitize_log_payload(result)
+            job.error_code = "TASK_SNAPSHOT_SUPERSEDED"
+            job.error_message = None
+            job.finished_at = utcnow()
+        elif business_status in {"failed", "manual_review", "send_uncertain", "misconfigured"}:
+            error_code = str(result.get("error_code") or business_status).upper()
+            retryable = job.job_type == "relay_ticket_export" and _job_error_is_retryable(error_code)
+            job.result_json = sanitize_log_payload(result)
+            job.error_code = error_code
+            job.error_message = str(result.get("error_message") or error_code)[:2000]
+            job.failed_count += 1
+            if retryable and job.attempt_count < job.max_attempts:
+                job.status = "retry_wait"
+                delay_minutes = (5, 15, 60)[min(job.attempt_count - 1, 2)]
+                job.next_run_at = utcnow() + timedelta(minutes=delay_minutes)
+            else:
+                job.status = "needs_manual_review" if business_status in {"manual_review", "send_uncertain", "misconfigured"} else "failed"
+                job.finished_at = utcnow()
+        else:
+            job.status = "success"
+            job.success_count = 1
+            job.result_json = sanitize_log_payload(result)
+            job.error_code = None
+            job.error_message = None
     except Exception as exc:
         error_code = safe_error_code(exc, exc.__class__.__name__.upper()) or "JOB_FAILED"
         original = getattr(exc, "orig", None)

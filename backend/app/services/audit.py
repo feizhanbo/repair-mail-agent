@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.request_context import get_client_ip, get_correlation_id, get_user_agent
-from app.models import NotificationEvent, OperationLog, SystemEventLog
+from app.models import NotificationEvent, NotificationUserState, OperationLog, Role, SystemEventLog, User, UserRole
 from app.services.logging_safety import sanitize_log_payload
 
 
@@ -68,6 +69,21 @@ async def create_notification(
         metadata_json=metadata,
     )
     session.add(event)
+    await session.flush()
+
+    recipients = select(User.id).where(User.status == "active")
+    if recipient_user_id is not None:
+        recipients = recipients.where(User.id == recipient_user_id)
+    else:
+        role_code = recipient_role_code or "operator"
+        recipients = (
+            recipients.join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(Role.role_code == role_code)
+        )
+    user_ids = set((await session.execute(recipients)).scalars().all())
+    for user_id in user_ids:
+        session.add(NotificationUserState(notification_id=event.id, user_id=user_id, status="unread"))
     return event
 
 

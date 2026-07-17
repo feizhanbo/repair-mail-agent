@@ -21,7 +21,7 @@ router = APIRouter()
 @router.get("/sn-assets")
 async def list_sn_assets(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
@@ -45,7 +45,7 @@ async def list_sn_assets(
 
 
 @router.get("/sn-assets/template")
-async def sn_assets_template(current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))]) -> Response:
+async def sn_assets_template(current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))]) -> Response:
     del current_user
     return Response(
         content=await asyncio.to_thread(master_data_service.sn_assets_template_xlsx),
@@ -57,7 +57,7 @@ async def sn_assets_template(current_user: Annotated[CurrentUser, Depends(requir
 @router.get("/sn-assets/export")
 async def export_sn_assets(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     keyword: str | None = None,
     sn: str | None = None,
     customer: str | None = None,
@@ -84,7 +84,7 @@ async def export_sn_assets(
 async def export_selected_sn_assets(
     payload: IdsRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> Response:
     del current_user
     content = await master_data_service.export_sn_assets_selected(session, ids=payload.ids)
@@ -143,7 +143,7 @@ async def import_sn_assets_file_job(
 @router.get("/board-cards")
 async def list_board_cards(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
@@ -165,7 +165,7 @@ async def list_board_cards(
 
 
 @router.get("/board-cards/template")
-async def board_cards_template(current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))]) -> Response:
+async def board_cards_template(current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))]) -> Response:
     del current_user
     return Response(
         content=await asyncio.to_thread(master_data_service.board_cards_template_xlsx),
@@ -177,7 +177,7 @@ async def board_cards_template(current_user: Annotated[CurrentUser, Depends(requ
 @router.get("/board-cards/export")
 async def export_board_cards(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     keyword: str | None = None,
     material_code: str | None = None,
     material_name: str | None = None,
@@ -202,7 +202,7 @@ async def export_board_cards(
 async def export_selected_board_cards(
     payload: IdsRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> Response:
     del current_user
     content = await master_data_service.export_board_cards_selected(session, ids=payload.ids)

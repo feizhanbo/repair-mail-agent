@@ -12,7 +12,8 @@ from app.integrations.ai_provider import (
     DeepSeekProvider,
     _normalize_response_payload,
 )
-from app.services.ai import _key_result, _status_for
+from app.models import AiCallLog
+from app.services.ai import _key_result, _status_for, ai_log_diagnostics
 
 
 @pytest.fixture
@@ -44,6 +45,15 @@ def test_ai_extract_schema_rejects_invalid_confidence() -> None:
         AiExtractResponse.model_validate({"confidence_score": 1.2})
 
 
+@pytest.mark.parametrize(
+    ("legacy", "expected"),
+    [("customer_reply", "customer_supplement"), ("internal_forward", "normal_reply"), ("invented", "unknown")],
+)
+def test_ai_intent_taxonomy_is_normalized(legacy: str, expected: str) -> None:
+    normalized = _normalize_response_payload({"intent_type": legacy}, AiExtractResponse)
+    assert normalized["intent_type"] == expected
+
+
 def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
     normalized = _normalize_response_payload(
         {
@@ -60,9 +70,9 @@ def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
     )
     parsed = AiExtractResponse.model_validate(normalized)
     assert parsed.extracted_items == [{"sn": "SN001"}]
-    assert parsed.missing_fields == {"contact_phone": "需要补充"}
+    assert parsed.missing_fields == {}
     assert parsed.confidence_score == 0.86
-    assert parsed.field_confidences == {"sn": 0.92, "contact_phone": 0.0}
+    assert parsed.field_confidences == {"sn": 0.92}
     assert parsed.confidence_reasons == ["SN present"]
 
 
@@ -86,7 +96,7 @@ def test_ai_log_key_result_keeps_summary_not_sensitive_values() -> None:
     parsed = AiExtractResponse.model_validate(
         {
             "intent_type": "new_repair",
-            "extracted_fields": {"contact_email": "customer@example.com", "contact_phone": "13800138000"},
+            "extracted_fields": {"contact_email": "customer@example.com"},
             "extracted_items": [{"sn": "SN-SENSITIVE-001"}],
             "missing_fields": {"mailing_address": "缺少邮寄地址"},
             "conflict_fields": {},
@@ -100,14 +110,33 @@ def test_ai_log_key_result_keeps_summary_not_sensitive_values() -> None:
     serialized = json.dumps(key_result, ensure_ascii=False)
     assert key_result == {
         "intent_type": "new_repair",
-        "field_keys": ["contact_email", "contact_phone"],
+        "field_keys": ["contact_email"],
         "item_count": 1,
         "missing_field_keys": ["mailing_address"],
         "conflict_field_keys": [],
     }
     assert "customer@example.com" not in serialized
-    assert "13800138000" not in serialized
     assert "SN-SENSITIVE-001" not in serialized
+
+
+def test_ai_log_diagnostics_describes_model_stage_reason_and_action() -> None:
+    ai_log = AiCallLog(
+        trace_id="trace-1",
+        call_type="attachment_visual_parse",
+        provider_name="qwen",
+        model_name="qwen-vl-plus",
+        prompt_version="v1",
+        status="failed",
+        error_code="QWEN_PROVIDER_TIMEOUT",
+        log_file_path="logs/ai.jsonl",
+    )
+
+    diagnostics = ai_log_diagnostics(ai_log)
+
+    assert diagnostics["ai_stage"] == "Qwen 图片/PDF 多模态解析"
+    assert "qwen/qwen-vl-plus" in diagnostics["problem_description"]
+    assert "超时" in diagnostics["problem_reason"]
+    assert diagnostics["resolution_suggestion"]
 
 
 @pytest.mark.anyio

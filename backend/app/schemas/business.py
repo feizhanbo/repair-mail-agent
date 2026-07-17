@@ -83,8 +83,15 @@ class TicketItemsPatchRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class TicketOwnerUpdateRequest(BaseModel):
+    owner_user_id: int
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class ParseResultApplyRequest(BaseModel):
     action: Literal["apply", "partial_apply", "reject"] = "apply"
+    selected_fields: list[str] = Field(default_factory=list)
+    selected_item_indices: list[int] = Field(default_factory=list)
     reason: str | None = Field(default=None, max_length=500)
 
 

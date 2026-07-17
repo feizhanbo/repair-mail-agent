@@ -13,11 +13,12 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ParseResult
-from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketTransitionRequest
+from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
 from app.services.email_flow_trace import build_ticket_timeline
 from app.services.workflow import transition_ticket
+from app.services.ticket_safety import build_safety_report, validate_and_mark_ready_for_export
 
 router = APIRouter()
 
@@ -182,8 +183,11 @@ async def transition(
     ticket_id: int,
     payload: TicketTransitionRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
+    if payload.to_status_code == "ready_for_export":
+        from fastapi import HTTPException, status
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
     ticket = await ticket_service.get_ticket(session, ticket_id)
     await transition_ticket(
         session,
@@ -198,6 +202,27 @@ async def transition(
     return ok(await ticket_service.get_ticket_detail(session, ticket_id), "ticket transitioned")
 
 
+@router.get("/{ticket_id}/export-safety")
+async def export_safety(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    del current_user
+    return ok(await build_safety_report(session, ticket_id=ticket_id))
+
+
+@router.post("/{ticket_id}/validate-export")
+async def validate_export(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    result = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=current_user.id)
+    await session.commit()
+    return ok(result, "ticket passed export safety gate")
+
+
 @router.post("/{ticket_id}/validate-sn")
 async def validate_sn(
     ticket_id: int,
@@ -209,28 +234,41 @@ async def validate_sn(
     return ok(result, "ticket sn validated")
 
 
-@router.post("/{ticket_id}/confirm-export")
+@router.post("/{ticket_id}/confirm-export", deprecated=True)
 async def confirm_export(
     ticket_id: int,
     payload: TicketExportConfirmRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
 ) -> dict:
-    ticket = await ticket_service.get_ticket(session, ticket_id)
-    if ticket.current_status_code != "ready_for_export":
-        from fastapi import HTTPException, status
+    del ticket_id, payload, session, current_user
+    from fastapi import HTTPException, status
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="EXPORT_CONFIRM_NO_LONGER_CLOSES_TICKET")
 
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TICKET_NOT_READY_FOR_EXPORT")
-    await transition_ticket(
+
+@router.patch("/{ticket_id}/owner")
+async def correct_owner(
+    ticket_id: int,
+    payload: TicketOwnerUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    before = ticket.assigned_user_id
+    ticket.assigned_user_id = payload.owner_user_id
+    from app.services.audit import log_operation
+    await log_operation(
         session,
-        ticket=ticket,
-        to_status_code="closed",
-        trigger_event="export_completed",
         user_id=current_user.id,
-        reason=payload.reason or "Export completion confirmed",
+        operation_type="ticket_owner_corrected",
+        target_type="repair_ticket",
+        target_id=ticket.id,
+        description=payload.reason,
+        before_data={"owner_user_id": before},
+        after_data={"owner_user_id": payload.owner_user_id},
     )
     await session.commit()
-    return ok(await ticket_service.get_ticket_detail(session, ticket_id), "ticket closed after export confirmation")
+    return ok(await ticket_service.get_ticket_detail(session, ticket_id), "ticket owner corrected")
 
 
 @router.get("/{ticket_id}/parse-results")
@@ -258,6 +296,8 @@ async def apply_parse_result(
         user_id=current_user.id,
         reason=payload.reason,
         action=payload.action,
+        selected_fields=payload.selected_fields,
+        selected_item_indices=payload.selected_item_indices,
     )
     await session.commit()
     return ok(result, "parse result applied")

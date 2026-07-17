@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import (
-    BoardCard,
     Email,
     EmailAttachment,
     EmailThread,
@@ -21,11 +20,10 @@ from app.models import (
     RepairTicket,
     RepairTicketItem,
     ReplyRecord,
-    SnAsset,
     SnValidationResult,
     TicketStatusLog,
 )
-from app.services.audit import create_notification, log_operation
+from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
@@ -51,6 +49,17 @@ TICKET_FIELDS = (
     "max_followup_count",
     "confidence_score",
     "assigned_user_id",
+    "language_code",
+    "rma_required",
+    "relay_export_status",
+    "rma_status",
+    "sn_validation_status",
+    "sn_validation_snapshot",
+    "sn_validation_hash",
+    "sn_validated_at",
+    "safety_check_snapshot",
+    "safety_check_hash",
+    "safety_checked_at",
     "manual_locked",
     "version",
     "created_at",
@@ -70,7 +79,6 @@ TICKET_WRITE_FIELDS = {
     "missing_fields",
     "conflict_fields",
     "confidence_score",
-    "assigned_user_id",
     "manual_locked",
 }
 
@@ -135,6 +143,37 @@ EMAIL_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+def _attachment_file_size_kb(file_size: int | None) -> int | None:
+    if file_size is None:
+        return None
+    return max(1, (int(file_size) + 1023) // 1024)
+
+
+def _serialize_attachment_with_email(attachment: EmailAttachment, email: Email | None) -> dict[str, Any]:
+    data = model_to_dict(
+        attachment,
+        (
+            "id",
+            "email_id",
+            "oss_object_id",
+            "file_name",
+            "content_type",
+            "file_size",
+            "file_hash",
+            "is_inline",
+            "content_id",
+            "parse_status",
+            "extracted_text",
+            "extracted_json",
+            "parse_error",
+            "created_at",
+        ),
+    )
+    data["file_size_kb"] = _attachment_file_size_kb(attachment.file_size)
+    data["sent_at"] = to_plain((email.sent_at or email.received_at) if email else None)
+    return data
 
 
 def serialize_ticket(ticket: RepairTicket) -> dict[str, Any]:
@@ -452,6 +491,10 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "result_status",
                     "result_message",
                     "checked_by",
+                    "ticket_version",
+                    "input_hash",
+                    "source_system",
+                    "evidence_json",
                     "checked_at",
                 ),
             )
@@ -499,6 +542,10 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "draft_body",
                     "final_body",
                     "generate_source",
+                    "reply_template_version",
+                    "rma_template_version",
+                    "rma_pdf_oss_object_id",
+                    "rma_pdf_data_snapshot",
                     "review_status",
                     "reviewed_by_user_id",
                     "reviewed_at",
@@ -561,6 +608,8 @@ async def patch_ticket_fields(
     version: int | None = None,
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
+    if ticket.rma_status == "sent":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_SENT_TICKET_DATA_IMMUTABLE")
     if version is not None and ticket.version != version:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TICKET_VERSION_CONFLICT")
     changed: dict[str, Any] = {}
@@ -586,6 +635,13 @@ async def patch_ticket_fields(
         changed[field] = {"old": to_plain(old_value), "new": to_plain(value)}
     if changed:
         ticket.version += 1
+        await _invalidate_export_snapshot(
+            session,
+            ticket=ticket,
+            user_id=user_id,
+            reason="ticket fields changed",
+            invalidate_sn=bool({"customer_code", "customer_name"} & set(changed)),
+        )
         await log_operation(
             session,
             user_id=user_id,
@@ -607,6 +663,8 @@ async def upsert_ticket_items(
     reason: str | None = None,
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
+    if ticket.rma_status == "sent":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_SENT_TICKET_DATA_IMMUTABLE")
     existing_items = {
         item.id: item
         for item in (
@@ -649,6 +707,14 @@ async def upsert_ticket_items(
             changed.append(item_changes)
     if changed:
         ticket.version += 1
+        sn_fields = {"sn", "material_code", "material_name"}
+        await _invalidate_export_snapshot(
+            session,
+            ticket=ticket,
+            user_id=user_id,
+            reason="ticket items changed",
+            invalidate_sn=any(sn_fields & set(change) for change in changed),
+        )
         await log_operation(
             session,
             user_id=user_id,
@@ -661,8 +727,61 @@ async def upsert_ticket_items(
     return await get_ticket_detail(session, ticket.id)
 
 
-async def create_ticket_from_parse_result(session: AsyncSession, email: Email, parse_result: ParseResult) -> RepairTicket:
+async def _invalidate_export_snapshot(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    user_id: int | None,
+    reason: str,
+    invalidate_sn: bool = True,
+) -> None:
+    if invalidate_sn:
+        ticket.sn_validation_status = "stale"
+        ticket.sn_validation_snapshot = None
+        ticket.sn_validation_hash = None
+        ticket.sn_validated_at = None
+    ticket.safety_check_snapshot = None
+    ticket.safety_check_hash = None
+    ticket.safety_checked_at = None
+    ticket.relay_export_status = "not_required"
+    ticket.rma_status = "not_required" if not ticket.rma_required else "pending"
+    if ticket.current_status_code == "ready_for_export":
+        ticket.current_status_code = "manual_review"
+        session.add(
+            TicketStatusLog(
+                ticket_id=ticket.id,
+                from_status_code="ready_for_export",
+                to_status_code="manual_review",
+                trigger_event="validated_data_changed",
+                reason=reason,
+                operator_type="user" if user_id else "system",
+                operator_user_id=user_id,
+            )
+        )
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="validated_data_changed",
+            trigger_reason=reason,
+            priority="high",
+            assigned_user_id=ticket.assigned_user_id,
+        )
+
+
+async def create_ticket_from_parse_result(
+    session: AsyncSession,
+    email: Email,
+    parse_result: ParseResult,
+    *,
+    selected_fields: set[str] | None = None,
+    selected_item_indices: set[int] | None = None,
+) -> RepairTicket:
+    from app.services.routing import choose_system_owner
+
     fields = parse_result.extracted_fields or {}
+    if selected_fields is not None:
+        fields = {key: value for key, value in fields.items() if key in selected_fields}
+    owner_id, language_code, routing_reason = await choose_system_owner(session, email)
     ticket = RepairTicket(
         ticket_no=f"RMA{utcnow():%Y%m%d%H%M%S%f}",
         current_status_code="new_email",
@@ -674,9 +793,11 @@ async def create_ticket_from_parse_result(session: AsyncSession, email: Email, p
         contact_phone=fields.get("contact_phone"),
         contact_email=fields.get("contact_email") or email.from_address,
         problem_description=fields.get("problem_description"),
-        missing_fields=parse_result.missing_fields,
-        conflict_fields=parse_result.conflict_fields,
+        missing_fields=parse_result.missing_fields if selected_fields is None else {},
+        conflict_fields=parse_result.conflict_fields if selected_fields is None else {},
         confidence_score=parse_result.confidence_score,
+        language_code=language_code,
+        assigned_user_id=owner_id,
         max_followup_count=settings.MAX_FOLLOW_UP,
     )
     session.add(ticket)
@@ -689,7 +810,7 @@ async def create_ticket_from_parse_result(session: AsyncSession, email: Email, p
             trigger_event="ticket_created",
             reason="规则解析创建工单。",
             operator_type="system",
-            metadata_json={"email_id": email.id, "parse_result_id": parse_result.id},
+            metadata_json={"email_id": email.id, "parse_result_id": parse_result.id, "routing": routing_reason},
         )
     )
     session.add(EmailTicketLink(email_id=email.id, ticket_id=ticket.id, link_type="source", link_reason="规则解析创建"))
@@ -704,7 +825,13 @@ async def create_ticket_from_parse_result(session: AsyncSession, email: Email, p
     parse_result.accepted = True
     parse_result.accepted_by_user_id = None
     parse_result.accepted_at = parse_result.applied_at
-    await _create_items_from_parse_result(session, ticket, parse_result, user_id=None)
+    await _create_items_from_parse_result(
+        session,
+        ticket,
+        parse_result,
+        user_id=None,
+        selected_item_indices=selected_item_indices,
+    )
     await log_operation(
         session,
         operation_type="ticket_created_from_parse",
@@ -763,6 +890,9 @@ async def ensure_manual_review_ticket_from_parse_result(
     ticket = await _existing_ticket_for_email(session, email, parse_result)
     fields = parse_result.extracted_fields or {}
     if ticket is None:
+        from app.services.routing import choose_system_owner
+
+        owner_id, language_code, routing_reason = await choose_system_owner(session, email)
         ticket = RepairTicket(
             ticket_no=f"RMA{utcnow():%Y%m%d%H%M%S%f}",
             current_status_code="manual_review",
@@ -777,6 +907,8 @@ async def ensure_manual_review_ticket_from_parse_result(
             missing_fields=parse_result.missing_fields,
             conflict_fields=parse_result.conflict_fields,
             confidence_score=parse_result.confidence_score,
+            language_code=language_code,
+            assigned_user_id=owner_id,
             max_followup_count=settings.MAX_FOLLOW_UP,
         )
         session.add(ticket)
@@ -789,7 +921,7 @@ async def ensure_manual_review_ticket_from_parse_result(
                 trigger_event="manual_review_required",
                 reason=reason,
                 operator_type="system",
-                metadata_json={"email_id": email.id, "parse_result_id": parse_result.id},
+                metadata_json={"email_id": email.id, "parse_result_id": parse_result.id, "routing": routing_reason},
             )
         )
     else:
@@ -838,6 +970,7 @@ async def _create_items_from_parse_result(
     ticket: RepairTicket,
     parse_result: ParseResult,
     user_id: int | None,
+    selected_item_indices: set[int] | None = None,
 ) -> None:
     extracted = parse_result.extracted_items or {}
     if isinstance(extracted, dict):
@@ -859,7 +992,9 @@ async def _create_items_from_parse_result(
         ).scalars().first()
         or 0
     )
-    for payload in item_payloads:
+    for item_index, payload in enumerate(item_payloads):
+        if selected_item_indices is not None and item_index not in selected_item_indices:
+            continue
         sn = (payload.get("sn") or "").strip().upper() if isinstance(payload, dict) else ""
         if sn and sn in existing_sns:
             continue
@@ -898,6 +1033,8 @@ async def apply_parse_result(
     reason: str | None = None,
     action: str = "apply",
     apply_status: str | None = None,
+    selected_fields: list[str] | None = None,
+    selected_item_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     parse_result = await session.get(ParseResult, parse_result_id)
     if parse_result is None:
@@ -925,12 +1062,24 @@ async def apply_parse_result(
         return await get_ticket_detail(session, ticket.id)
     if action not in {"apply", "partial_apply"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PARSE_RESULT_ACTION_INVALID")
+    field_selection = set(selected_fields or []) if action == "partial_apply" else None
+    item_selection = set(selected_item_indices or []) if action == "partial_apply" else None
+    if action == "partial_apply" and not field_selection and not item_selection:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PARSE_RESULT_PARTIAL_SELECTION_REQUIRED")
+    if item_selection is not None and any(index < 0 for index in item_selection):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PARSE_RESULT_ITEM_INDEX_INVALID")
     email = await session.get(Email, parse_result.email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
     ticket = await _existing_ticket_for_email(session, email, parse_result)
     if ticket is None:
-        ticket = await create_ticket_from_parse_result(session, email, parse_result)
+        ticket = await create_ticket_from_parse_result(
+            session,
+            email,
+            parse_result,
+            selected_fields=field_selection,
+            selected_item_indices=item_selection,
+        )
     else:
         parse_result.ticket_id = ticket.id
         await _link_email_to_ticket(
@@ -942,6 +1091,8 @@ async def apply_parse_result(
         )
 
     fields = parse_result.extracted_fields or {}
+    if field_selection is not None:
+        fields = {key: value for key, value in fields.items() if key in field_selection}
     changed: dict[str, Any] = {}
     if not ticket.manual_locked:
         for field, value in fields.items():
@@ -964,10 +1115,24 @@ async def apply_parse_result(
                 )
             )
             changed[field] = {"old": to_plain(old_value), "new": to_plain(value)}
-    ticket.missing_fields = parse_result.missing_fields
-    ticket.conflict_fields = parse_result.conflict_fields
+    if action == "partial_apply":
+        ticket.missing_fields = {
+            key: value for key, value in (ticket.missing_fields or {}).items() if key not in field_selection
+        }
+        ticket.conflict_fields = {
+            key: value for key, value in (ticket.conflict_fields or {}).items() if key not in field_selection
+        }
+    else:
+        ticket.missing_fields = parse_result.missing_fields
+        ticket.conflict_fields = parse_result.conflict_fields
     ticket.confidence_score = parse_result.confidence_score
-    await _create_items_from_parse_result(session, ticket, parse_result, user_id)
+    await _create_items_from_parse_result(
+        session,
+        ticket,
+        parse_result,
+        user_id,
+        selected_item_indices=item_selection,
+    )
 
     result_status = apply_status or ("partially_applied" if action == "partial_apply" or ticket.manual_locked else ("manually_applied" if user_id else "auto_applied"))
     parse_result.apply_status = result_status
@@ -989,7 +1154,7 @@ async def apply_parse_result(
         after_data={"ticket_id": ticket.id, "changed_fields": changed, "apply_status": result_status, "action": action},
     )
 
-    if ticket.current_status_code == "auto_replied" and parse_result.intent_type == "customer_reply":
+    if ticket.current_status_code == "auto_replied" and parse_result.intent_type in {"normal_reply", "customer_supplement"}:
         await transition_ticket(
             session,
             ticket=ticket,
@@ -1000,7 +1165,11 @@ async def apply_parse_result(
             reason="客户已回复补充信息，重新进入解析校验流程。",
             metadata={"parse_result_id": parse_result.id, "email_id": email.id},
         )
-    if parse_result.intent_type == "customer_receipt_confirmed" and ticket.current_status_code == "ready_for_export":
+    if (
+        parse_result.intent_type == "device_received"
+        and ticket.current_status_code == "ready_for_export"
+        and ticket.rma_status == "sent"
+    ):
         await transition_ticket(
             session,
             ticket=ticket,
@@ -1010,6 +1179,18 @@ async def apply_parse_result(
             operator_type="user" if user_id else "system",
             reason="客户确认收到维修后设备，自动关单。",
             metadata={"parse_result_id": parse_result.id, "email_id": email.id},
+        )
+    elif parse_result.intent_type == "device_received":
+        await log_operation(
+            session,
+            user_id=user_id,
+            operation_type="device_received_deferred",
+            target_type="repair_ticket",
+            target_id=ticket.id,
+            email_id=email.id,
+            ticket_id=ticket.id,
+            description="设备收货事件已记录；RMA 尚未成功发送或工单尚未可导出，暂不自动关单。",
+            after_data={"rma_status": ticket.rma_status, "ticket_status": ticket.current_status_code},
         )
     if ticket.current_status_code == "new_email":
         if parse_result.confidence_score is not None and float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:
@@ -1054,153 +1235,13 @@ async def validate_ticket_sn(
     ticket_id: int,
     user_id: int | None = None,
 ) -> dict[str, Any]:
-    ticket = await get_ticket(session, ticket_id)
-    items = (
-        await session.execute(select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket.id).order_by(RepairTicketItem.line_no))
-    ).scalars().all()
-    if not items:
-        ticket.missing_fields = {**(ticket.missing_fields or {}), "items": "缺少报修明细。"}
-        if ticket.current_status_code == "parsed":
-            await transition_ticket(
-                session,
-                ticket=ticket,
-                to_status_code="need_customer_info",
-                trigger_event="missing_fields_detected",
-                user_id=user_id,
-                reason="缺少报修明细。",
-            )
-            try:
-                await create_notification(
-                    session,
-                    event_type="sn_validation_failed",
-                    target_type="repair_ticket",
-                    target_id=ticket.id,
-                    title=f"SN校验异常：{ticket.ticket_no}",
-                    content="缺少报修明细，无法进行 SN 校验。",
-                    priority="high",
-                    recipient_user_id=None,
-                    recipient_role_code="supervisor",
-                    metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no},
-                )
-            except Exception:
-                pass
-        return await get_ticket_detail(session, ticket.id)
+    """Run the SN-only first stage without marking the ticket exportable."""
+    from app.services.ticket_safety import validate_ticket_sn_core
 
-    has_problem = False
-    has_warning = False
-    for item in items:
-        result_status = "pending"
-        message = "等待校验。"
-        matched_asset = None
-        board_card = None
-        if not item.sn:
-            result_status = "failed"
-            message = "缺少 SN。"
-        else:
-            matched_asset = await session.scalar(select(SnAsset).where(SnAsset.sn == item.sn.strip().upper()))
-            if matched_asset is None:
-                result_status = "failed"
-                message = "SN 不存在于资产库。"
-            elif matched_asset.asset_status != "valid":
-                result_status = "failed"
-                message = f"SN 状态为 {matched_asset.asset_status}。"
-            else:
-                customer_match = not ticket.customer_code or ticket.customer_code == matched_asset.customer_code
-                material_match = not item.material_code or item.material_code == matched_asset.material_code
-                board_card = await session.scalar(select(BoardCard).where(BoardCard.material_code == matched_asset.material_code))
-                if not customer_match:
-                    result_status = "warning"
-                    message = "SN 对应客户与工单客户不一致。"
-                elif not material_match:
-                    result_status = "warning"
-                    message = "SN 对应物料与工单明细不一致。"
-                else:
-                    result_status = "pass"
-                    message = "SN 校验通过。"
-                item.sn_asset_id = matched_asset.id
-                if not item.material_code:
-                    item.material_code = matched_asset.material_code
-                    item.material_name = matched_asset.material_name
-        item.validation_status = result_status
-        item.validation_message = message
-        session.add(
-            SnValidationResult(
-                ticket_id=ticket.id,
-                ticket_item_id=item.id,
-                sn=item.sn or "",
-                matched_sn_asset_id=matched_asset.id if matched_asset else None,
-                check_exists=matched_asset is not None,
-                check_valid=matched_asset.asset_status == "valid" if matched_asset else False,
-                check_customer_match=(not ticket.customer_code or ticket.customer_code == matched_asset.customer_code) if matched_asset else False,
-                check_material_match=(not item.material_code or item.material_code == matched_asset.material_code) if matched_asset else False,
-                need_ship_to_beijing=board_card.need_ship_to_beijing if board_card else None,
-                result_status=result_status,
-                result_message=message,
-                checked_by="manual" if user_id else "system",
-            )
-        )
-        has_problem = has_problem or result_status == "failed"
-        has_warning = has_warning or result_status == "warning"
-
-    ticket.version += 1
-    await log_operation(
-        session,
-        user_id=user_id,
-        operation_type="ticket_sn_validated",
-        target_type="repair_ticket",
-        target_id=ticket.id,
-        after_data={"has_problem": has_problem, "has_warning": has_warning},
-    )
-    if ticket.current_status_code == "parsed":
-        if has_problem or has_warning:
-            await transition_ticket(
-                session,
-                ticket=ticket,
-                to_status_code="manual_review",
-                trigger_event="field_conflict",
-                user_id=user_id,
-                reason="SN 校验存在异常或警告。",
-            )
-            try:
-                failed_items = [it for it in items if it.validation_status == "failed"]
-                warning_items = [it for it in items if it.validation_status == "warning"]
-                parts = []
-                if failed_items:
-                    parts.append(f"{len(failed_items)} 项校验失败")
-                if warning_items:
-                    parts.append(f"{len(warning_items)} 项校验警告")
-                content = "，".join(parts) + "。"
-                if failed_items:
-                    details = "; ".join(
-                        f"{it.sn or '无SN'}: {it.validation_message}" for it in failed_items[:3]
-                    )
-                    if len(failed_items) > 3:
-                        details += f" 等{len(failed_items)}项"
-                    content += f" 失败明细：{details}"
-                await create_notification(
-                    session,
-                    event_type="sn_validation_failed",
-                    target_type="repair_ticket",
-                    target_id=ticket.id,
-                    title=f"SN校验异常：{ticket.ticket_no}",
-                    content=content,
-                    priority="high",
-                    recipient_user_id=None,
-                    recipient_role_code="supervisor",
-                    metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no},
-                )
-            except Exception:
-                pass
-        elif not ticket.missing_fields:
-            await transition_ticket(
-                session,
-                ticket=ticket,
-                to_status_code="ready_for_export",
-                trigger_event="validation_passed",
-                user_id=user_id,
-                reason="字段完整且 SN 校验通过。",
-            )
-    return await get_ticket_detail(session, ticket.id)
+    result = await validate_ticket_sn_core(session, ticket_id=ticket_id, user_id=user_id)
+    detail = await get_ticket_detail(session, ticket_id)
+    detail["sn_validation"] = result
+    return detail
 
 
 async def get_ticket_email_timeline(session: AsyncSession, ticket_id: int) -> list[dict[str, Any]]:
@@ -1218,35 +1259,14 @@ async def get_ticket_email_timeline(session: AsyncSession, ticket_id: int) -> li
 async def get_ticket_attachments(session: AsyncSession, ticket_id: int) -> list[dict[str, Any]]:
     await get_ticket(session, ticket_id)
     statement = (
-        select(EmailAttachment)
+        select(EmailAttachment, Email)
         .join(Email, Email.id == EmailAttachment.email_id)
         .join(EmailTicketLink, EmailTicketLink.email_id == Email.id)
         .where(EmailTicketLink.ticket_id == ticket_id)
         .order_by(EmailAttachment.created_at.desc())
     )
-    attachments = (await session.execute(statement)).scalars().all()
-    return [
-        model_to_dict(
-            attachment,
-            (
-                "id",
-                "email_id",
-                "oss_object_id",
-                "file_name",
-                "content_type",
-                "file_size",
-                "file_hash",
-                "is_inline",
-                "content_id",
-                "parse_status",
-                "extracted_text",
-                "extracted_json",
-                "parse_error",
-                "created_at",
-            ),
-        )
-        for attachment in attachments
-    ]
+    rows = (await session.execute(statement)).all()
+    return [_serialize_attachment_with_email(attachment, email) for attachment, email in rows]
 
 
 async def get_ticket_field_evidence(session: AsyncSession, ticket_id: int) -> dict[str, Any]:

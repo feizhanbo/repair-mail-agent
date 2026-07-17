@@ -103,6 +103,8 @@ async def transition_ticket(
     from_status_code = ticket.current_status_code
     if from_status_code == "closed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TICKET_ALREADY_CLOSED")
+    if to_status_code == "ready_for_export" and not (metadata or {}).get("safety_check_hash"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
 
     target_status = await session.scalar(
         select(WorkflowStatus).where(WorkflowStatus.status_code == to_status_code, WorkflowStatus.enabled == True)  # noqa: E712
@@ -155,6 +157,26 @@ async def transition_ticket(
             priority=manual_task_priority or ("high" if trigger_event in {"system_error", "field_conflict"} else "normal"),
             email_id=ticket.source_email_id,
         )
+    elif from_status_code == "manual_review":
+        from app.services.notifications import resolve_notifications_for_target
+
+        open_tasks = (
+            await session.execute(
+                select(ManualReviewTask).where(
+                    ManualReviewTask.ticket_id == ticket.id,
+                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                )
+            )
+        ).scalars().all()
+        for task in open_tasks:
+            task.status = "closed"
+            task.resolved_at = task.resolved_at or utcnow()
+            task.resolution = task.resolution or f"Ticket transitioned to {to_status_code}"
+            await resolve_notifications_for_target(
+                session,
+                target_type="manual_review_task",
+                target_id=task.id,
+            )
     return ticket
 
 

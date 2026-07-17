@@ -68,5 +68,9 @@ class SnValidationResult(Base):
     result_status: Mapped[str] = mapped_column(String(30), nullable=False)
     result_message: Mapped[str | None] = mapped_column(Text)
     checked_by: Mapped[str] = mapped_column(String(30), nullable=False, server_default="system")
+    ticket_version: Mapped[int] = mapped_column(nullable=False, server_default="1")
+    input_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    source_system: Mapped[str] = mapped_column(String(30), nullable=False, server_default="local_sn_assets")
+    evidence_json: Mapped[dict | None] = mapped_column(mysql.JSON)
     checked_at: Mapped[datetime] = created_at_column()
 

@@ -56,6 +56,18 @@ def _as_string_list(value: Any) -> list[str]:
     return []
 
 
+_PHONE_CANDIDATE_FIELDS = {"contact_phone", "phone"}
+_INTENT_ALIASES = {"customer_reply": "customer_supplement", "internal_forward": "normal_reply"}
+_ALLOWED_INTENTS = {
+    "new_repair", "customer_supplement", "normal_reply", "rma_sent",
+    "device_received", "irrelevant", "unknown",
+}
+
+
+def _without_phone_candidate_fields(value: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): item for key, item in value.items() if str(key) not in _PHONE_CANDIDATE_FIELDS}
+
+
 def _confidence(value: Any) -> float:
     try:
         number = float(value)
@@ -71,17 +83,22 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
         return payload
     normalized = dict(payload)
     if response_model is AiExtractResponse:
+        intent = str(normalized.get("intent_type") or "unknown").strip().lower()
+        mapped_intent = _INTENT_ALIASES.get(intent, intent)
+        normalized["intent_type"] = mapped_intent if mapped_intent in _ALLOWED_INTENTS else "unknown"
         for field in ("extracted_fields", "missing_fields", "conflict_fields", "evidence"):
             normalized[field] = _as_mapping(normalized.get(field))
+        for field in ("extracted_fields", "missing_fields", "conflict_fields"):
+            normalized[field] = _without_phone_candidate_fields(normalized[field])
         items = normalized.get("extracted_items")
         if isinstance(items, dict):
             items = items.get("items") if isinstance(items.get("items"), list) else [items]
         normalized["extracted_items"] = items if isinstance(items, list) else []
         normalized["confidence_score"] = _confidence(normalized.get("confidence_score"))
-        normalized["field_confidences"] = {
+        normalized["field_confidences"] = _without_phone_candidate_fields({
             str(key): _confidence(value)
             for key, value in _as_mapping(normalized.get("field_confidences")).items()
-        }
+        })
         normalized["confidence_reasons"] = _as_string_list(normalized.get("confidence_reasons"))
         normalized["original_evidence"] = _as_string_list(normalized.get("original_evidence"))
         direction = normalized.get("manual_review_direction")

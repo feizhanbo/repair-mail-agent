@@ -10,7 +10,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email, EmailAttachment, JobRunLog, OssObject
+from app.models import Email, EmailAttachment, JobRunLog, OssObject, ReplyRecord
 from app.services.common import utcnow
 
 
@@ -225,6 +225,7 @@ async def find_orphan_oss_objects(
             ~exists(select(EmailAttachment.id).where(EmailAttachment.oss_object_id == OssObject.id)),
             ~exists(select(JobRunLog.id).where(JobRunLog.input_oss_object_id == OssObject.id)),
             ~exists(select(JobRunLog.id).where(JobRunLog.output_oss_object_id == OssObject.id)),
+            ~exists(select(ReplyRecord.id).where(ReplyRecord.rma_pdf_oss_object_id == OssObject.id)),
         )
         .order_by(OssObject.created_at.asc())
         .limit(max(1, min(limit, 1000)))

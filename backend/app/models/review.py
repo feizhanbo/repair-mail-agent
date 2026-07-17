@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -58,4 +58,27 @@ class NotificationEvent(CreatedAtMixin, Base):
     read_at: Mapped[datetime | None] = datetime_column()
     metadata_json: Mapped[dict | None] = mapped_column("metadata", mysql.JSON)
     delivered_at: Mapped[datetime | None] = datetime_column()
+
+
+class NotificationUserState(TimestampMixin, Base):
+    __tablename__ = "notification_user_states"
+    __table_args__ = (
+        UniqueConstraint("notification_id", "user_id", name="uk_notification_user_state"),
+        Index("idx_notification_user_unread", "user_id", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = pk_column()
+    notification_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("notification_events.id", name="fk_notification_user_state_event", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("users.id", name="fk_notification_user_state_user", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="unread")
+    read_at: Mapped[datetime | None] = datetime_column()
+    resolved_at: Mapped[datetime | None] = datetime_column()
 

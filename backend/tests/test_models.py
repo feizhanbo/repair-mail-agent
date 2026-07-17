@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 27
+    assert len(Base.metadata.tables) == 30
 
 
 def test_phase_one_table_names() -> None:
@@ -13,11 +13,13 @@ def test_phase_one_table_names() -> None:
         "email_threads",
         "email_ticket_links",
         "emails",
+        "external_sync_checkpoints",
         "field_audit_logs",
         "job_run_logs",
         "mail_fetch_records",
         "manual_review_tasks",
         "notification_events",
+        "notification_user_states",
         "operation_logs",
         "oss_objects",
         "parse_results",
@@ -30,6 +32,7 @@ def test_phase_one_table_names() -> None:
         "sn_validation_results",
         "system_event_logs",
         "ticket_status_logs",
+        "ticket_relay_exports",
         "user_roles",
         "users",
         "workflow_statuses",
@@ -60,4 +63,3 @@ def test_email_oss_link_columns_exist_for_archival_consistency() -> None:
     attachment_columns = Base.metadata.tables["email_attachments"].columns
     assert "raw_eml_oss_object_id" in email_columns
     assert "oss_object_id" in attachment_columns
-

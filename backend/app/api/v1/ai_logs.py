@@ -12,7 +12,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import AiCallLog
 from app.services.common import model_to_dict, paginate_scalars
-from app.services.ai import read_ai_log_detail
+from app.services.ai import ai_log_diagnostics, read_ai_log_detail
 from app.services.audit import log_operation
 
 router = APIRouter()
@@ -32,6 +32,7 @@ AI_LOG_FIELDS = (
     "confidence_score",
     "latency_ms",
     "status",
+    "error_code",
     "error_message",
     "log_file_path",
     "log_line_no",
@@ -40,11 +41,17 @@ AI_LOG_FIELDS = (
 )
 
 
+def serialize_ai_log(ai_log: AiCallLog) -> dict:
+    data = model_to_dict(ai_log, AI_LOG_FIELDS)
+    data.update(ai_log_diagnostics(ai_log))
+    return data
+
+
 @router.get("/{ai_log_id}/detail")
 async def get_ai_log_detail(
     ai_log_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
     ai_log = await session.get(AiCallLog, ai_log_id)
     if ai_log is None:
@@ -66,13 +73,14 @@ async def get_ai_log_detail(
         after_data={"trace_id": ai_log.trace_id, "record_hash": ai_log.log_record_hash},
     )
     await session.commit()
+    detail["diagnostics"] = ai_log_diagnostics(ai_log)
     return ok(detail)
 
 
 @router.get("")
 async def list_ai_logs(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ticket_id: int | None = None,
@@ -107,4 +115,4 @@ async def list_ai_logs(
         statement = statement.where(AiCallLog.created_at <= created_end)
     statement = statement.order_by(AiCallLog.created_at.desc(), AiCallLog.id.desc())
     rows, total = await paginate_scalars(session, statement, page_no, page_size)
-    return page([model_to_dict(row, AI_LOG_FIELDS) for row in rows], total=total, page_no=page_no, page_size=page_size)
+    return page([serialize_ai_log(row) for row in rows], total=total, page_no=page_no, page_size=page_size)

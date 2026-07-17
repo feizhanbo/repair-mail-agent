@@ -2,41 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.models import NotificationEvent
-from app.services.common import model_to_dict, paginate_scalars
-from app.services.workflow import mark_notification_read
+from app.models import NotificationEvent, NotificationUserState
+from app.services.notifications import mark_user_notification_read, serialize_user_notification
 
 router = APIRouter()
-
-NOTIFICATION_FIELDS = (
-    "id",
-    "event_type",
-    "target_type",
-    "target_id",
-    "title",
-    "content",
-    "priority",
-    "recipient_user_id",
-    "recipient_role_code",
-    "delivery_channel",
-    "delivery_status",
-    "read_at",
-    "metadata_json",
-    "delivered_at",
-    "created_at",
-)
-
 
 @router.get("")
 async def list_notifications(
@@ -52,15 +32,14 @@ async def list_notifications(
     created_start: date | None = None,
     created_end: date | None = None,
 ) -> dict:
-    statement = select(NotificationEvent).where(
-        or_(
-            NotificationEvent.recipient_user_id == current_user.id,
-            NotificationEvent.recipient_role_code.in_(current_user.roles),
-            and_(NotificationEvent.recipient_user_id.is_(None), NotificationEvent.recipient_role_code.is_(None)),
-        )
+    statement = (
+        select(NotificationEvent, NotificationUserState)
+        .join(NotificationUserState, NotificationUserState.notification_id == NotificationEvent.id)
+        .where(NotificationUserState.user_id == current_user.id)
     )
     if delivery_status:
-        statement = statement.where(NotificationEvent.delivery_status == delivery_status)
+        normalized = "unread" if delivery_status == "pending" else delivery_status
+        statement = statement.where(NotificationUserState.status == normalized)
     if event_type:
         statement = statement.where(NotificationEvent.event_type == event_type)
     if priority:
@@ -70,13 +49,34 @@ async def list_notifications(
     if created_start:
         statement = statement.where(NotificationEvent.created_at >= created_start)
     if created_end:
-        statement = statement.where(NotificationEvent.created_at <= created_end)
+        end_exclusive = datetime.combine(created_end + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        statement = statement.where(NotificationEvent.created_at < end_exclusive)
     if keyword:
         like = f"%{keyword}%"
         statement = statement.where(or_(NotificationEvent.title.like(like), NotificationEvent.content.like(like)))
     statement = statement.order_by(NotificationEvent.created_at.desc(), NotificationEvent.id.desc())
-    rows, total = await paginate_scalars(session, statement, page_no, page_size)
-    return page([model_to_dict(row, NOTIFICATION_FIELDS) for row in rows], total=total, page_no=page_no, page_size=page_size)
+    total = int(await session.scalar(select(func.count()).select_from(statement.order_by(None).subquery())) or 0)
+    rows = (await session.execute(statement.offset((page_no - 1) * page_size).limit(page_size))).all()
+    return page(
+        [serialize_user_notification(event, state) for event, state in rows],
+        total=total,
+        page_no=page_no,
+        page_size=page_size,
+    )
+
+
+@router.get("/unread-count")
+async def unread_count(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    count = await session.scalar(
+        select(func.count(NotificationUserState.id)).where(
+            NotificationUserState.user_id == current_user.id,
+            NotificationUserState.status == "unread",
+        )
+    )
+    return ok({"count": int(count or 0)})
 
 
 @router.post("/{notification_id}/read")
@@ -85,14 +85,16 @@ async def read_notification(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    notification = await session.get(NotificationEvent, notification_id)
-    if notification is None:
+    row = await mark_user_notification_read(
+        session,
+        notification_id=notification_id,
+        user_id=current_user.id,
+    )
+    if row is None:
         return ok({}, "notification not found")
-    if notification.recipient_user_id not in (None, current_user.id) and notification.recipient_role_code not in current_user.roles:
-        return ok({}, "notification not found")
-    await mark_notification_read(session, notification)
+    notification, user_state = row
     await session.commit()
-    return ok(model_to_dict(notification, NOTIFICATION_FIELDS), "notification read")
+    return ok(serialize_user_notification(notification, user_state), "notification read")
 
 
 @router.get("/stream")
