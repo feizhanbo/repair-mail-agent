@@ -38,7 +38,4 @@ async def choose_system_owner(session: AsyncSession, email: Email) -> tuple[int 
     if preferred is not None:
         return preferred.id, language, f"language:{language};username:{preferred_username}"
 
-    fallback = (await session.execute(base.order_by(User.id))).scalars().first()
-    if fallback is not None:
-        return fallback.id, language, f"language:{language};fallback:{fallback.username}"
-    return None, language, f"language:{language};operator_unavailable"
+    return None, language, f"language:{language};required_username_unavailable:{preferred_username}"

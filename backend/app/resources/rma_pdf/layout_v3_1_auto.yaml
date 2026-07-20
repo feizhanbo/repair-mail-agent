@@ -1,0 +1,52 @@
+{
+  "template_version": "rma_authorization_auto_v3_1",
+  "template_sha256": "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0",
+  "template_page_count": 2,
+  "page_width": 842.0,
+  "page_height": 595.0,
+  "title": "RETURN MATERIAL AUTHORIZAION FORM AUTO",
+  "static_anchors": {
+    "0": ["Part Serial No.", "Maintenance price", "www.accotest.com"],
+    "1": ["Customer Name", "Mailing Add", "Total cost", "www.accotest.com"]
+  },
+  "barcode": {"rect": [362.1, 22.9, 693.876, 58.9], "bar_width": 0.75, "bar_height": 36.0},
+  "table": {
+    "footer_clip": [0.0, 550.0, 842.0, 595.0],
+    "footer_dpi": 300,
+    "first_data_top": 359.75,
+    "first_base_row_bottom": 390.60,
+    "first_row_height": 30.85,
+    "first_max_rows": 6,
+    "continuation_data_top": 16.90,
+    "continuation_first_row_bottom": 47.25,
+    "continuation_row_height": 30.85,
+    "continuation_max_rows": 11,
+    "first_horizontal_left_x": 18.20,
+    "first_horizontal_right_x": 832.25,
+    "continuation_horizontal_left_x": 18.00,
+    "continuation_horizontal_right_x": 831.45,
+    "vertical_lines_x": [18.70, 42.50, 86.30, 239.50, 270.50, 321.50, 398.50, 489.50, 577.50, 688.00, 783.15, 832.25],
+    "line_width": 1.0
+  },
+  "fields": {
+    "request_date": {"rect": [552.0, 241.0, 654.0, 258.1], "font_size": 10.75, "min_font_size": 9.0, "align": "left", "max_lines": 1, "padding": 0.0},
+    "currency": {"rect": [552.0, 280.0, 654.0, 297.1], "font_size": 10.75, "min_font_size": 9.0, "align": "left", "max_lines": 1, "padding": 0.0},
+    "item_no": {"rect": [18.2, 359.75, 42.5, 390.6], "font_size": 8.0, "min_font_size": 6.0, "align": "center", "max_lines": 1, "padding": 1.0},
+    "item_part_no": {"rect": [42.5, 359.75, 86.3, 390.6], "font_size": 8.0, "min_font_size": 6.0, "align": "center", "max_lines": 1, "padding": 1.0},
+    "item_description": {"rect": [86.3, 359.75, 239.5, 390.6], "font_size": 8.0, "min_font_size": 5.8, "align": "center", "max_lines": 2, "padding": 2.0},
+    "item_qty": {"rect": [239.5, 359.75, 270.5, 390.6], "font_size": 8.0, "min_font_size": 6.0, "align": "center", "max_lines": 1, "padding": 1.0},
+    "item_rma_no": {"rect": [270.5, 359.75, 321.5, 390.6], "font_size": 8.0, "min_font_size": 5.8, "align": "center", "max_lines": 1, "padding": 1.0},
+    "item_serial_no": {"rect": [321.5, 359.75, 398.5, 390.6], "font_size": 8.0, "min_font_size": 5.8, "align": "center", "max_lines": 2, "padding": 1.0},
+    "item_price": {"rect": [398.5, 359.75, 489.5, 390.6], "font_size": 9.0, "min_font_size": 6.0, "align": "center", "max_lines": 1, "padding": 1.0},
+    "item_program": {"rect": [489.5, 359.75, 577.5, 390.6], "font_size": 8.0, "min_font_size": 5.8, "align": "center", "max_lines": 2, "padding": 2.0},
+    "item_advance": {"rect": [577.5, 359.75, 688.0, 390.6], "font_size": 10.0, "min_font_size": 6.0, "align": "center", "max_lines": 2, "padding": 2.0},
+    "item_failure": {"rect": [688.0, 359.75, 783.15, 390.6], "font_size": 8.0, "min_font_size": 5.5, "align": "center", "max_lines": 2, "padding": 2.0},
+    "item_delivery": {"rect": [783.15, 359.75, 832.25, 390.6], "font_size": 7.15, "min_font_size": 5.5, "align": "center", "max_lines": 2, "padding": 1.0},
+    "customer_name": {"rect": [180.0, 16.9, 434.0, 47.4], "font_size": 10.0, "min_font_size": 7.0, "align": "center", "max_lines": 2, "padding": 2.0},
+    "mailing_address": {"rect": [180.0, 76.9, 434.0, 107.4], "font_size": 10.0, "min_font_size": 6.5, "align": "center", "max_lines": 2, "padding": 2.0},
+    "mailing_contact": {"rect": [615.0, 76.9, 811.0, 105.9], "font_size": 10.0, "min_font_size": 7.0, "align": "center", "max_lines": 2, "padding": 2.0},
+    "delivery_fee": {"rect": [204.5, 179.4, 377.5, 208.4], "font_size": 11.0, "min_font_size": 7.0, "align": "left", "max_lines": 1, "padding": 5.0},
+    "repair_fee": {"rect": [204.5, 215.4, 377.5, 244.35], "font_size": 11.0, "min_font_size": 7.0, "align": "left", "max_lines": 1, "padding": 5.0},
+    "total_cost": {"rect": [204.5, 251.4, 377.5, 280.35], "font_size": 11.0, "min_font_size": 7.0, "align": "left", "max_lines": 1, "padding": 1.0}
+  }
+}

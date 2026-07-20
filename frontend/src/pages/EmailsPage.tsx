@@ -1,4 +1,4 @@
-import { DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, Upload, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -9,11 +9,13 @@ import ContentPreviewButton from '../components/ContentPreviewButton';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type { Attachment, EmailIngestAttachment, EmailIngestRequest, EmailIngestResult, EmailItem, ParseResult } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatFileSizeKb, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
 import { rememberJob, waitForJob } from '../utils/jobs';
+import { hasAnyRole } from '../utils/roles';
 
 type EmailFilters = {
   subject?: string;
@@ -27,6 +29,9 @@ type EmailFilters = {
 const emailAsyncEnabled = import.meta.env.VITE_EMAIL_ASYNC_ENABLED === 'true';
 
 export default function EmailsPage() {
+  const user = useAuthStore((state) => state.user);
+  const canFetchImap = hasAnyRole(user?.roles, ['admin', 'operator']);
+  const canPreflightImap = hasAnyRole(user?.roles, ['admin']);
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -67,6 +72,12 @@ export default function EmailsPage() {
     },
     onError: handleMutationError,
   });
+  const fetchStatusQuery = useQuery({
+    queryKey: ['imap-fetch-status'],
+    queryFn: api.fetchEmailStatus,
+    enabled: canFetchImap,
+    refetchInterval: 5000,
+  });
   const ingestEmlMutation = useMutation({
     mutationFn: (file: File) => api.ingestEmlFileJob(file),
     onSuccess: ({ ingest, job }) => {
@@ -89,6 +100,46 @@ export default function EmailsPage() {
     },
     onSuccess: () => {
       message.success('重新解析任务已排队');
+    },
+    onError: handleMutationError,
+  });
+  const fetchImapMutation = useMutation({
+    mutationFn: async () => {
+      const result = await api.fetchEmailJob();
+      let completedJob = null;
+      if (!result.reused) {
+        rememberJob(result.job);
+        completedJob = await waitForJob(result.job);
+      }
+      return { ...result, completedJob };
+    },
+    onSuccess: (result) => {
+      const partial = result.completedJob?.result_json?.status === 'partial_success'
+        || Number(result.completedJob?.result_json?.failed_count ?? 0) > 0;
+      if (result.reused) message.info('已有邮件捞取任务正在执行');
+      else if (partial) message.warning('邮件捞取完成，部分邮件失败并已进入重试队列');
+      else message.success('邮件捞取完成');
+      void queryClient.invalidateQueries({ queryKey: ['emails'] });
+      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+      void queryClient.invalidateQueries({ queryKey: ['imap-fetch-status'] });
+    },
+    onError: handleMutationError,
+  });
+  const imapPreflightMutation = useMutation({
+    mutationFn: api.preflightImap,
+    onSuccess: (result) => {
+      Modal.success({
+        title: 'IMAP 只读预检通过',
+        content: (
+          <Descriptions column={1} size="small" bordered>
+            <Descriptions.Item label="账号">{result.mailbox_account}</Descriptions.Item>
+            <Descriptions.Item label="文件夹">{result.folder}</Descriptions.Item>
+            <Descriptions.Item label="UIDVALIDITY">{result.uid_validity}</Descriptions.Item>
+            <Descriptions.Item label="读取行为">未搜索、未下载、未修改已读状态</Descriptions.Item>
+            <Descriptions.Item label="OSS">已配置</Descriptions.Item>
+          </Descriptions>
+        ),
+      });
     },
     onError: handleMutationError,
   });
@@ -162,6 +213,24 @@ export default function EmailsPage() {
         title="邮件中心"
         extra={(
           <Space>
+            {canPreflightImap && (
+              <Button
+                loading={imapPreflightMutation.isPending}
+                onClick={() => imapPreflightMutation.mutate()}
+              >
+                只读预检
+              </Button>
+            )}
+            {canFetchImap && (
+              <Button
+                icon={<SyncOutlined spin={fetchImapMutation.isPending} />}
+                loading={fetchImapMutation.isPending}
+                disabled={Boolean(fetchStatusQuery.data?.active_job) || fetchStatusQuery.data?.configured === false}
+                onClick={() => fetchImapMutation.mutate()}
+              >
+                立即捞取
+              </Button>
+            )}
             <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
               导出
             </Button>
@@ -181,6 +250,26 @@ export default function EmailsPage() {
           </Space>
         )}
       />
+      {canFetchImap && (
+        <SectionPanel>
+          <Descriptions column={4} size="small" bordered>
+            <Descriptions.Item label="自动捞取">{fetchStatusQuery.data?.enabled ? '已开启' : '已关闭'}</Descriptions.Item>
+            <Descriptions.Item label="收信账号">{fetchStatusQuery.data?.mailbox_account ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="轮询策略">
+              {fetchStatusQuery.data ? `${fetchStatusQuery.data.poll_interval_minutes} 分钟 / 每批 ${fetchStatusQuery.data.fetch_limit} 封` : '-'}
+            </Descriptions.Item>
+            <Descriptions.Item label="当前任务">
+              <StatusTag value={fetchStatusQuery.data?.active_job?.status ?? fetchStatusQuery.data?.latest_job?.status ?? 'idle'} />
+            </Descriptions.Item>
+            <Descriptions.Item label="文件夹">{fetchStatusQuery.data?.folder ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="读取方式">只读 / UNSEEN / BODY.PEEK[]</Descriptions.Item>
+            <Descriptions.Item label="OSS 归档">{fetchStatusQuery.data?.archive_to_oss ? '强制开启' : '未配置'}</Descriptions.Item>
+            <Descriptions.Item label="失败 / 待重试">
+              {fetchStatusQuery.data ? `${fetchStatusQuery.data.latest_job?.failed_count ?? 0} / ${fetchStatusQuery.data.retry_count}` : '-'}
+            </Descriptions.Item>
+          </Descriptions>
+        </SectionPanel>
+      )}
       <SectionPanel>
         <Form<EmailFilters>
           form={filterForm}

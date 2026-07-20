@@ -10,7 +10,7 @@ from sqlalchemy.dialects import mysql as mysql_dialect
 from app.config import settings
 from app.models import Base
 
-LOCAL_ALEMBIC_HEAD = "b3e1f7d2a4c0"
+LOCAL_ALEMBIC_HEAD = "a8b2c3d4e5f6"
 _mysql_d = mysql_dialect.dialect()
 
 

@@ -38,6 +38,10 @@ services:
         condition: service_healthy
     expose:
       - "8000"
+    environment:
+      AI_LOG_DIR: /app/logs/ai
+    volumes:
+      - ai_log_data:/app/logs/ai
     networks:
       - repair_net
 
@@ -68,6 +72,7 @@ services:
 
 volumes:
   mysql_data:
+  ai_log_data:
 
 networks:
   repair_net:

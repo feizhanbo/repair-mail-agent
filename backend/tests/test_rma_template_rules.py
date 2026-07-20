@@ -30,7 +30,8 @@ def _ticket(**overrides) -> RepairTicket:
 
 
 def test_rma_pdf_template_has_one_canonical_version_with_legacy_read_compatibility() -> None:
-    assert TEMPLATE_VERSION == "rma_authorization_v1"
+    assert TEMPLATE_VERSION == "rma_authorization_auto_v3_1"
+    assert normalize_rma_template_version("rma_authorization_v1") == TEMPLATE_VERSION
     assert normalize_rma_template_version("rma_authorization_zh_v1") == TEMPLATE_VERSION
     assert normalize_rma_template_version(TEMPLATE_VERSION) == TEMPLATE_VERSION
 
@@ -96,7 +97,7 @@ def test_rma_mime_contains_one_pdf_and_never_inherits_cc(monkeypatch) -> None:
     assert attachments[0].get_filename() == "RMATEST.pdf"
 
 
-def test_offline_preflight_fails_for_current_wrong_smtp_login_without_network(monkeypatch) -> None:
+def test_offline_preflight_fails_for_wrong_smtp_login_without_network(monkeypatch) -> None:
     monkeypatch.setattr(settings, "SMTP_USER", "rmatest2@accotest.com")
     monkeypatch.setattr(settings, "SMTP_RECIPIENT_WHITELIST", ["rmatest2@accotest.com"])
 
@@ -122,4 +123,6 @@ def test_offline_preflight_passes_only_for_exact_sender_and_single_recipient_whi
     assert preflight.result["to"] == "rmatest2@accotest.com"
     assert preflight.result["cc"] == []
     assert preflight.result["bcc"] == []
-    assert preflight.result["rma_template_version"] == "rma_authorization_v1"
+    assert preflight.result["rma_template_version"] == "rma_authorization_auto_v3_1"
+    assert preflight.result["pdf_page_count"] == 3
+    assert preflight.result["watermarked_page_count"] == 3

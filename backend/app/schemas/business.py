@@ -177,7 +177,11 @@ class BoardCardImportRequest(BaseModel):
 
 class SystemConfigUpdateRequest(BaseModel):
     auto_send_enabled: bool | None = None
-    reply_send_mode: Literal["human_review", "auto_send"] | None = None
+    rma_auto_send_enabled: bool | None = None
+    reply_send_mode: Literal["human_review", "auto_send"] | None = Field(
+        default=None,
+        json_schema_extra={"deprecated": True},
+    )
     auto_apply_min_confidence: float | None = Field(default=None, ge=0, le=1)
     auto_send_min_confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)

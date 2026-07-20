@@ -1,6 +1,6 @@
 {
   "auto_send_enabled": false,
-  "reply_send_mode": "human_review",
+  "rma_auto_send_enabled": true,
   "auto_send_min_confidence": 0.85,
   "confidence_threshold": 0.7,
   "max_follow_up": 3

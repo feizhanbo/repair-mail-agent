@@ -1,8 +1,8 @@
 import { EyeOutlined, FullscreenOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Button, Empty, Modal, Space, Spin, Typography } from 'antd';
+import { Alert, Button, Empty, Modal, Space, Spin, Typography } from 'antd';
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import type { ContentPreview } from '../types/api';
 import JsonBlock from './JsonBlock';
 
@@ -22,9 +22,21 @@ function PreviewContent({ preview }: { preview: ContentPreview }) {
       <Typography.Text type="secondary">{Math.round(zoom * 100)}%</Typography.Text>
     </Space>
   );
+  const warning = preview.warnings?.length ? (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      message={preview.warnings.map((item) => item.message).join('；')}
+    />
+  ) : null;
+  if (preview.mode === 'download_only') {
+    return <div>{warning}<Empty description="该附件格式仅支持下载，无法在线预览" /></div>;
+  }
   if (preview.mode === 'image' && preview.url) {
     return (
       <div>
+        {warning}
         {controls}
         <div style={{ maxHeight: '65vh', overflow: 'auto', textAlign: 'center' }}>
           <img src={preview.url} alt={preview.file_name || '附件预览'} style={{ display: 'inline-block', maxWidth: zoom === 1 ? '100%' : 'none', width: `${zoom * 100}%` }} />
@@ -38,6 +50,7 @@ function PreviewContent({ preview }: { preview: ContentPreview }) {
   if (preview.mode === 'pdf_pages') {
     return (
       <div>
+        {warning}
         {controls}
         <div style={{ maxHeight: '68vh', overflow: 'auto', background: '#f3f4f6', padding: 12 }}>
           {(preview.pages || []).map((page, index) => (
@@ -52,7 +65,7 @@ function PreviewContent({ preview }: { preview: ContentPreview }) {
     );
   }
   if (preview.mode === 'html') {
-    return <iframe title={preview.file_name || '邮件预览'} srcDoc={preview.html || ''} sandbox="" style={{ width: '100%', height: '60vh', border: '1px solid #d9d9d9' }} />;
+    return <div>{warning}<iframe title={preview.file_name || '邮件预览'} srcDoc={preview.html || ''} sandbox="" style={{ width: '100%', height: '60vh', border: '1px solid #d9d9d9' }} /></div>;
   }
   if (preview.mode === 'extracted') {
     return (
@@ -63,7 +76,7 @@ function PreviewContent({ preview }: { preview: ContentPreview }) {
       </div>
     );
   }
-  return preview.text ? <pre className="json-block" style={{ maxHeight: '65vh' }}>{preview.text}</pre> : <Empty description="暂无可预览内容" />;
+  return <div>{warning}{preview.text ? <pre className="json-block" style={{ maxHeight: '65vh' }}>{preview.text}</pre> : <Empty description="暂无可预览内容" />}</div>;
 }
 
 export default function ContentPreviewButton({ kind, id, disabled }: Props) {
@@ -77,7 +90,15 @@ export default function ContentPreviewButton({ kind, id, disabled }: Props) {
     <>
       <Button type="link" size="small" icon={<EyeOutlined />} disabled={disabled} onClick={() => setOpen(true)} title="预览" />
       <Modal width={900} title={query.data?.file_name || (kind === 'email' ? '邮件正文预览' : '附件预览')} open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        {query.isFetching ? <Spin /> : query.data ? <PreviewContent preview={query.data} /> : <Empty description="预览加载失败" />}
+        {query.isFetching ? <Spin /> : query.error ? (
+          <Alert
+            type="error"
+            showIcon
+            message="预览加载失败"
+            description={apiErrorMessage(query.error)}
+            action={<Button size="small" onClick={() => void query.refetch()}>重试</Button>}
+          />
+        ) : query.data ? <PreviewContent preview={query.data} /> : <Empty description="暂无可预览内容" />}
       </Modal>
     </>
   );

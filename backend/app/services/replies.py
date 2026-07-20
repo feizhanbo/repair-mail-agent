@@ -278,7 +278,7 @@ def _recipient_in_whitelist(*values: str | None) -> bool:
 
 
 def _reply_can_auto_send(reply: ReplyRecord, *, confidence_score: float | None = None, risk_level: str | None = None) -> bool:
-    if settings.REPLY_SEND_MODE != "auto_send" or not settings.AUTO_SEND_ENABLED:
+    if not settings.AUTO_SEND_ENABLED:
         return False
     if not _valid_recipient(reply.to_addresses, reply.cc_addresses):
         return False
@@ -994,7 +994,7 @@ async def create_and_send_rma_authorization(
     if existing is not None:
         ticket.rma_status = "sent"
         return {"status": "succeeded", "ticket_id": ticket.id, "reply_id": existing.id, "idempotent_reuse": True}
-    if not settings.RMA_AUTHORIZATION_ENABLED or not settings.RMA_AUTO_SEND_ENABLED:
+    if not settings.RMA_AUTO_SEND_ENABLED:
         return await _rma_manual_review(session, ticket=ticket, task_type="rma_auto_send_disabled", reason="RMA_AUTO_SEND_DISABLED")
 
     try:
@@ -1004,8 +1004,16 @@ async def create_and_send_rma_authorization(
 
     ticket.rma_status = "generating"
     try:
-        data = await build_rma_pdf_data(session, ticket_id=ticket.id)
-        pdf_content = await asyncio.to_thread(render_rma_pdf, data)
+        data = await build_rma_pdf_data(
+            session,
+            ticket_id=ticket.id,
+            safety_snapshot=ticket.safety_check_snapshot,
+        )
+        test_only = (
+            parseaddr(settings.SMTP_USER)[1].lower() == "rmatest1@accotest.com"
+            and parseaddr(ticket.contact_email or "")[1].lower() == "rmatest2@accotest.com"
+        )
+        pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=test_only)
         file_name = rma_pdf_file_name(data)
         pdf_object = await upload_bytes_to_oss(
             session,
@@ -1035,7 +1043,11 @@ async def create_and_send_rma_authorization(
         rma_pdf_oss_object_id=pdf_object.id,
         reply_template_version=reply_template_version,
         rma_template_version=RMA_TEMPLATE_VERSION,
-        rma_pdf_data_snapshot=rma_pdf_snapshot(data),
+        rma_pdf_data_snapshot=rma_pdf_snapshot(
+            data,
+            pdf_content=pdf_content,
+            oss_object_id=pdf_object.id,
+        ),
         review_status="auto_approved",
         reviewed_at=utcnow(),
         send_status="approved_pending_send",

@@ -30,9 +30,10 @@ class RmaTestPreflight:
 
 
 def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPreflight:
-    """Build and inspect the authorized synthetic message without opening a network connection."""
+    """Build and inspect a synthetic three-page message without connecting to SMTP."""
     stamp = timestamp or datetime.now().strftime("%Y%m%d%H%M%S")
-    authorization_no = f"TEST{stamp}"
+    # Keep the synthetic value within the fixed RMA# table cell.
+    authorization_no = f"T{stamp[-10:]}"
     data = RmaPdfData(
         rma_no=authorization_no,
         request_date=date.today(),
@@ -46,16 +47,17 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
         total_cost=Decimal("0"),
         items=[
             RmaItemData(
-                part_no="TEST-PART",
-                part_description="TEST ONLY / 测试数据",
-                part_serial_no="TESTSN00000001",
-                failure_description="SMTP attachment validation only / 非真实故障",
+                part_no=f"TEST-PART-{index}",
+                part_description="TEST ONLY / synthetic part",
+                part_serial_no=f"TESTSN0000000{index}",
+                failure_description="Synthetic attachment validation only",
             )
+            for index in range(1, 8)
         ],
     )
     pdf_bytes = render_rma_pdf(data, test_only=True)
     filename = rma_pdf_file_name(data)
-    subject = f"[TEST ONLY] RMA授权表附件发送验证 RMATEST{stamp}"
+    subject = f"[TEST ONLY] RMA attachment validation RMATEST{stamp}"
     reply = ReplyRecord(
         ticket_id=0,
         reply_type="rma_authorization",
@@ -63,7 +65,7 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
         cc_addresses=None,
         subject=subject,
         final_body=(
-            "TEST ONLY / 测试数据\n"
+            "TEST ONLY / \u6d4b\u8bd5\u6570\u636e\n"
             "This message validates one synthetic RMA PDF attachment. No real customer data is included."
         ),
     )
@@ -81,7 +83,11 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
     configured_sender = parseaddr(settings.SMTP_USER)[1].lower()
     if configured_sender != TEST_SENDER:
         reasons.append("SMTP_LOGIN_MUST_BE_RMATEST1")
-    whitelist = {parseaddr(value)[1].lower() for value in settings.SMTP_RECIPIENT_WHITELIST if parseaddr(value)[1]}
+    whitelist = {
+        parseaddr(value)[1].lower()
+        for value in settings.SMTP_RECIPIENT_WHITELIST
+        if parseaddr(value)[1]
+    }
     if whitelist != {TEST_RECIPIENT}:
         reasons.append("SMTP_WHITELIST_MUST_CONTAIN_ONLY_RMATEST2")
     if parseaddr(parsed.get("From", ""))[1].lower() != TEST_SENDER:
@@ -96,15 +102,25 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
         reasons.append("MIME_PDF_HASH_MISMATCH")
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-        pdf_text = "\n".join(page.get_text() for page in document)
-    compact_pdf_text = re.sub(r"\s+", "", pdf_text)
+        page_texts = [page.get_text() for page in document]
+        pdf_page_count = document.page_count
+    compact_pdf_text = re.sub(r"\s+", "", "\n".join(page_texts))
     for marker in ("TEST ONLY", "RMA SMTP TEST ONLY", "TESTSN00000001", "TEST-PART"):
         if re.sub(r"\s+", "", marker) not in compact_pdf_text:
             reasons.append(f"PDF_TEST_MARKER_MISSING:{marker}")
+    watermarked_page_count = sum(
+        "TESTONLY" in re.sub(r"\s+", "", page_text) for page_text in page_texts
+    )
+    if watermarked_page_count != pdf_page_count:
+        reasons.append("PDF_TEST_WATERMARK_MISSING")
+    if any("Customer Name" in page_text or "Mailing Add" in page_text for page_text in page_texts[1:-1]):
+        reasons.append("PDF_CONTINUATION_HIDDEN_DETAILS_TEXT")
 
     pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
     attachment_hash = (
-        hashlib.sha256(attachments[0].get_payload(decode=True)).hexdigest() if len(attachments) == 1 else None
+        hashlib.sha256(attachments[0].get_payload(decode=True)).hexdigest()
+        if len(attachments) == 1
+        else None
     )
     return RmaTestPreflight(
         result={
@@ -123,6 +139,8 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
             "attachment_size": len(pdf_bytes),
             "attachment_sha256": attachment_hash,
             "pdf_sha256": pdf_hash,
+            "pdf_page_count": pdf_page_count,
+            "watermarked_page_count": watermarked_page_count,
             "rma_template_version": TEMPLATE_VERSION,
             "smtp_login": configured_sender,
             "smtp_whitelist": sorted(whitelist),

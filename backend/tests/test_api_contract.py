@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import ast
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import CurrentUser, get_current_user
+from app.api.v1 import emails as email_api
 from app.config import settings
 from app.core.database import get_session
 from app.main import app
+from app.models import JobRunLog
 from app.services import emails as email_service
 from app.services import manual_review as manual_review_service
 from app.services import master_data as master_data_service
@@ -49,6 +53,33 @@ class FakeSession:
     async def scalar(self, statement) -> int:
         self.scalar_statements.append(statement)
         return 0
+
+
+class ActiveImapJobSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.job = JobRunLog(
+            id=91,
+            job_name="imap_fetch",
+            job_type="imap_fetch",
+            status="running",
+            resource_type="mailbox",
+            processed_count=0,
+            success_count=0,
+            failed_count=0,
+            attempt_count=0,
+            max_attempts=3,
+        )
+
+    async def scalar(self, statement):
+        self.scalar_statements.append(statement)
+        return self.job
+
+
+class EmptyScalarSession(FakeSession):
+    async def scalar(self, statement):
+        self.scalar_statements.append(statement)
+        return None
 
 
 def make_current_user(*, roles: list[str] | None = None, user_id: int = 7) -> CurrentUser:
@@ -91,6 +122,7 @@ def test_expected_business_routes_are_registered() -> None:
     assert "POST /api/v1/emails/ingest/jobs" in routes
     assert "POST /api/v1/emails/ingest-eml/jobs" in routes
     assert "POST /api/v1/emails/fetch/jobs" in routes
+    assert "GET /api/v1/emails/fetch-status" in routes
     assert "GET /api/v1/emails/export" in routes
     assert "GET /api/v1/emails/{email_id}/raw-eml-url" in routes
     assert "GET /api/v1/emails/attachments/{attachment_id}/download-url" in routes
@@ -511,21 +543,92 @@ def test_operator_cannot_patch_system_config() -> None:
     assert payload["message"] == "AUTH_FORBIDDEN"
 
 
+@pytest.mark.parametrize("role", ["operator", "admin", "supervisor"])
+def test_supported_roles_reuse_active_imap_fetch_job(role: str) -> None:
+    session = ActiveImapJobSession()
+    with make_client(session, roles=[role]) as client:
+        response = client.post("/api/v1/emails/fetch/jobs")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["reused"] is True
+    assert payload["data"]["job"]["id"] == 91
+    assert session.committed is False
+
+
+def test_unsupported_role_cannot_fetch_or_view_imap_status() -> None:
+    with make_client(roles=["viewer"]) as client:
+        fetch_response = client.post("/api/v1/emails/fetch/jobs")
+        status_response = client.get("/api/v1/emails/fetch-status")
+
+    assert fetch_response.status_code == 403
+    assert status_response.status_code == 403
+
+
+def test_operator_cannot_use_deprecated_synchronous_fetch_now() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.post("/api/v1/emails/fetch-now")
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["operator", "admin"])
+def test_operator_and_admin_can_queue_imap_fetch_with_server_defaults(monkeypatch, role: str) -> None:
+    session = EmptyScalarSession()
+    captured: dict = {}
+
+    @asynccontextmanager
+    async def acquired_lock():
+        yield True
+
+    async def fake_enqueue(_session, **kwargs):
+        captured.update(kwargs)
+        return JobRunLog(
+            id=92,
+            job_name="imap_fetch",
+            job_type="imap_fetch",
+            status="queued",
+            resource_type="mailbox",
+            processed_count=0,
+            success_count=0,
+            failed_count=0,
+            attempt_count=0,
+            max_attempts=3,
+        )
+
+    monkeypatch.setattr(email_api.imap_fetcher, "imap_fetch_lock", acquired_lock)
+    monkeypatch.setattr(email_api, "enqueue_job", fake_enqueue)
+
+    with make_client(session, roles=[role]) as client:
+        response = client.post("/api/v1/emails/fetch/jobs")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["reused"] is False
+    assert captured["metadata"]["folder_name"] == settings.IMAP_FOLDER
+    assert captured["metadata"]["limit"] == settings.IMAP_FETCH_LIMIT
+    assert captured["metadata"]["unseen_only"] == settings.IMAP_UNSEEN_ONLY
+    assert session.committed is True
+
+
 def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "RUNTIME_CONFIG_PATH", str(tmp_path / "runtime_config.json"))
     monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", False)
+    monkeypatch.setattr(settings, "RMA_AUTO_SEND_ENABLED", True)
     monkeypatch.setattr(settings, "CONFIDENCE_THRESHOLD", 0.8)
     monkeypatch.setattr(settings, "MAX_FOLLOW_UP", 2)
 
     with make_client(roles=["admin"]) as client:
         response = client.patch(
             "/api/v1/system/config",
-            json={"auto_send_enabled": True, "reply_send_mode": "auto_send", "auto_send_min_confidence": 0.88, "confidence_threshold": 0.91, "max_follow_up": 3},
+            json={"auto_send_enabled": True, "rma_auto_send_enabled": False, "auto_send_min_confidence": 0.88, "confidence_threshold": 0.91, "max_follow_up": 3},
         )
 
     payload = response.json()
     assert response.status_code == 200
     assert payload["data"]["auto_send_enabled"] is True
+    assert payload["data"]["rma_auto_send_enabled"] is False
+    # Compatibility output remains for one release, but new writes use the two canonical booleans.
     assert payload["data"]["reply_send_mode"] == "auto_send"
     assert payload["data"]["auto_send_min_confidence"] == 0.88
     assert payload["data"]["confidence_threshold"] == 0.91

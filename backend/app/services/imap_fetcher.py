@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import imaplib
+import re
 import time
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.database import engine
 from app.models import JobRunLog
 from app.models.mail_fetch import MailFetchRecord
 from app.services import emails as email_service
@@ -32,6 +35,7 @@ class ImapFetchError(RuntimeError):
 
 _mail_io_semaphore = asyncio.Semaphore(max(1, settings.MAIL_IO_CONCURRENCY))
 _RETRY_MINUTES = (5, 15, 60, 180, 720)
+_IMAP_LOCK_NAME = "repair_mail_agent_imap_fetch"
 
 
 async def _mail_io(func, *args, **kwargs):
@@ -53,6 +57,10 @@ async def _rollback(session: AsyncSession) -> None:
 
 def _imap_configured() -> bool:
     return bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD)
+
+
+def _oss_configured() -> bool:
+    return bool(settings.OSS_ENDPOINT and settings.OSS_BUCKET and settings.OSS_ACCESS_KEY and settings.OSS_SECRET_KEY)
 
 
 def _decode_uid(value: bytes | str) -> str:
@@ -90,6 +98,152 @@ def _uid_fetch_raw(client: imaplib.IMAP4_SSL, uid: str) -> bytes:
     raise ImapFetchError("IMAP_FETCH_EMPTY")
 
 
+def _uid_validity(client: imaplib.IMAP4_SSL) -> int:
+    typ, data = client.response("UIDVALIDITY")
+    if typ is None or not data:
+        raise ImapFetchError("IMAP_UIDVALIDITY_MISSING")
+    for item in data:
+        value = item.decode("ascii", errors="ignore") if isinstance(item, bytes) else str(item)
+        match = re.search(r"\d+", value)
+        if match and int(match.group(0)) > 0:
+            return int(match.group(0))
+    raise ImapFetchError("IMAP_UIDVALIDITY_MISSING")
+
+
+async def _select_readonly(client: imaplib.IMAP4_SSL, folder_name: str) -> int:
+    typ, _ = await _mail_io(client.select, folder_name, readonly=True)
+    if typ != "OK":
+        raise ImapFetchError("IMAP_SELECT_FAILED")
+    return await _mail_io(_uid_validity, client)
+
+
+async def _find_fetch_record(
+    session: AsyncSession,
+    *,
+    mailbox_account: str,
+    folder_name: str,
+    uid_validity: int,
+    imap_uid: str,
+) -> MailFetchRecord | None:
+    return await session.scalar(
+        select(MailFetchRecord).where(
+            MailFetchRecord.mailbox_account == mailbox_account,
+            MailFetchRecord.folder_name == folder_name,
+            MailFetchRecord.uid_validity == uid_validity,
+            MailFetchRecord.imap_uid == imap_uid,
+        )
+    )
+
+
+async def _save_fetch_result(
+    session: AsyncSession,
+    *,
+    mailbox_account: str,
+    folder_name: str,
+    uid_validity: int,
+    imap_uid: str,
+    message_id: str,
+    fetch_job_run_id: int | None,
+    email_id: int | None,
+    duplicate: bool,
+    fetch_status: str,
+    error_message: str | None = None,
+) -> MailFetchRecord:
+    record = await _find_fetch_record(
+        session,
+        mailbox_account=mailbox_account,
+        folder_name=folder_name,
+        uid_validity=uid_validity,
+        imap_uid=imap_uid,
+    )
+    previous_attempts = int(record.attempt_count or 0) if record is not None else 0
+    if record is None:
+        record = MailFetchRecord(
+            mailbox_account=mailbox_account,
+            folder_name=folder_name,
+            uid_validity=uid_validity,
+            imap_uid=imap_uid,
+            message_id=message_id,
+        )
+        session.add(record)
+    record.message_id = message_id
+    record.fetch_job_run_id = fetch_job_run_id
+    record.email_id = email_id
+    record.duplicate = duplicate
+    record.fetch_status = fetch_status
+    record.attempt_count = previous_attempts + 1
+    record.last_attempt_at = utcnow()
+    record.next_retry_at = None
+    record.error_message = error_message
+    return record
+
+
+async def preflight_imap(*, folder_name: str = "INBOX") -> dict[str, Any]:
+    """Validate the mailbox without searching, fetching, or changing message flags."""
+    if not _oss_configured():
+        raise ImapConfigurationError("OSS_NOT_CONFIGURED")
+    client: imaplib.IMAP4_SSL | None = None
+    try:
+        client = await _mail_io(_connect)
+        uid_validity = await _select_readonly(client, folder_name)
+        return {
+            "status": "ready",
+            "tls": True,
+            "authenticated": True,
+            "mailbox_account": settings.IMAP_USER,
+            "folder": folder_name,
+            "read_only": True,
+            "uid_validity": uid_validity,
+            "oss_configured": True,
+            "messages_downloaded": 0,
+            "flags_changed": False,
+        }
+    finally:
+        if client is not None:
+            try:
+                await _mail_io(client.close)
+            except Exception:
+                pass
+            try:
+                await _mail_io(client.logout)
+            except Exception:
+                pass
+
+
+@asynccontextmanager
+async def imap_fetch_lock():
+    """Hold a dedicated MySQL connection so commits in the work session cannot release ownership."""
+    async with engine.connect() as connection:
+        acquired = await connection.scalar(text("SELECT GET_LOCK(:lock_name, 0)"), {"lock_name": _IMAP_LOCK_NAME})
+        try:
+            yield acquired == 1
+        finally:
+            if acquired == 1:
+                await connection.scalar(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": _IMAP_LOCK_NAME})
+
+
+async def run_imap_fetch_locked(
+    session: AsyncSession,
+    *,
+    busy_is_error: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    async with imap_fetch_lock() as acquired:
+        if not acquired:
+            if busy_is_error:
+                raise ImapFetchError("IMAP_FETCH_BUSY")
+            return {
+                "status": "skipped_busy",
+                "processed_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "fetched": [],
+                "failures": [],
+            }
+        return await fetch_imap_emails(session, **kwargs)
+
+
 async def fetch_imap_emails(
     session: AsyncSession,
     *,
@@ -103,6 +257,8 @@ async def fetch_imap_emails(
 ) -> dict[str, Any]:
     if not archive_to_oss:
         raise ImapConfigurationError("OSS_ARCHIVE_REQUIRED")
+    if not _oss_configured():
+        raise ImapConfigurationError("OSS_NOT_CONFIGURED")
     started = time.monotonic()
     job = JobRunLog(
         job_name="imap_fetch_now",
@@ -129,27 +285,33 @@ async def fetch_imap_emails(
     client: imaplib.IMAP4_SSL | None = None
     try:
         client = await _mail_io(_connect)
-        typ, _ = await _mail_io(client.select, folder_name, readonly=True)
-        if typ != "OK":
-            raise ImapFetchError("IMAP_SELECT_FAILED")
+        uid_validity = await _select_readonly(client, folder_name)
+        job.metadata_json = {**dict(job.metadata_json or {}), "uid_validity": uid_validity}
         uids = await _mail_io(_uid_search, client, message_id=message_id, unseen_only=unseen_only)
-        if limit > 0:
-            uids = uids[-limit:]
-        job.processed_count = len(uids)
-
+        uids.sort(key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
+        # The mailbox remains unread by design. Remove already handled/not-due
+        # UIDs before applying the batch limit, otherwise the newest handled
+        # UIDs can permanently starve older unprocessed mail.
+        selected_uids: list[str] = []
         for uid in uids:
-            try:
-                uid_precheck = await precheck_imap_uid(
-                    session,
-                    mailbox_account=settings.IMAP_USER,
-                    folder_name=folder_name,
-                    imap_uid=uid,
-                )
-                if uid_precheck is not None:
-                    skipped_count += 1
-                    fetched.append({"uid": uid, "fetch_status": uid_precheck.status, "precheck": uid_precheck.to_dict()})
-                    continue
+            uid_precheck = await precheck_imap_uid(
+                session,
+                mailbox_account=settings.IMAP_USER,
+                folder_name=folder_name,
+                uid_validity=uid_validity,
+                imap_uid=uid,
+            )
+            if uid_precheck is not None:
+                skipped_count += 1
+                fetched.append({"uid": uid, "fetch_status": uid_precheck.status, "precheck": uid_precheck.to_dict()})
+                continue
+            selected_uids.append(uid)
+            if limit > 0 and len(selected_uids) >= limit:
+                break
+        job.processed_count = len(selected_uids)
 
+        for uid in selected_uids:
+            try:
                 raw = await _mail_io(_uid_fetch_raw, client, uid)
                 payload = payload_from_eml_bytes(raw, mailbox_account=settings.IMAP_USER, folder_name=folder_name)
                 payload.raw_eml_sha256 = hashlib.sha256(raw).hexdigest()
@@ -160,18 +322,18 @@ async def fetch_imap_emails(
                 payload_precheck = await precheck_email_payload(session, payload)
                 if not payload_precheck.accepted:
                     skipped_count += 1
-                    session.add(
-                        MailFetchRecord(
-                            mailbox_account=settings.IMAP_USER,
-                            folder_name=folder_name,
-                            imap_uid=uid,
-                            message_id=payload_precheck.message_id or payload.message_id or "",
-                            fetch_job_run_id=job.id,
-                            email_id=payload_precheck.duplicate_email_id,
-                            duplicate=payload_precheck.status == "duplicate_message_skipped",
-                            fetch_status=payload_precheck.status,
-                            error_message=payload_precheck.reason[:1000],
-                        )
+                    await _save_fetch_result(
+                        session,
+                        mailbox_account=settings.IMAP_USER,
+                        folder_name=folder_name,
+                        uid_validity=uid_validity,
+                        imap_uid=uid,
+                        message_id=payload_precheck.message_id or payload.message_id or "",
+                        fetch_job_run_id=job.id,
+                        email_id=payload_precheck.duplicate_email_id,
+                        duplicate=payload_precheck.status == "duplicate_message_skipped",
+                        fetch_status=payload_precheck.status,
+                        error_message=payload_precheck.reason[:1000],
                     )
                     fetched.append(
                         {
@@ -224,17 +386,17 @@ async def fetch_imap_emails(
                             "rule_parse_result_id": ingest_result["rule_parse_result_id"],
                         },
                     )
-                session.add(
-                    MailFetchRecord(
-                        mailbox_account=settings.IMAP_USER,
-                        folder_name=folder_name,
-                        imap_uid=uid,
-                        message_id=payload.message_id,
-                        fetch_job_run_id=job.id,
-                        email_id=ingest_result.get("email", {}).get("id"),
-                        duplicate=ingest_result.get("duplicate", False),
-                        fetch_status="duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
-                    )
+                await _save_fetch_result(
+                    session,
+                    mailbox_account=settings.IMAP_USER,
+                    folder_name=folder_name,
+                    uid_validity=uid_validity,
+                    imap_uid=uid,
+                    message_id=payload.message_id,
+                    fetch_job_run_id=job.id,
+                    email_id=ingest_result.get("email", {}).get("id"),
+                    duplicate=ingest_result.get("duplicate", False),
+                    fetch_status="duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
                 )
                 fetched.append(
                     {
@@ -250,12 +412,12 @@ async def fetch_imap_emails(
                 await _commit(session)
             except Exception as exc:
                 await _rollback(session)
-                existing_failure = await session.scalar(
-                    select(MailFetchRecord).where(
-                        MailFetchRecord.mailbox_account == settings.IMAP_USER,
-                        MailFetchRecord.folder_name == folder_name,
-                        MailFetchRecord.imap_uid == uid,
-                    )
+                existing_failure = await _find_fetch_record(
+                    session,
+                    mailbox_account=settings.IMAP_USER,
+                    folder_name=folder_name,
+                    uid_validity=uid_validity,
+                    imap_uid=uid,
                 )
                 attempt_count = (existing_failure.attempt_count if existing_failure else 0) + 1
                 retry_index = min(attempt_count - 1, len(_RETRY_MINUTES) - 1)
@@ -265,6 +427,7 @@ async def fetch_imap_emails(
                     existing_failure = MailFetchRecord(
                         mailbox_account=settings.IMAP_USER,
                         folder_name=folder_name,
+                        uid_validity=uid_validity,
                         imap_uid=uid,
                         message_id="",
                         fetch_job_run_id=job.id,
@@ -307,6 +470,7 @@ async def fetch_imap_emails(
         "success_count": job.success_count,
         "failed_count": job.failed_count,
         "skipped_count": skipped_count,
+        "uid_validity": uid_validity,
         "fetched": fetched,
         "failures": failures,
     }

@@ -60,7 +60,16 @@ export default function NotificationsPage() {
     { title: '标题', dataIndex: 'title', ellipsis: true },
     { title: '类型', dataIndex: 'event_type', width: 150 },
     { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <Tag color={value === 'high' ? 'orange' : 'blue'}>{value}</Tag> },
-    { title: '状态', dataIndex: 'delivery_status', width: 90, render: (value: string) => <Tag color={value === 'read' ? 'default' : 'green'}>{value === 'read' ? '已读' : '未读'}</Tag> },
+    {
+      title: '状态',
+      dataIndex: 'delivery_status',
+      width: 90,
+      render: (value: string) => (
+        <Tag color={value === 'resolved' ? 'blue' : value === 'read' ? 'default' : 'green'}>
+          {value === 'resolved' ? '已解决' : value === 'read' ? '已读' : '未读'}
+        </Tag>
+      ),
+    },
     { title: '时间', dataIndex: 'created_at', width: 160, render: formatTime },
     {
       title: '操作',
@@ -68,7 +77,7 @@ export default function NotificationsPage() {
       render: (_, record) => (
         <Space>
           <Button size="small" onClick={() => setSelected(record)}>详情</Button>
-          <Button size="small" disabled={record.delivery_status === 'read'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
+          <Button size="small" disabled={record.delivery_status === 'read' || record.delivery_status === 'resolved'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
           <Button size="small" onClick={() => void jumpToTarget(record)}>跳转</Button>
         </Space>
       ),
@@ -93,7 +102,7 @@ export default function NotificationsPage() {
             <Select
               allowClear
               style={{ width: 140 }}
-              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
+              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }, { value: 'resolved', label: '已解决' }]}
               placeholder="消息状态"
             />
           </Form.Item>
@@ -148,6 +157,8 @@ export default function NotificationsPage() {
               <Descriptions.Item label="事件类型">{selected.event_type}</Descriptions.Item>
               <Descriptions.Item label="目标">{selected.target_type} #{selected.target_id}</Descriptions.Item>
               <Descriptions.Item label="状态">{selected.delivery_status}</Descriptions.Item>
+              <Descriptions.Item label="已读时间">{formatTime(selected.read_at)}</Descriptions.Item>
+              <Descriptions.Item label="解决时间">{formatTime(selected.resolved_at)}</Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatTime(selected.created_at)}</Descriptions.Item>
             </Descriptions>
             <JsonBlock value={selected.metadata ?? selected.metadata_json} />

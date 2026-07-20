@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.models import ParseResult
+from app.models import ManualReviewTask, ParseResult, Role, User, UserRole
 from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
@@ -254,9 +254,51 @@ async def correct_owner(
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
+    owner = await session.scalar(
+        select(User)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            User.id == payload.owner_user_id,
+            User.status == "active",
+            Role.role_code == "operator",
+        )
+    )
+    if owner is None:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OWNER_MUST_BE_ACTIVE_OPERATOR")
     before = ticket.assigned_user_id
-    ticket.assigned_user_id = payload.owner_user_id
-    from app.services.audit import log_operation
+    ticket.assigned_user_id = owner.id
+    open_tasks = (
+        await session.execute(
+            select(ManualReviewTask).where(
+                ManualReviewTask.ticket_id == ticket.id,
+                ManualReviewTask.status.in_(("pending", "assigned", "claimed", "assignment_failed")),
+            )
+        )
+    ).scalars().all()
+    from app.services.audit import create_notification, log_operation
+    from app.services.notifications import resolve_notifications_for_target
+
+    for task in open_tasks:
+        await resolve_notifications_for_target(session, target_type="manual_review_task", target_id=task.id)
+        task.assigned_user_id = owner.id
+        task.claimed_by_user_id = None
+        task.claimed_at = None
+        task.status = "pending"
+        await create_notification(
+            session,
+            event_type="manual_review_owner_corrected",
+            target_type="manual_review_task",
+            target_id=task.id,
+            title="人工复核任务负责人已纠正",
+            content=f"工单 {ticket.ticket_no} 已由管理员指定给你处理。",
+            priority=task.priority,
+            recipient_user_id=owner.id,
+            recipient_role_code=None,
+            metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task.task_type},
+        )
     await log_operation(
         session,
         user_id=current_user.id,
@@ -265,7 +307,7 @@ async def correct_owner(
         target_id=ticket.id,
         description=payload.reason,
         before_data={"owner_user_id": before},
-        after_data={"owner_user_id": payload.owner_user_id},
+        after_data={"owner_user_id": owner.id, "synchronized_open_tasks": len(open_tasks)},
     )
     await session.commit()
     return ok(await ticket_service.get_ticket_detail(session, ticket_id), "ticket owner corrected")

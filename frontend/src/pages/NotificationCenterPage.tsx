@@ -35,7 +35,7 @@ function targetPath(record: NotificationEvent) {
 export default function NotificationCenterPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'read'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'read' | 'resolved'>('all');
   const params = { page: 1, page_size: 50, delivery_status: activeTab === 'all' ? undefined : activeTab };
   const query = useQuery({
     queryKey: ['notification-center', params],
@@ -78,11 +78,12 @@ export default function NotificationCenterPage() {
       <SectionPanel className="notification-center-panel">
         <Tabs
           activeKey={activeTab}
-          onChange={(value) => setActiveTab(value as 'all' | 'pending' | 'read')}
+          onChange={(value) => setActiveTab(value as 'all' | 'pending' | 'read' | 'resolved')}
           items={[
             { key: 'all', label: '全部通知' },
             { key: 'pending', label: '未读' },
             { key: 'read', label: '已读' },
+            { key: 'resolved', label: '已解决' },
           ]}
         />
         {list.length ? (
@@ -91,13 +92,13 @@ export default function NotificationCenterPage() {
             dataSource={list}
             renderItem={(item) => (
               <List.Item
-                className={item.delivery_status === 'read' ? 'notification-row is-read' : 'notification-row'}
+                className={item.delivery_status !== 'unread' ? 'notification-row is-read' : 'notification-row'}
                 actions={[
                   <Button key="detail" type="link" onClick={() => void jumpToTarget(item)}>跳转</Button>,
                   <Button
                     key="read"
                     type="link"
-                    disabled={item.delivery_status === 'read'}
+                    disabled={item.delivery_status === 'read' || item.delivery_status === 'resolved'}
                     onClick={() => readMutation.mutate(item.id)}
                   >
                     已读
@@ -111,12 +112,18 @@ export default function NotificationCenterPage() {
                       <Typography.Text strong>{item.title}</Typography.Text>
                       <Tag color={item.priority === 'high' ? 'orange' : 'blue'}>{item.priority}</Tag>
                       <Tag>{item.event_type}</Tag>
+                      <Tag color={item.delivery_status === 'resolved' ? 'blue' : item.delivery_status === 'read' ? 'default' : 'green'}>
+                        {item.delivery_status === 'resolved' ? '已解决' : item.delivery_status === 'read' ? '已读' : '未读'}
+                      </Tag>
                     </Space>
                   )}
                   description={(
                     <div className="notification-description">
                       <Typography.Paragraph ellipsis={{ rows: 2 }}>{item.content || '-'}</Typography.Paragraph>
                       <Typography.Text type="secondary">{formatTime(item.created_at)}</Typography.Text>
+                      {item.delivery_status === 'resolved' ? (
+                        <Typography.Text type="secondary">解决于 {formatTime(item.resolved_at)}</Typography.Text>
+                      ) : null}
                     </div>
                   )}
                 />

@@ -146,6 +146,8 @@ async def build_sn_validation_report(
     duplicate_sns = {sn for sn, count in Counter(normalized_sns).items() if count > 1}
     if not items:
         errors["items"] = "at_least_one_item_required"
+    elif len(items) > 300:
+        errors["items"] = "maximum_300_items"
 
     source_system = "sqlserver_live+local_sn_assets" if settings.RELAY_SQLSERVER_ENABLED else "local_sn_assets"
     for item in items:
@@ -411,6 +413,8 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
     item_snapshots: list[dict[str, Any]] = []
     if not items:
         errors["items"] = "at_least_one_item_required"
+    elif len(items) > 300:
+        errors["items"] = "maximum_300_items"
     for item in items:
         prefix = f"items.{item.line_no}"
         if not item.material_code:
@@ -419,8 +423,8 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
             errors[f"{prefix}.material_name"] = "required"
         if not item.failure_description:
             errors[f"{prefix}.failure_description"] = "required"
-        if not item.quantity or item.quantity < 1:
-            errors[f"{prefix}.quantity"] = "must_be_positive"
+        if item.quantity != 1:
+            errors[f"{prefix}.quantity"] = "one_sn_requires_quantity_one"
         item_snapshots.append(
             {
                 "id": item.id,
@@ -452,8 +456,8 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
             )
         )
     )
-    if rma_required and len(items) != 1:
-        errors["rma.items"] = "rma_authorization_v1_requires_one_item"
+    if rma_required and not 1 <= len(items) <= 300:
+        errors["rma.items"] = "rma_authorization_auto_v3_1_requires_1_to_300_items"
     snapshot = {
         "ticket_id": ticket.id,
         "ticket_no": ticket.ticket_no,

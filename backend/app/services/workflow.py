@@ -6,11 +6,22 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ManualReviewTask, NotificationEvent, RepairTicket, TicketStatusLog, WorkflowStatus, WorkflowTransition
+from app.models import ManualReviewTask, NotificationEvent, RepairTicket, Role, TicketStatusLog, User, UserRole, WorkflowStatus, WorkflowTransition
 from app.services.audit import create_notification, log_operation
 from app.services.common import utcnow
 
-OPEN_TASK_STATUSES = ("pending", "claimed", "assigned")
+OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
+
+
+async def _active_operator(session: AsyncSession, user_id: int | None) -> User | None:
+    if user_id is None:
+        return None
+    return await session.scalar(
+        select(User)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(User.id == user_id, User.status == "active", Role.role_code == "operator")
+    )
 
 
 def task_type_for_event(trigger_event: str) -> str:
@@ -47,42 +58,49 @@ async def create_manual_task_if_missing(
         return existing
 
     sticky_assignee = assigned_user_id or ticket.assigned_user_id
+    owner = await _active_operator(session, sticky_assignee)
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
         task_type=task_type,
         priority=priority,
-        status="pending",
+        status="pending" if owner is not None else "assignment_failed",
         description=f"工单 {ticket.ticket_no} 需要人工复核。",
         trigger_reason=trigger_reason,
-        assigned_user_id=sticky_assignee,
+        assigned_user_id=owner.id if owner is not None else None,
     )
     session.add(task)
     await session.flush()
-    await create_notification(
-        session,
-        event_type="manual_review_created",
-        target_type="manual_review_task",
-        target_id=task.id,
-        title="新的人工复核任务",
-        content=trigger_reason or f"工单 {ticket.ticket_no} 需要人工处理。",
-        priority=priority,
-        recipient_user_id=None,
-        recipient_role_code=None,
-        metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
-    )
-    if sticky_assignee:
+    if owner is not None:
         await create_notification(
             session,
             event_type="manual_review_assigned",
             target_type="manual_review_task",
             target_id=task.id,
-            title="人工复核任务已分配给你",
-            content=trigger_reason or f"工单 {ticket.ticket_no} 需要你处理。",
+            title="人工复核任务已由系统分配",
+            content=trigger_reason or f"工单 {ticket.ticket_no} 需要处理。",
             priority=priority,
-            recipient_user_id=sticky_assignee,
+            recipient_user_id=owner.id,
             recipient_role_code=None,
             metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
+        )
+    else:
+        await create_notification(
+            session,
+            event_type="manual_review_assignment_failed",
+            target_type="manual_review_task",
+            target_id=task.id,
+            title="人工复核任务负责人分配失败",
+            content=f"工单 {ticket.ticket_no} 的系统负责人不可用，请管理员纠正负责人。",
+            priority="high",
+            recipient_user_id=None,
+            recipient_role_code="admin",
+            metadata={
+                "ticket_id": ticket.id,
+                "ticket_no": ticket.ticket_no,
+                "task_type": task_type,
+                "requested_owner_user_id": sticky_assignee,
+            },
         )
     return task
 

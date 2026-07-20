@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from email.message import EmailMessage
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,14 @@ from app.services import email_archival, imap_fetcher
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def configured_oss(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(imap_fetcher.settings, "OSS_ENDPOINT", "https://oss.example.test")
+    monkeypatch.setattr(imap_fetcher.settings, "OSS_BUCKET", "test-bucket")
+    monkeypatch.setattr(imap_fetcher.settings, "OSS_ACCESS_KEY", "test-access")
+    monkeypatch.setattr(imap_fetcher.settings, "OSS_SECRET_KEY", "test-secret")
 
 
 class FakeSession:
@@ -39,6 +48,7 @@ class FakeImapClient:
         self.raw = raw
         self.closed = False
         self.logged_out = False
+        self.uid_called = False
 
     def select(self, folder_name: str, readonly: bool = True):
         assert folder_name == "INBOX"
@@ -46,6 +56,7 @@ class FakeImapClient:
         return "OK", [b""]
 
     def uid(self, command: str, uid: str | None, *args):
+        self.uid_called = True
         if command == "SEARCH":
             return "OK", [b"101"]
         if command == "FETCH":
@@ -53,11 +64,37 @@ class FakeImapClient:
             return "OK", [(b"BODY[]", self.raw)]
         raise AssertionError(command)
 
+    def response(self, code: str):
+        assert code == "UIDVALIDITY"
+        return "UIDVALIDITY", [b"777"]
+
     def close(self) -> None:
         self.closed = True
 
     def logout(self) -> None:
         self.logged_out = True
+
+
+class MultiUidImapClient(FakeImapClient):
+    def __init__(self, uids: list[str]) -> None:
+        super().__init__(_raw_eml())
+        self.uids = uids
+        self.fetched_uids: list[str] = []
+
+    def uid(self, command: str, uid: str | None, *args):
+        if command == "SEARCH":
+            return "OK", [" ".join(self.uids).encode()]
+        if command == "FETCH":
+            assert uid is not None
+            self.fetched_uids.append(uid)
+            message = EmailMessage()
+            message["From"] = "Customer <customer@example.com>"
+            message["To"] = "Repair <repair@example.com>"
+            message["Subject"] = f"Repair SN{uid}"
+            message["Message-ID"] = f"<imap-{uid}@example.com>"
+            message.set_content(f"Please repair SN{uid}")
+            return "OK", [(b"BODY[]", message.as_bytes())]
+        raise AssertionError(command)
 
 
 def _raw_eml() -> bytes:
@@ -121,7 +158,7 @@ async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(m
     assert payload.imap_uid == "101"
     assert payload.fetch_job_run_id == 1
     assert any(isinstance(item, JobRunLog) and item.status == "success" for item in session.added)
-    assert any(isinstance(item, MailFetchRecord) and item.email_id == 77 for item in session.added)
+    assert any(isinstance(item, MailFetchRecord) and item.email_id == 77 and item.uid_validity == 777 for item in session.added)
     assert client.closed is True
     assert client.logged_out is True
 
@@ -192,3 +229,155 @@ async def test_fetch_imap_emails_skips_irrelevant_before_oss_upload(monkeypatch:
     record = next(item for item in session.added if isinstance(item, MailFetchRecord))
     assert record.fetch_status == "irrelevant_skipped"
     assert record.email_id is None
+
+
+@pytest.mark.anyio
+async def test_fetch_filters_processed_uids_before_applying_batch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    client = MultiUidImapClient(["103", "101", "102"])
+    ingested: list[str] = []
+
+    async def fake_uid_precheck(_session, *, imap_uid: str, **_kwargs):
+        if imap_uid == "101":
+            return SimpleNamespace(status="duplicate_uid_skipped", to_dict=lambda: {"status": "duplicate_uid_skipped"})
+        return None
+
+    async def fake_archive(_session, *, payload, **_kwargs):
+        return payload
+
+    async def fake_ingest(_session, *, payload, **_kwargs):
+        ingested.append(payload.imap_uid)
+        return {"duplicate": False, "email": {"id": len(ingested), "parse_status": "pending"}}
+
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", fake_uid_precheck)
+    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+
+    result = await imap_fetcher.fetch_imap_emails(
+        session,
+        limit=2,
+        auto_parse=False,
+        archive_to_oss=True,
+        user_id=7,
+    )
+
+    assert client.fetched_uids == ["102", "103"]
+    assert ingested == ["102", "103"]
+    assert result["processed_count"] == 2
+    assert result["success_count"] == 2
+    assert result["skipped_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_locked_fetch_does_not_connect_when_another_fetch_owns_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+
+    @asynccontextmanager
+    async def busy_lock():
+        yield False
+
+    async def fail_fetch(*_args, **_kwargs):
+        raise AssertionError("IMAP must not be called while the named lock is busy")
+
+    monkeypatch.setattr(imap_fetcher, "imap_fetch_lock", busy_lock)
+    monkeypatch.setattr(imap_fetcher, "fetch_imap_emails", fail_fetch)
+
+    result = await imap_fetcher.run_imap_fetch_locked(session, limit=10)
+
+    assert result["status"] == "skipped_busy"
+    assert result["processed_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_background_job_retries_instead_of_reporting_success_when_lock_is_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+
+    @asynccontextmanager
+    async def busy_lock():
+        yield False
+
+    monkeypatch.setattr(imap_fetcher, "imap_fetch_lock", busy_lock)
+
+    with pytest.raises(imap_fetcher.ImapFetchError, match="IMAP_FETCH_BUSY"):
+        await imap_fetcher.run_imap_fetch_locked(session, limit=10, busy_is_error=True)
+
+
+@pytest.mark.anyio
+async def test_imap_preflight_is_read_only_and_does_not_search_or_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeImapClient(_raw_eml())
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "rmatest1@accotest.com")
+
+    result = await imap_fetcher.preflight_imap(folder_name="INBOX")
+
+    assert result["status"] == "ready"
+    assert result["uid_validity"] == 777
+    assert result["read_only"] is True
+    assert result["messages_downloaded"] == 0
+    assert result["flags_changed"] is False
+    assert client.uid_called is False
+    assert client.closed is True
+    assert client.logged_out is True
+
+
+@pytest.mark.anyio
+async def test_oss_is_validated_before_imap_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    connected = False
+
+    def fail_connect():
+        nonlocal connected
+        connected = True
+        raise AssertionError("IMAP must not be contacted when OSS is unavailable")
+
+    monkeypatch.setattr(imap_fetcher, "_connect", fail_connect)
+    monkeypatch.setattr(imap_fetcher.settings, "OSS_SECRET_KEY", "")
+
+    with pytest.raises(imap_fetcher.ImapConfigurationError, match="OSS_NOT_CONFIGURED"):
+        await imap_fetcher.preflight_imap(folder_name="INBOX")
+    assert connected is False
+
+
+@pytest.mark.anyio
+async def test_retry_success_updates_existing_uidvalidity_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = MailFetchRecord(
+        mailbox_account="imap-test@example.com",
+        folder_name="INBOX",
+        uid_validity=777,
+        imap_uid="101",
+        message_id="",
+        fetch_status="retry_wait",
+        attempt_count=1,
+    )
+    existing.id = 91
+    session = FakeSession(existing)
+    client = FakeImapClient(_raw_eml())
+
+    async def allow_uid(*_args, **_kwargs):
+        return None
+
+    async def accept_payload(*_args, **_kwargs):
+        return SimpleNamespace(accepted=True, rule_analysis=SimpleNamespace(), message_id="<imap-101@example.com>")
+
+    async def fake_archive(*_args, **_kwargs):
+        return None
+
+    async def fake_ingest(*_args, **_kwargs):
+        return {"duplicate": False, "email": {"id": 77, "parse_status": "pending"}}
+
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", allow_uid)
+    monkeypatch.setattr(imap_fetcher, "precheck_email_payload", accept_payload)
+    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+
+    result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
+
+    assert result["status"] == "success"
+    assert existing.fetch_status == "ingested"
+    assert existing.email_id == 77
+    assert existing.attempt_count == 2
+    assert existing.next_retry_at is None
+    assert [item for item in session.added if isinstance(item, MailFetchRecord)] == []

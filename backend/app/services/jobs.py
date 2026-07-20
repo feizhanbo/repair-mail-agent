@@ -155,10 +155,11 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
             ),
         )
     if job.job_type == "imap_fetch":
-        from app.services.imap_fetcher import fetch_imap_emails
+        from app.services.imap_fetcher import run_imap_fetch_locked
 
-        return await fetch_imap_emails(
+        return await run_imap_fetch_locked(
             session,
+            busy_is_error=True,
             folder_name=str(metadata.get("folder_name") or settings.IMAP_FOLDER),
             limit=int(metadata.get("limit") or settings.IMAP_FETCH_LIMIT),
             unseen_only=bool(metadata.get("unseen_only", settings.IMAP_UNSEEN_ONLY)),

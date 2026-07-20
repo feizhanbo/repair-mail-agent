@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     IMAP_FETCH_LIMIT: int = 10
     IMAP_UNSEEN_ONLY: bool = True
     IMAP_ARCHIVE_TO_OSS: bool = True
-    IMAP_MARK_SEEN_AFTER_SUCCESS: bool = False
     IMAP_MAX_RETRIES: int = 5
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
@@ -122,7 +121,6 @@ class Settings(BaseSettings):
     RMA_AUTO_SEND_ENABLED: bool = True
 
     EMAIL_ASYNC_ENABLED: bool = False
-    IMAP_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
@@ -138,7 +136,13 @@ class Settings(BaseSettings):
     RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")
 
     RMA_AUTHORIZATION_ENABLED: bool = True
-    RMA_PDF_TEMPLATE_PATH: str = str(BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_v1.pdf")
+    RMA_PDF_TEMPLATE_PATH: str = str(
+        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_auto_v3_1.pdf"
+    )
+    RMA_PDF_LAYOUT_PATH: str = str(
+        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "layout_v3_1_auto.yaml"
+    )
+    RMA_CJK_FONT_PATH: str = ""
     RMA_PDF_DEFAULT_CURRENCY: str = ""
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"

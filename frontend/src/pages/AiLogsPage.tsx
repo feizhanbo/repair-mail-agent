@@ -1,14 +1,14 @@
 import { SearchOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Button, DatePicker, Descriptions, Form, Input, Modal, Select, Space, Table, Typography } from 'antd';
+import { Alert, Button, DatePicker, Descriptions, Divider, Form, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
-import type { AiLog } from '../types/api';
+import type { AiLog, JsonRecord } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatTime, numberText } from '../utils/format';
 
@@ -22,6 +22,23 @@ type AiLogFilters = {
   status?: string;
   date_range?: unknown;
 };
+
+type AiLogDetail = {
+  availability?: 'full' | 'metadata_only' | 'expired' | 'corrupt';
+  message?: string;
+  sections?: Record<string, unknown>;
+  associations?: Record<string, unknown>;
+  tokens?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  diagnostics?: Record<string, unknown>;
+};
+
+function jsonValue(value: unknown): JsonRecord | unknown[] | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'object') return value as JsonRecord;
+  return { value };
+}
 
 export default function AiLogsPage() {
   const [filters, setFilters] = useState<Record<string, unknown>>({});
@@ -47,6 +64,16 @@ export default function AiLogsPage() {
     { title: 'Prompt', dataIndex: 'prompt_version', width: 170 },
     { title: '问题描述', dataIndex: 'problem_description', width: 360, ellipsis: true, render: (value?: string | null) => compactText(value, '-') },
     { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <StatusTag value={value} /> },
+    {
+      title: '明细可用性',
+      dataIndex: 'availability',
+      width: 120,
+      render: (value?: AiLog['availability']) => (
+        <Tag color={value === 'full' ? 'green' : value === 'metadata_only' ? 'blue' : value === 'expired' ? 'default' : 'red'}>
+          {value === 'full' ? '完整' : value === 'metadata_only' ? '仅元数据' : value === 'expired' ? '已过期' : '损坏'}
+        </Tag>
+      ),
+    },
     { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
     { title: '耗时', dataIndex: 'latency_ms', width: 90, render: (value?: number | null) => (value ? `${value} ms` : '-') },
     { title: '输出摘要', dataIndex: 'output_summary', ellipsis: true, render: (value?: string | null) => compactText(value) },
@@ -150,7 +177,38 @@ export default function AiLogsPage() {
         />
       </SectionPanel>
       <Modal width={1000} title={`AI 调用明细 #${detailId ?? ''}`} open={Boolean(detailId)} onCancel={() => setDetailId(null)} footer={null} destroyOnClose>
-        {detailQuery.isFetching ? <Typography.Text>加载中...</Typography.Text> : <JsonBlock value={detailQuery.data} />}
+        {detailQuery.isFetching ? <Typography.Text>加载中...</Typography.Text> : detailQuery.error ? (
+          <Alert
+            type="error"
+            showIcon
+            message="AI 明细加载失败"
+            description={apiErrorMessage(detailQuery.error)}
+            action={<Button size="small" onClick={() => void detailQuery.refetch()}>重试</Button>}
+          />
+        ) : detailQuery.data ? (() => {
+          const detail = detailQuery.data as AiLogDetail;
+          const sections = detail.sections || {};
+          return (
+            <div className="drawer-stack">
+              <Alert
+                showIcon
+                type={detail.availability === 'full' ? 'success' : detail.availability === 'corrupt' ? 'error' : 'warning'}
+                message={detail.availability === 'full' ? '完整明细可用' : detail.availability === 'metadata_only' ? '仅元数据可用' : detail.availability === 'expired' ? '完整日志已过期' : '日志内容损坏'}
+                description={detail.message}
+              />
+              <Descriptions bordered size="small" column={2}>
+                <Descriptions.Item label="关联资源" span={2}><JsonBlock value={detail.associations} /></Descriptions.Item>
+                <Descriptions.Item label="Token"><JsonBlock value={detail.tokens} /></Descriptions.Item>
+                <Descriptions.Item label="调用元数据"><JsonBlock value={detail.metadata} /></Descriptions.Item>
+              </Descriptions>
+              <Divider>输入</Divider><JsonBlock value={jsonValue(sections.input)} />
+              <Divider>请求</Divider><JsonBlock value={jsonValue(sections.request)} />
+              <Divider>响应</Divider><JsonBlock value={jsonValue(sections.response)} />
+              <Divider>解析结果</Divider><JsonBlock value={jsonValue(sections.parsed_result)} />
+              <Divider>诊断建议</Divider><JsonBlock value={detail.diagnostics} />
+            </div>
+          );
+        })() : null}
       </Modal>
     </div>
   );

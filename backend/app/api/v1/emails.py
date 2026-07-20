@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import imaplib
 import logging
 from datetime import date
 from email.message import EmailMessage
@@ -11,13 +12,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
+from app.config import settings
 from app.core.database import get_session
 from app.core.request_context import get_correlation_id
 from app.core.response import ok, page
-from app.models import Email, EmailAttachment
+from app.models import Email, EmailAttachment, JobRunLog, MailFetchRecord
 from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
 from app.services import imap_fetcher
@@ -337,6 +340,66 @@ async def email_preview(
     return ok(await build_email_preview(session, email_id))
 
 
+@router.get("/fetch-status")
+async def fetch_imap_status(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    if not ({"admin", "operator", "supervisor"} & set(current_user.roles)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    latest = await session.scalar(
+        select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
+    )
+    active = await session.scalar(
+        select(JobRunLog)
+        .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+        .order_by(JobRunLog.created_at.asc())
+        .limit(1)
+    )
+    retry_count = int(
+        await session.scalar(
+            select(func.count()).select_from(MailFetchRecord).where(MailFetchRecord.fetch_status == "retry_wait")
+        )
+        or 0
+    )
+    return ok(
+        {
+            "enabled": settings.IMAP_FETCH_ENABLED,
+            "configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
+            "mailbox_account": settings.IMAP_USER,
+            "folder": settings.IMAP_FOLDER,
+            "poll_interval_minutes": settings.IMAP_POLL_INTERVAL_MINUTES,
+            "fetch_limit": settings.IMAP_FETCH_LIMIT,
+            "unseen_only": settings.IMAP_UNSEEN_ONLY,
+            "read_only": True,
+            "archive_to_oss": settings.IMAP_ARCHIVE_TO_OSS,
+            "max_retries": settings.IMAP_MAX_RETRIES,
+            "latest_job": serialize_job(latest) if latest else None,
+            "active_job": serialize_job(active) if active else None,
+            "retry_count": retry_count,
+        }
+    )
+
+
+@router.post("/fetch/preflight")
+async def preflight_imap_mailbox(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    folder_name: str | None = Query(default=None, min_length=1, max_length=255),
+) -> dict:
+    if "admin" not in current_user.roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    try:
+        result = await imap_fetcher.preflight_imap(folder_name=folder_name or settings.IMAP_FOLDER)
+    except imap_fetcher.ImapConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except imap_fetcher.ImapFetchError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except (OSError, TimeoutError, imaplib.IMAP4.error) as exc:
+        logger.warning("IMAP preflight failed correlation_id=%s error=%s", get_correlation_id(), exc.__class__.__name__)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="IMAP_CONNECTION_FAILED") from exc
+    return ok(result, "imap preflight passed")
+
+
 @router.get("/{email_id}")
 async def get_email(
     email_id: int,
@@ -557,29 +620,26 @@ async def ingest_eml_job(
     return ok({"ingest": result, "job": serialize_job(job)}, "eml archived and parse queued")
 
 
-@router.post("/fetch-now")
+@router.post("/fetch-now", deprecated=True)
 async def fetch_imap_now(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
-    folder_name: str = Query("INBOX", min_length=1, max_length=255),
-    limit: int = Query(10, ge=1, le=100),
-    unseen_only: bool = Query(True),
+    folder_name: str | None = Query(default=None, min_length=1, max_length=255),
+    limit: int | None = Query(default=None, ge=1, le=100),
+    unseen_only: bool | None = Query(default=None),
     message_id: str | None = Query(default=None, max_length=500),
     auto_parse: bool = Query(True),
-    archive_to_oss: bool = Query(True),
 ) -> dict:
-    if not ({"admin", "supervisor"} & set(current_user.roles)):
+    if "admin" not in current_user.roles:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
-    if not archive_to_oss:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OSS_ARCHIVE_REQUIRED")
-    result = await imap_fetcher.fetch_imap_emails(
+    result = await imap_fetcher.run_imap_fetch_locked(
         session,
-        folder_name=folder_name,
-        limit=limit,
-        unseen_only=unseen_only,
+        folder_name=folder_name or settings.IMAP_FOLDER,
+        limit=limit or settings.IMAP_FETCH_LIMIT,
+        unseen_only=settings.IMAP_UNSEEN_ONLY if unseen_only is None else unseen_only,
         message_id=message_id,
         auto_parse=auto_parse,
-        archive_to_oss=archive_to_oss,
+        archive_to_oss=True,
         user_id=current_user.id,
     )
     await session.commit()
@@ -590,32 +650,61 @@ async def fetch_imap_now(
 async def fetch_imap_job(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
-    folder_name: str = Query("INBOX", min_length=1, max_length=255),
-    limit: int = Query(10, ge=1, le=100),
-    unseen_only: bool = Query(True),
+    folder_name: str | None = Query(default=None, min_length=1, max_length=255),
+    limit: int | None = Query(default=None, ge=1, le=100),
+    unseen_only: bool | None = Query(default=None),
     message_id: str | None = Query(default=None, max_length=500),
     auto_parse: bool = Query(True),
 ) -> dict:
-    if not ({"admin", "supervisor"} & set(current_user.roles)):
+    if not ({"admin", "operator", "supervisor"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
-    correlation_id = get_correlation_id() or "job"
-    job = await enqueue_job(
-        session,
-        job_type="imap_fetch",
-        resource_type="mailbox",
-        resource_id=None,
-        idempotency_key=f"imap_fetch:{correlation_id}",
-        metadata={
-            "folder_name": folder_name,
-            "limit": limit,
-            "unseen_only": unseen_only,
-            "message_id": message_id,
-            "auto_parse": auto_parse,
-            "user_id": current_user.id,
-        },
+    active = await session.scalar(
+        select(JobRunLog)
+        .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+        .order_by(JobRunLog.created_at.asc())
+        .limit(1)
     )
-    await session.commit()
-    return ok(serialize_job(job), "imap fetch queued")
+    if active is not None:
+        return ok({"job": serialize_job(active), "reused": True}, "active imap fetch reused")
+    # Serialize the second active check and commit so simultaneous clicks cannot
+    # both observe an empty queue. The worker uses this same named lock.
+    async with imap_fetcher.imap_fetch_lock() as acquired:
+        if not acquired:
+            active = await session.scalar(
+                select(JobRunLog)
+                .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+                .order_by(JobRunLog.created_at.asc())
+                .limit(1)
+            )
+            if active is not None:
+                return ok({"job": serialize_job(active), "reused": True}, "active imap fetch reused")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="IMAP_FETCH_BUSY")
+        active = await session.scalar(
+            select(JobRunLog)
+            .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+            .order_by(JobRunLog.created_at.asc())
+            .limit(1)
+        )
+        if active is not None:
+            return ok({"job": serialize_job(active), "reused": True}, "active imap fetch reused")
+        correlation_id = get_correlation_id() or "job"
+        job = await enqueue_job(
+            session,
+            job_type="imap_fetch",
+            resource_type="mailbox",
+            resource_id=None,
+            idempotency_key=f"imap_fetch:{correlation_id}",
+            metadata={
+                "folder_name": folder_name or settings.IMAP_FOLDER,
+                "limit": limit or settings.IMAP_FETCH_LIMIT,
+                "unseen_only": settings.IMAP_UNSEEN_ONLY if unseen_only is None else unseen_only,
+                "message_id": message_id,
+                "auto_parse": auto_parse,
+                "user_id": current_user.id,
+            },
+        )
+        await session.commit()
+    return ok({"job": serialize_job(job), "reused": False}, "imap fetch queued")
 
 
 @router.post("/{email_id}/reparse")

@@ -9,7 +9,7 @@ from app.config import settings
 
 CONFIG_KEYS = {
     "auto_send_enabled",
-    "reply_send_mode",
+    "rma_auto_send_enabled",
     "auto_apply_min_confidence",
     "auto_send_min_confidence",
     "confidence_threshold",
@@ -18,7 +18,7 @@ CONFIG_KEYS = {
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "auto_send_enabled": False,
-    "reply_send_mode": "human_review",
+    "rma_auto_send_enabled": True,
     "auto_apply_min_confidence": 0.85,
     "auto_send_min_confidence": 0.85,
     "confidence_threshold": 0.7,
@@ -31,19 +31,24 @@ def _path() -> Path:
 
 
 def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
+    legacy_auto_send = values.get("reply_send_mode") == "auto_send"
+    legacy_rma_disabled = values.get("rma_authorization_enabled") is False
     merged = {
         **DEFAULT_RUNTIME_CONFIG,
         "auto_send_enabled": bool(settings.AUTO_SEND_ENABLED),
-        "reply_send_mode": settings.REPLY_SEND_MODE,
+        "rma_auto_send_enabled": bool(settings.RMA_AUTO_SEND_ENABLED),
         "auto_apply_min_confidence": float(settings.AUTO_APPLY_MIN_CONFIDENCE),
         "auto_send_min_confidence": float(settings.AUTO_SEND_MIN_CONFIDENCE),
         "confidence_threshold": float(settings.CONFIDENCE_THRESHOLD),
         "max_follow_up": int(settings.MAX_FOLLOW_UP),
         **{key: value for key, value in values.items() if key in CONFIG_KEYS},
     }
-    mode = str(merged["reply_send_mode"] or "human_review")
-    merged["reply_send_mode"] = mode if mode in {"human_review", "auto_send"} else "human_review"
+    if "auto_send_enabled" not in values and legacy_auto_send:
+        merged["auto_send_enabled"] = True
+    if "rma_auto_send_enabled" not in values and legacy_rma_disabled:
+        merged["rma_auto_send_enabled"] = False
     merged["auto_send_enabled"] = bool(merged["auto_send_enabled"])
+    merged["rma_auto_send_enabled"] = bool(merged["rma_auto_send_enabled"])
     merged["auto_apply_min_confidence"] = max(0.0, min(1.0, float(merged["auto_apply_min_confidence"])))
     merged["auto_send_min_confidence"] = max(0.0, min(1.0, float(merged["auto_send_min_confidence"])))
     merged["confidence_threshold"] = max(0.0, min(1.0, float(merged["confidence_threshold"])))
@@ -54,7 +59,10 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
 def apply_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
     config = _coerce_config(values)
     settings.AUTO_SEND_ENABLED = bool(config["auto_send_enabled"])
-    settings.REPLY_SEND_MODE = str(config["reply_send_mode"])
+    settings.RMA_AUTO_SEND_ENABLED = bool(config["rma_auto_send_enabled"])
+    # Deprecated compatibility values are derived from the canonical switches.
+    settings.REPLY_SEND_MODE = "auto_send" if settings.AUTO_SEND_ENABLED else "human_review"
+    settings.RMA_AUTHORIZATION_ENABLED = settings.RMA_AUTO_SEND_ENABLED
     settings.AUTO_APPLY_MIN_CONFIDENCE = float(config["auto_apply_min_confidence"])
     settings.AUTO_SEND_MIN_CONFIDENCE = float(config["auto_send_min_confidence"])
     settings.CONFIDENCE_THRESHOLD = float(config["confidence_threshold"])

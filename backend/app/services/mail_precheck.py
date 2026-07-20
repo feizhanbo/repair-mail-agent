@@ -69,12 +69,14 @@ async def precheck_imap_uid(
     *,
     mailbox_account: str,
     folder_name: str,
+    uid_validity: int,
     imap_uid: str,
 ) -> MailPrecheckResult | None:
     existing = await session.scalar(
         select(MailFetchRecord).where(
             MailFetchRecord.mailbox_account == mailbox_account,
             MailFetchRecord.folder_name == folder_name,
+            MailFetchRecord.uid_validity == uid_validity,
             MailFetchRecord.imap_uid == imap_uid,
         )
     )

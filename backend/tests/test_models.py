@@ -54,7 +54,12 @@ def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:
         for constraint in table.constraints
         if constraint.name
     }
-    assert constraint_columns["uk_mail_fetch_records"] == ("mailbox_account", "folder_name", "imap_uid")
+    assert constraint_columns["uk_mail_fetch_records"] == (
+        "mailbox_account",
+        "folder_name",
+        "uid_validity",
+        "imap_uid",
+    )
     assert "fetch_status" in table.columns
 
 

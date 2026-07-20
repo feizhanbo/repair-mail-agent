@@ -18,6 +18,9 @@ import type {
   LoginRequest,
   LoginResponse,
   JobRunLog,
+  ImapFetchJobResponse,
+  ImapPreflightResult,
+  ImapFetchStatus,
   ManualTask,
   ManualTaskDetail,
   ManualTaskReparseResponse,
@@ -68,8 +71,22 @@ function friendlyServerMessage(status?: number, code?: string): string {
     EMAIL_ARCHIVE_TOO_LARGE: '邮件原件或附件总大小超过归档限制',
     TOO_MANY_ATTACHMENTS: '邮件附件数量超过系统限制',
     OSS_NOT_CONFIGURED: 'OSS 尚未正确配置，邮件未入库',
+    OSS_OBJECT_NOT_FOUND: 'OSS 中未找到对应文件，可能已被移除',
+    OSS_OBJECT_NOT_READY: '附件仍在归档处理中，请稍后重试',
+    OSS_ACCESS_DENIED: 'OSS 拒绝访问该对象，请管理员检查权限',
+    OSS_NETWORK_UNREACHABLE: '暂时无法连接 OSS，请稍后重试',
+    OSS_DOWNLOAD_FAILED: '附件从 OSS 下载失败，请稍后重试',
+    ATTACHMENT_PDF_INVALID: 'PDF 文件已损坏、加密或无法渲染',
+    ATTACHMENT_PREVIEW_UNSUPPORTED: '该附件格式仅支持下载',
+    AI_LOG_DETAIL_EXPIRED: 'AI 完整日志已过保留期，仅可查看元数据',
+    AI_LOG_DETAIL_HASH_MISMATCH: 'AI 日志完整性校验失败，请联系管理员',
+    NOTIFICATION_NOT_FOUND: '该通知不属于当前用户或已不存在',
     OSS_ARCHIVAL_FAILED: '邮件归档到 OSS 失败，请稍后重试',
     JOB_POLL_TIMEOUT: '后台任务处理超时，请在邮件详情中查看最新状态',
+    IMAP_NOT_CONFIGURED: 'IMAP 账号配置不完整',
+    IMAP_CONNECTION_FAILED: 'IMAP TLS 连接或登录失败，请检查配置',
+    IMAP_SELECT_FAILED: '无法以只读方式打开指定邮箱文件夹',
+    IMAP_UIDVALIDITY_MISSING: '邮箱服务器未返回 UIDVALIDITY，已停止捞取以避免重复邮件',
     ATTACHMENT_CONTENT_INVALID: '附件内容无法读取，请重新选择文件',
     MANUAL_TASK_NOT_FOUND: '复核任务不存在或已被处理',
     TASK_ASSIGNMENT_DISABLED: '当前采用系统自动负责人，不再支持领取、释放或人工分配',
@@ -110,9 +127,10 @@ export function apiErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试';
     if (!error.response) return '网络连接失败，请检查后端服务';
-    const payload = error.response.data as { message?: string; detail?: string } | undefined;
+    const payload = error.response.data as { message?: string; detail?: string; data?: { correlation_id?: string; stage?: string } } | undefined;
     const code = typeof payload?.message === 'string' ? payload.message : typeof payload?.detail === 'string' ? payload.detail : undefined;
-    return friendlyServerMessage(error.response.status, code);
+    const base = friendlyServerMessage(error.response.status, code);
+    return payload?.data?.correlation_id ? `${base}（关联 ID：${payload.data.correlation_id}）` : base;
   }
   return friendlyServerMessage();
 }
@@ -193,7 +211,9 @@ export const api = {
   },
   reparseEmail: (id: number, body: Record<string, unknown> = {}) => postData(`/emails/${id}/reparse`, body),
   reparseEmailJob: (id: number, body: Record<string, unknown> = {}) => postData<JobRunLog>(`/emails/${id}/reparse/jobs`, body),
-  fetchEmailJob: (params: Record<string, unknown>) => postData<JobRunLog>('/emails/fetch/jobs', undefined, { params }),
+  fetchEmailStatus: () => getData<ImapFetchStatus>('/emails/fetch-status'),
+  preflightImap: () => postData<ImapPreflightResult>('/emails/fetch/preflight'),
+  fetchEmailJob: (params: Record<string, unknown> = {}) => postData<ImapFetchJobResponse>('/emails/fetch/jobs', undefined, { params }),
   tickets: (params: Record<string, unknown>) => getData<PageData<Ticket>>('/tickets', { params }),
   exportTickets: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/tickets/export', { params, responseType: 'blob' }),
   exportSelectedTickets: (ids: number[]) => apiClient.post<Blob, Blob>('/tickets/export-selected', { ids }, { responseType: 'blob' }),
@@ -257,7 +277,7 @@ export const api = {
   systemInfo: () => getData<SystemInfo>('/system/info'),
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
-  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'reply_send_mode' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
+  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'rma_auto_send_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
     patchData<SystemConfig>('/system/config', body),
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
   createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>

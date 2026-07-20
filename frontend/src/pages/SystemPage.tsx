@@ -12,7 +12,7 @@ import { formatTime } from '../utils/format';
 
 type ConfigForm = {
   auto_send_enabled: boolean;
-  reply_send_mode: 'human_review' | 'auto_send';
+  rma_auto_send_enabled: boolean;
   auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
   confidence_threshold: number;
@@ -104,7 +104,7 @@ export default function SystemPage() {
     if (configQuery.data) {
       configForm.setFieldsValue({
         auto_send_enabled: configQuery.data.auto_send_enabled,
-        reply_send_mode: configQuery.data.reply_send_mode,
+        rma_auto_send_enabled: configQuery.data.rma_auto_send_enabled,
         auto_apply_min_confidence: configQuery.data.auto_apply_min_confidence,
         auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
         confidence_threshold: configQuery.data.confidence_threshold,
@@ -198,17 +198,11 @@ export default function SystemPage() {
           className="filter-bar"
           onFinish={(values) => configMutation.mutate(values)}
         >
-          <Form.Item label="自动发送" name="auto_send_enabled" valuePropName="checked">
+          <Form.Item label="普通回复自动发送" name="auto_send_enabled" valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item label="发送模式" name="reply_send_mode" rules={[{ required: true }]}>
-            <Select
-              style={{ width: 180 }}
-              options={[
-                { value: 'human_review', label: '人工确认后发送' },
-                { value: 'auto_send', label: '满足条件自动发送' },
-              ]}
-            />
+          <Form.Item label="RMA 自动发送" name="rma_auto_send_enabled" valuePropName="checked">
+            <Switch />
           </Form.Item>
           <Form.Item label="置信度阈值" name="confidence_threshold" rules={[{ required: true }]}>
             <InputNumber min={0} max={1} step={0.01} precision={2} />
@@ -271,8 +265,8 @@ export default function SystemPage() {
         <Descriptions column={3} size="small" bordered>
           <Descriptions.Item label="应用">{info?.app ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="环境">{info?.env ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="自动发送">{info?.auto_send_enabled ? '开启' : '关闭'}</Descriptions.Item>
-          <Descriptions.Item label="发送模式">{info?.reply_send_mode === 'auto_send' ? '满足条件自动发送' : '人工确认后发送'}</Descriptions.Item>
+          <Descriptions.Item label="普通回复自动发送">{info?.auto_send_enabled ? '开启' : '关闭'}</Descriptions.Item>
+          <Descriptions.Item label="RMA 自动发送">{info?.rma_auto_send_enabled ? '开启' : '关闭'}</Descriptions.Item>
           <Descriptions.Item label="追问上限">{info?.max_follow_up ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="置信度阈值">{info?.confidence_threshold ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="自动采纳安全阈值">{info?.auto_apply_min_confidence ?? '-'}</Descriptions.Item>

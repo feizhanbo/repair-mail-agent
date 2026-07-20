@@ -88,6 +88,40 @@ export type JobRunLog = {
   error_message?: string | null;
 };
 
+export type ImapFetchStatus = {
+  enabled: boolean;
+  configured: boolean;
+  mailbox_account: string;
+  folder: string;
+  poll_interval_minutes: number;
+  fetch_limit: number;
+  unseen_only: boolean;
+  read_only: boolean;
+  archive_to_oss: boolean;
+  max_retries: number;
+  latest_job?: JobRunLog | null;
+  active_job?: JobRunLog | null;
+  retry_count: number;
+};
+
+export type ImapFetchJobResponse = {
+  job: JobRunLog;
+  reused: boolean;
+};
+
+export type ImapPreflightResult = {
+  status: 'ready';
+  tls: boolean;
+  authenticated: boolean;
+  mailbox_account: string;
+  folder: string;
+  read_only: boolean;
+  uid_validity: number;
+  oss_configured: boolean;
+  messages_downloaded: number;
+  flags_changed: boolean;
+};
+
 export type AsyncIngestResult = {
   ingest: EmailIngestResult;
   job?: JobRunLog | null;
@@ -218,7 +252,7 @@ export type ContentPreview = {
   file_name?: string;
   file_type?: string | null;
   parse_status?: string;
-  mode: 'html' | 'text' | 'image' | 'pdf' | 'pdf_pages' | 'extracted';
+  mode: 'html' | 'text' | 'image' | 'pdf' | 'pdf_pages' | 'extracted' | 'download_only';
   url?: string | null;
   text?: string | null;
   html?: string | null;
@@ -226,6 +260,7 @@ export type ContentPreview = {
   pages?: string[];
   page_count?: number;
   truncated?: boolean;
+  warnings?: Array<{ code: string; message: string; attachment_id?: number }>;
 };
 
 export type EmailFlowTraceEvent = {
@@ -555,6 +590,7 @@ export type AiLog = {
   output_tokens?: number | null;
   total_tokens?: number | null;
   status: string;
+  availability?: 'full' | 'metadata_only' | 'expired' | 'corrupt';
   error_message?: string | null;
   log_file_path?: string | null;
   log_line_no?: number | null;
@@ -575,6 +611,7 @@ export type NotificationEvent = {
   delivery_channel?: string;
   delivery_status: string;
   read_at?: string | null;
+  resolved_at?: string | null;
   metadata?: JsonRecord | null;
   metadata_json?: JsonRecord | null;
   delivered_at?: string | null;
@@ -606,6 +643,8 @@ export type SystemInfo = {
   app: string;
   env: string;
   auto_send_enabled: boolean;
+  rma_auto_send_enabled: boolean;
+  /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
   auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
@@ -619,6 +658,8 @@ export type SystemInfo = {
 
 export type SystemConfig = {
   auto_send_enabled: boolean;
+  rma_auto_send_enabled: boolean;
+  /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
   auto_apply_min_confidence: number;
   auto_send_min_confidence: number;

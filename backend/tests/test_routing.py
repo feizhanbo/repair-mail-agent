@@ -54,3 +54,13 @@ async def test_language_codes_drive_miya_and_demi_routes(monkeypatch) -> None:
 
 def test_unknown_language_uses_domestic_fallback_code() -> None:
     assert detect_language(_email("123456")) == "unknown"
+
+
+@pytest.mark.anyio
+async def test_missing_required_operator_does_not_randomly_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ROUTING_DOMESTIC_USERNAME", "miya")
+    owner, language, reason = await choose_system_owner(Session(None), _email("设备报修"))
+
+    assert owner is None
+    assert language == "zh-CN"
+    assert "required_username_unavailable:miya" in reason

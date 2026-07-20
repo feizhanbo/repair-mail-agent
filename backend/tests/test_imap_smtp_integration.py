@@ -191,7 +191,7 @@ def phase_check_job_logs() -> None:
 def phase_config_enable_auto_send() -> bool:
     _hdr("Phase C.1: 开启自动发送配置")
 
-    body = {"auto_send_enabled": True, "reply_send_mode": "auto_send"}
+    body = {"auto_send_enabled": True}
     print(f"{IDENT}请求: {json.dumps(body, ensure_ascii=False)}")
 
     try:
@@ -206,7 +206,7 @@ def phase_config_enable_auto_send() -> bool:
 
     data = resp.get("data", {})
     _ok(f"auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"reply_send_mode  = {data.get('reply_send_mode')}")
+    _ok(f"rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     return True
 
 
@@ -295,7 +295,7 @@ def phase_create_draft(ticket: dict) -> dict | None:
     _ok(f"  send_status       = {reply.get('send_status')}")
     _ok(f"  generate_source   = {reply.get('generate_source')}")
     _ok(f"  auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"  reply_send_mode   = {data.get('reply_send_mode')}")
+    _ok(f"  rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
 
     if reply.get("send_status") == "sent":
         _ok("🎉 草稿已自动发送 (auto_send 生效)!")
@@ -339,7 +339,7 @@ def phase_approve_safe_reply(draft_data: dict) -> bool:
 def phase_config_reset() -> bool:
     _hdr("Phase C.5: 恢复配置为 human_review")
 
-    body = {"auto_send_enabled": False, "reply_send_mode": "human_review"}
+    body = {"auto_send_enabled": False}
     print(f"{IDENT}请求: {json.dumps(body, ensure_ascii=False)}")
 
     try:
@@ -354,7 +354,7 @@ def phase_config_reset() -> bool:
 
     data = resp.get("data", {})
     _ok(f"auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"reply_send_mode  = {data.get('reply_send_mode')}")
+    _ok(f"rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     return True
 
 
@@ -370,7 +370,7 @@ def phase_verify_config() -> None:
     data = resp.get("data", {})
     print(f"{IDENT}当前配置:")
     print(f"{IDENT}  auto_send_enabled = {data.get('auto_send_enabled')}")
-    print(f"{IDENT}  reply_send_mode   = {data.get('reply_send_mode')}")
+    print(f"{IDENT}  rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     print(f"{IDENT}  smtp_configured   = {data.get('integrations', {}).get('smtp_configured')}")
     print(f"{IDENT}  imap_configured   = {data.get('integrations', {}).get('imap_configured')}")
 

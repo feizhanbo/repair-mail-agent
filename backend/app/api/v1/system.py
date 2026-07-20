@@ -26,12 +26,13 @@ def _config_payload() -> dict:
     runtime = read_runtime_config()
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
-        "reply_send_mode": runtime["reply_send_mode"],
+        "rma_auto_send_enabled": runtime["rma_auto_send_enabled"],
+        "reply_send_mode": "auto_send" if runtime["auto_send_enabled"] else "human_review",
         "auto_apply_min_confidence": runtime["auto_apply_min_confidence"],
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
         "max_follow_up": runtime["max_follow_up"],
         "confidence_threshold": runtime["confidence_threshold"],
-        "environment_note": "测试环境默认生成人工确认草稿；生产环境可切换为自动发送。",
+        "environment_note": "普通回复默认人工审核；新报修 RMA 由独立开关控制自动生成发送。",
         "integrations": {
             "imap_configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
             "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD),
@@ -48,7 +49,6 @@ def _config_payload() -> dict:
             "qwen_vl_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
             "qwen_text_model": settings.QWEN_MODEL,
             "email_async_enabled": settings.EMAIL_ASYNC_ENABLED,
-            "imap_async_enabled": settings.IMAP_ASYNC_ENABLED,
             "smtp_async_enabled": settings.SMTP_ASYNC_ENABLED,
             "import_export_async_enabled": settings.IMPORT_EXPORT_ASYNC_ENABLED,
             "relay_sn_sync_enabled": settings.RELAY_SN_SYNC_ENABLED,

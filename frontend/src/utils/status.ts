@@ -39,7 +39,7 @@ export const reviewStatusLabels: Record<string, string> = {
 };
 
 export const taskStatusLabels: Record<string, string> = {
-  pending: '待领取',
+  pending: '待处理',
   assigned: '已分配',
   claimed: '处理中',
   resolved: '已解决',

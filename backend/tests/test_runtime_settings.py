@@ -6,6 +6,7 @@ import pytest
 
 from app.api.v1.system import _config_payload
 from app.config import settings
+from app.services.runtime_config import _coerce_config
 
 
 def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
@@ -51,3 +52,29 @@ def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
     serialized = json.dumps(payload, ensure_ascii=False)
     for secret in secret_values.values():
         assert secret not in serialized
+
+
+def test_legacy_send_settings_map_to_canonical_switches() -> None:
+    config = _coerce_config(
+        {
+            "reply_send_mode": "auto_send",
+            "rma_authorization_enabled": False,
+        }
+    )
+
+    assert config["auto_send_enabled"] is True
+    assert config["rma_auto_send_enabled"] is False
+
+
+def test_canonical_send_settings_override_legacy_values() -> None:
+    config = _coerce_config(
+        {
+            "auto_send_enabled": False,
+            "rma_auto_send_enabled": True,
+            "reply_send_mode": "auto_send",
+            "rma_authorization_enabled": False,
+        }
+    )
+
+    assert config["auto_send_enabled"] is False
+    assert config["rma_auto_send_enabled"] is True

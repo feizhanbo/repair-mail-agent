@@ -5,7 +5,7 @@ import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
@@ -91,7 +91,7 @@ async def read_notification(
         user_id=current_user.id,
     )
     if row is None:
-        return ok({}, "notification not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="NOTIFICATION_NOT_FOUND")
     notification, user_state = row
     await session.commit()
     return ok(serialize_user_notification(notification, user_state), "notification read")

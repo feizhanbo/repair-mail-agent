@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from app.api.v1.router import api_router
 from app.config import settings
@@ -15,10 +15,11 @@ from app.core.database import AsyncSessionLocal
 from app.core.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
 from app.core.request_context import bind_request_context, normalize_correlation_id, reset_request_context
 from app.models import JobRunLog, RepairTicket
-from app.services.imap_fetcher import fetch_imap_emails
+from app.services.imap_fetcher import run_imap_fetch_locked
 from app.services.ai import maintain_ai_jsonl_logs
 from app.services.jobs import claim_next_job, execute_claimed_job
 from app.services.replies import create_reply_draft
+from app.services.rma_pdf import validate_rma_runtime_health
 from app.services.runtime_config import read_runtime_config
 from app.services.common import utcnow
 
@@ -43,22 +44,14 @@ async def _scheduled_imap_fetch():
         return
     try:
         async with AsyncSessionLocal() as session:
-            lock_name = "repair_mail_agent_imap_poll"
-            acquired = await session.scalar(text("SELECT GET_LOCK(:lock_name, 0)"), {"lock_name": lock_name})
-            if acquired != 1:
-                logger.info("Scheduled IMAP fetch skipped: distributed lock unavailable")
-                return
-            try:
-                result = await fetch_imap_emails(
-                    session,
-                    folder_name=settings.IMAP_FOLDER,
-                    limit=settings.IMAP_FETCH_LIMIT,
-                    unseen_only=settings.IMAP_UNSEEN_ONLY,
-                    archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
-                )
-                await session.commit()
-            finally:
-                await session.scalar(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": lock_name})
+            result = await run_imap_fetch_locked(
+                session,
+                folder_name=settings.IMAP_FOLDER,
+                limit=settings.IMAP_FETCH_LIMIT,
+                unseen_only=settings.IMAP_UNSEEN_ONLY,
+                archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
+            )
+            await session.commit()
             logger.info(
                 "Scheduled IMAP fetch completed: job_id=%s status=%s processed=%s success=%s failed=%s",
                 result.get("job_id"),
@@ -154,6 +147,13 @@ async def lifespan(app: FastAPI):
         settings.MULTIMODAL_PROVIDER,
     )
     read_runtime_config()
+    rma_health = validate_rma_runtime_health()
+    logger.info(
+        "RMA PDF runtime healthy: template_version=%s template_sha256=%s cjk_font=%s",
+        rma_health["template_version"],
+        rma_health["template_sha256"],
+        rma_health["cjk_font"],
+    )
     scheduler = AsyncIOScheduler()
     if settings.IMAP_FETCH_ENABLED and settings.IMAP_ARCHIVE_TO_OSS:
         scheduler.add_job(

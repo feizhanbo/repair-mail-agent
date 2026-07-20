@@ -362,10 +362,83 @@ def _resolve_ai_log_path(log_file_path: str) -> Path:
     raise ValueError("AI_LOG_PATH_INVALID")
 
 
+def ai_log_availability(ai_log: AiCallLog) -> str:
+    if not ai_log.log_file_path or not ai_log.log_line_no:
+        return "metadata_only"
+    try:
+        path = _resolve_ai_log_path(ai_log.log_file_path)
+    except ValueError:
+        return "corrupt"
+    return "full" if path.exists() else "expired"
+
+
+def _ai_log_detail_envelope(
+    ai_log: AiCallLog,
+    *,
+    availability: str,
+    message: str,
+    record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record = record or {}
+    metadata_sections = {
+        "input": record.get("input_payload") if "input_payload" in record else record.get("input_metadata"),
+        "request": record.get("request_payload") if "request_payload" in record else record.get("request_metadata"),
+        "response": record.get("response_payload") if "response_payload" in record else record.get("response_metadata"),
+        "parsed_result": record.get("parsed_result") or ai_log.parsed_key_result,
+    }
+    return {
+        "availability": availability,
+        "message": message,
+        "sections": metadata_sections,
+        "associations": {
+            "email_id": ai_log.email_id,
+            "ticket_id": ai_log.ticket_id,
+            "attachment_id": ai_log.attachment_id,
+            "job_run_id": ai_log.job_run_id,
+            "correlation_id": ai_log.correlation_id,
+            "trace_id": ai_log.trace_id,
+        },
+        "tokens": record.get("token_usage") or {
+            "input": ai_log.input_tokens,
+            "output": ai_log.output_tokens,
+            "total": ai_log.total_tokens,
+        },
+        "metadata": {
+            "call_type": ai_log.call_type,
+            "provider": ai_log.provider_name,
+            "model": ai_log.model_name,
+            "prompt_version": ai_log.prompt_version,
+            "attempt_count": ai_log.attempt_count,
+            "latency_ms": ai_log.latency_ms,
+            "status": ai_log.status,
+            "error_code": ai_log.error_code,
+            "created_at": ai_log.created_at.isoformat() if ai_log.created_at else None,
+        },
+    }
+
+
 async def read_ai_log_detail(ai_log: AiCallLog) -> dict[str, Any]:
+    availability = ai_log_availability(ai_log)
+    if availability == "metadata_only":
+        return _ai_log_detail_envelope(
+            ai_log,
+            availability="metadata_only",
+            message="历史记录仅保留元数据，完整输入、请求和响应从未持久化。",
+        )
+    if availability == "expired":
+        return _ai_log_detail_envelope(
+            ai_log,
+            availability="expired",
+            message="完整日志已超过保留期或持久卷中不存在，仅可查看数据库元数据。",
+        )
+    if availability == "corrupt":
+        return _ai_log_detail_envelope(
+            ai_log,
+            availability="corrupt",
+            message="日志路径无效，出于安全原因未读取文件。",
+        )
+
     path = _resolve_ai_log_path(ai_log.log_file_path or "")
-    if not path.exists() or not ai_log.log_line_no:
-        raise FileNotFoundError("AI_LOG_DETAIL_EXPIRED")
 
     def _read() -> tuple[str, dict[str, Any]]:
         with path.open("r", encoding="utf-8") as handle:
@@ -375,10 +448,29 @@ async def read_ai_log_detail(ai_log: AiCallLog) -> dict[str, Any]:
                     return raw, json.loads(raw)
         raise FileNotFoundError("AI_LOG_DETAIL_EXPIRED")
 
-    raw, record = await asyncio.to_thread(_read)
+    try:
+        raw, record = await asyncio.to_thread(_read)
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return _ai_log_detail_envelope(
+            ai_log,
+            availability="corrupt",
+            message="日志行缺失或 JSON 内容损坏，仅可查看数据库元数据。",
+        )
     if ai_log.log_record_hash and sha256_text(raw) != ai_log.log_record_hash:
-        raise ValueError("AI_LOG_DETAIL_HASH_MISMATCH")
-    return sanitize_ai_detail(record)
+        return _ai_log_detail_envelope(
+            ai_log,
+            availability="corrupt",
+            message="日志完整性哈希不匹配，仅可查看数据库元数据。",
+        )
+    sanitized = sanitize_ai_detail(record)
+    full_keys = {"input_payload", "request_payload", "response_payload", "parsed_result"}
+    detail_availability = "full" if full_keys & set(sanitized) else "metadata_only"
+    return _ai_log_detail_envelope(
+        ai_log,
+        availability=detail_availability,
+        message="完整 AI 调用详情可用。" if detail_availability == "full" else "该日志行仅包含元数据。",
+        record=sanitized,
+    )
 
 
 async def maintain_ai_jsonl_logs(session: AsyncSession) -> dict[str, int]:
