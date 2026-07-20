@@ -12,6 +12,7 @@ import { formatTime } from '../utils/format';
 
 type ConfigForm = {
   auto_send_enabled: boolean;
+  auto_followup_enabled: boolean;
   rma_auto_send_enabled: boolean;
   auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
@@ -62,6 +63,11 @@ export default function SystemPage() {
     },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
+  const mailPreflightMutation = useMutation({
+    mutationFn: api.mailTestPreflight,
+    onSuccess: (result) => message.success(`邮件预检通过，实际发送 ${result.messages_sent} 封邮件`),
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
   const templateMutation = useMutation({
     mutationFn: ({ id, values }: { id: number; values: TemplateForm }) =>
       api.updateReplyTemplate(id, {
@@ -104,6 +110,7 @@ export default function SystemPage() {
     if (configQuery.data) {
       configForm.setFieldsValue({
         auto_send_enabled: configQuery.data.auto_send_enabled,
+        auto_followup_enabled: configQuery.data.auto_followup_enabled,
         rma_auto_send_enabled: configQuery.data.rma_auto_send_enabled,
         auto_apply_min_confidence: configQuery.data.auto_apply_min_confidence,
         auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
@@ -192,6 +199,15 @@ export default function SystemPage() {
           style={{ marginBottom: 12 }}
           message={configQuery.data?.environment_note ?? '测试环境默认生成草稿并由人工确认后发送；生产环境可切换为自动发送。'}
         />
+        {configQuery.data?.mail_test_static_ready === false ? (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="测试邮箱静态配置未通过，发送开关不能开启"
+            description={(configQuery.data.mail_test_static_reasons ?? []).join('、')}
+          />
+        ) : null}
         <Form<ConfigForm>
           form={configForm}
           layout="inline"
@@ -199,10 +215,13 @@ export default function SystemPage() {
           onFinish={(values) => configMutation.mutate(values)}
         >
           <Form.Item label="普通回复自动发送" name="auto_send_enabled" valuePropName="checked">
-            <Switch />
+            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_send_enabled} />
           </Form.Item>
-          <Form.Item label="RMA 自动发送" name="rma_auto_send_enabled" valuePropName="checked">
-            <Switch />
+          <Form.Item label="缺失必填字段自动追问" name="auto_followup_enabled" valuePropName="checked">
+            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_followup_enabled} />
+          </Form.Item>
+          <Form.Item label="自动附带 RMA 授权单" name="rma_auto_send_enabled" valuePropName="checked">
+            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.rma_auto_send_enabled} />
           </Form.Item>
           <Form.Item label="置信度阈值" name="confidence_threshold" rules={[{ required: true }]}>
             <InputNumber min={0} max={1} step={0.01} precision={2} />
@@ -219,7 +238,19 @@ export default function SystemPage() {
           <Button type="primary" htmlType="submit" loading={configMutation.isPending || configQuery.isFetching}>
             保存
           </Button>
+          <Button loading={mailPreflightMutation.isPending} onClick={() => mailPreflightMutation.mutate()}>
+            执行邮件预检（不发信）
+          </Button>
         </Form>
+        {mailPreflightMutation.data ? (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginTop: 12 }}
+            message="邮件预检通过（未发送邮件）"
+            description={`数据库 ${mailPreflightMutation.data.database?.current_revision ?? '-'}；IMAP 只读检查通过；SMTP 阶段 ${mailPreflightMutation.data.smtp?.stage ?? '-'}；实际发送 ${mailPreflightMutation.data.messages_sent} 封。`}
+          />
+        ) : null}
       </SectionPanel>
       <SectionPanel>
         <div className="section-heading">

@@ -17,6 +17,17 @@ class ScalarSession:
         return self.values.pop(0) if self.values else None
 
 
+class Rows:
+    def __init__(self, values):
+        self.values = values
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.values
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -87,6 +98,67 @@ async def test_sn_validation_uses_local_mirror_and_never_calls_sql_when_disabled
     assert report["snapshot"]["source"] == "local_sn_assets"
     assert report["snapshot"]["checks"][0]["warranty_end_date"] == "2026-12-31"
     assert ticket.current_status_code == "parsed"
+
+
+@pytest.mark.anyio
+async def test_persisted_sn_hash_uses_asset_enriched_material_state(monkeypatch) -> None:
+    ticket = _ticket()
+    ticket.customer_code = None
+    item = _item()
+    item.material_code = None
+    item.material_name = None
+    asset = SnAsset(
+        id=21,
+        sn=item.sn,
+        customer_code="C001",
+        customer_name=ticket.customer_name,
+        material_code="TEST-PART",
+        material_name="Synthetic Part",
+        asset_status="valid",
+        source_system="local",
+    )
+
+    async def fake_ticket_and_items(_session, _ticket_id):
+        return ticket, [item]
+
+    class Session(ScalarSession):
+        async def execute(self, _statement):
+            return Rows([asset])
+
+        def add(self, _value):
+            return None
+
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", False)
+    monkeypatch.setattr(ticket_safety, "_ticket_and_items", fake_ticket_and_items)
+
+    report = await ticket_safety.build_sn_validation_report(Session(asset, None), ticket_id=1, persist=True)
+
+    assert report["passed"] is True
+    assert item.material_code == "TEST-PART"
+    assert report["input_hash"] == ticket_safety._stable_hash(ticket_safety._sn_input_snapshot(ticket, [item]))
+
+
+@pytest.mark.anyio
+async def test_customer_source_uses_exact_sender_exclusions_not_whole_internal_domain(monkeypatch) -> None:
+    ticket = _ticket()
+    ticket.thread_id = 9
+    system_email = Email(id=31, thread_id=9, mail_direction="inbound", from_address="rmatest1@accotest.com")
+    customer_email = Email(id=32, thread_id=9, mail_direction="inbound", from_address="bert.fei@accotest.com")
+
+    class Session:
+        async def execute(self, _statement):
+            return Rows([system_email, customer_email])
+
+        async def get(self, _model, _identity):
+            return None
+
+    monkeypatch.setattr(settings, "IMAP_USER", "rmatest1@accotest.com")
+    monkeypatch.setattr(settings, "SMTP_USER", "rmatest1@accotest.com")
+    monkeypatch.setattr(settings, "DEVICE_RECEIPT_TRUSTED_SENDERS", [])
+
+    result = await ticket_safety._customer_source_email(Session(), ticket)
+
+    assert result is customer_email
 
 
 @pytest.mark.anyio

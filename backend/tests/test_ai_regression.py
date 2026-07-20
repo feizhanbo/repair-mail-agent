@@ -12,8 +12,8 @@ from app.integrations.ai_provider import (
     DeepSeekProvider,
     _normalize_response_payload,
 )
-from app.models import AiCallLog
-from app.services.ai import _key_result, _status_for, ai_log_diagnostics
+from app.models import AiCallLog, EmailAttachment
+from app.services.ai import _key_result, _merge_attachment_business_data, _status_for, ai_log_diagnostics
 
 
 @pytest.fixture
@@ -74,6 +74,47 @@ def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
     assert parsed.confidence_score == 0.86
     assert parsed.field_confidences == {"sn": 0.92}
     assert parsed.confidence_reasons == ["SN present"]
+
+
+def test_structured_xlsx_fields_fill_ai_omissions_without_making_phone_required() -> None:
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={"customer_name": "Test Customer"},
+        extracted_items=[],
+        missing_fields={"contact_phone": "optional field incorrectly requested", "sn": "required"},
+        confidence_score=0.95,
+    )
+    attachment = EmailAttachment(
+        id=30,
+        email_id=16,
+        file_name="controlled.xlsx",
+        parse_status="parsed",
+        extracted_json={
+            "extracted_fields": {
+                "customer_name": "Test Customer",
+                "contact_person": "Test Contact",
+                "phone": "13800000000",
+                "request_date": "2026-07-20",
+                "return_address": "Fictitious Test Address",
+            },
+            "extracted_items": [
+                {
+                    "serial_number": "1",
+                    "part_serial_no": "M8123260108000171",
+                    "failure_description": "Controlled failure",
+                }
+            ],
+        },
+    )
+
+    merged = _merge_attachment_business_data(parsed, [attachment])
+
+    assert merged.extracted_fields["mailing_address"] == "Fictitious Test Address"
+    assert merged.extracted_fields["problem_description"] == "Controlled failure"
+    assert merged.extracted_fields["contact_phone"] == "13800000000"
+    assert merged.extracted_items[0]["sn"] == "M8123260108000171"
+    assert merged.extracted_items[0]["line_no"] == 1
+    assert merged.evidence["structured_attachment_source_ids"] == [30]
 
 
 def test_ai_reply_schema_accepts_sample_output() -> None:

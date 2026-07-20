@@ -34,14 +34,14 @@ class FakeSMTP:
 def _configure_smtp(monkeypatch: pytest.MonkeyPatch, *, port: int) -> None:
     monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.com")
     monkeypatch.setattr(settings, "SMTP_PORT", port)
-    monkeypatch.setattr(settings, "SMTP_USER", "rmatest2@example.com")
+    monkeypatch.setattr(settings, "SMTP_USER", "rmatest1@accotest.com")
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "smtp-password")
-    monkeypatch.setattr(settings, "SMTP_RECIPIENT_WHITELIST", ["rmatest2@example.com"])
+    monkeypatch.setattr(settings, "SMTP_RECIPIENT_WHITELIST", ["rmatest2@accotest.com"])
 
 
 def _reply() -> SimpleNamespace:
     return SimpleNamespace(
-        to_addresses="rmatest2@example.com",
+        to_addresses="rmatest2@accotest.com",
         cc_addresses=None,
         subject="Repair update",
         in_reply_to=None,
@@ -122,8 +122,8 @@ def test_send_reply_blocks_non_whitelisted_recipient(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize(
     ("to_addresses", "cc_addresses"),
     [
-        ("rmatest2@example.com, outside@example.com", None),
-        ("rmatest2@example.com", "outside@example.com"),
+        ("rmatest2@accotest.com, outside@example.com", None),
+        ("rmatest2@accotest.com", "outside@example.com"),
     ],
 )
 def test_send_reply_requires_every_recipient_to_be_whitelisted(
@@ -145,4 +145,4 @@ def test_send_reply_requires_every_recipient_to_be_whitelisted(
 
     assert ok is False
     assert message_id is None
-    assert error == "SMTP_RECIPIENT_NOT_ALLOWED"
+    assert error == "SMTP_TEST_ENVELOPE_INVALID"

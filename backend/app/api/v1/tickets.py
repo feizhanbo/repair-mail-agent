@@ -13,7 +13,8 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import ManualReviewTask, ParseResult, Role, User, UserRole
-from app.schemas.business import IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
+from app.schemas.business import DeviceReceivedConfirmRequest, IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
+from app.services.device_receipts import confirm_device_received
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
 from app.services.email_flow_trace import build_ticket_timeline
@@ -232,6 +233,25 @@ async def validate_sn(
     result = await ticket_service.validate_ticket_sn(session, ticket_id=ticket_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "ticket sn validated")
+
+
+@router.post("/{ticket_id}/confirm-device-received")
+async def confirm_ticket_device_received(
+    ticket_id: int,
+    payload: DeviceReceivedConfirmRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    result = await confirm_device_received(
+        session,
+        ticket_id=ticket_id,
+        user_id=current_user.id,
+        source="manual",
+        note=payload.note,
+        idempotency_key=payload.idempotency_key,
+    )
+    await session.commit()
+    return ok(result, "company device receipt recorded")
 
 
 @router.post("/{ticket_id}/confirm-export", deprecated=True)

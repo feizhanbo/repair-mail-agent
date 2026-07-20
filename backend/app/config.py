@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
 
     INTERNAL_EMAIL_DOMAINS: list[str] = ["accotest.com"]
+    DEVICE_RECEIPT_TRUSTED_SENDERS: list[str] = []
     ROUTING_DOMESTIC_USERNAME: str = "miya"
     ROUTING_FOREIGN_USERNAME: str = "demi"
     RMA_AUTO_SEND_ENABLED: bool = True
@@ -127,6 +128,7 @@ class Settings(BaseSettings):
     ASYNC_JOB_STALE_SECONDS: int = 900
 
     AUTO_SEND_ENABLED: bool = False
+    AUTO_FOLLOWUP_ENABLED: bool = False
     REPLY_SEND_MODE: str = "human_review"
     AUTO_APPLY_MIN_CONFIDENCE: float = 0.85
     AUTO_SEND_MIN_CONFIDENCE: float = 0.85

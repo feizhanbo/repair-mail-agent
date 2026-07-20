@@ -1,6 +1,8 @@
 {
   "auto_send_enabled": false,
+  "auto_followup_enabled": false,
   "rma_auto_send_enabled": true,
+  "auto_apply_min_confidence": 0.85,
   "auto_send_min_confidence": 0.85,
   "confidence_threshold": 0.7,
   "max_follow_up": 3

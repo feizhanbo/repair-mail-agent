@@ -9,6 +9,7 @@ from app.config import settings
 
 CONFIG_KEYS = {
     "auto_send_enabled",
+    "auto_followup_enabled",
     "rma_auto_send_enabled",
     "auto_apply_min_confidence",
     "auto_send_min_confidence",
@@ -18,6 +19,7 @@ CONFIG_KEYS = {
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "auto_send_enabled": False,
+    "auto_followup_enabled": False,
     "rma_auto_send_enabled": True,
     "auto_apply_min_confidence": 0.85,
     "auto_send_min_confidence": 0.85,
@@ -36,6 +38,7 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
     merged = {
         **DEFAULT_RUNTIME_CONFIG,
         "auto_send_enabled": bool(settings.AUTO_SEND_ENABLED),
+        "auto_followup_enabled": bool(settings.AUTO_FOLLOWUP_ENABLED),
         "rma_auto_send_enabled": bool(settings.RMA_AUTO_SEND_ENABLED),
         "auto_apply_min_confidence": float(settings.AUTO_APPLY_MIN_CONFIDENCE),
         "auto_send_min_confidence": float(settings.AUTO_SEND_MIN_CONFIDENCE),
@@ -48,6 +51,7 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
     if "rma_auto_send_enabled" not in values and legacy_rma_disabled:
         merged["rma_auto_send_enabled"] = False
     merged["auto_send_enabled"] = bool(merged["auto_send_enabled"])
+    merged["auto_followup_enabled"] = bool(merged["auto_followup_enabled"])
     merged["rma_auto_send_enabled"] = bool(merged["rma_auto_send_enabled"])
     merged["auto_apply_min_confidence"] = max(0.0, min(1.0, float(merged["auto_apply_min_confidence"])))
     merged["auto_send_min_confidence"] = max(0.0, min(1.0, float(merged["auto_send_min_confidence"])))
@@ -59,6 +63,7 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
 def apply_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
     config = _coerce_config(values)
     settings.AUTO_SEND_ENABLED = bool(config["auto_send_enabled"])
+    settings.AUTO_FOLLOWUP_ENABLED = bool(config["auto_followup_enabled"])
     settings.RMA_AUTO_SEND_ENABLED = bool(config["rma_auto_send_enabled"])
     # Deprecated compatibility values are derived from the canonical switches.
     settings.REPLY_SEND_MODE = "auto_send" if settings.AUTO_SEND_ENABLED else "human_review"

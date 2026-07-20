@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.schemas.business import ReplyDraftRequest, ReplyRejectRequest, ReplyUpdateRequest
+from app.schemas.business import ReplyDraftRequest, ReplyRejectRequest, ReplySendReconcileRequest, ReplyUpdateRequest
 from app.services import replies as reply_service
 from app.services.jobs import enqueue_job, serialize_job
 
@@ -112,3 +112,22 @@ async def reject_reply(
     result = await reply_service.reject_reply(session, reply_id=reply_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()
     return ok(result, "reply rejected")
+
+
+@router.post("/{reply_id}/reconcile-send")
+async def reconcile_send(
+    reply_id: int,
+    payload: ReplySendReconcileRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    result = await reply_service.reconcile_uncertain_reply(
+        session,
+        reply_id=reply_id,
+        user_id=current_user.id,
+        outcome=payload.outcome,
+        reason=payload.reason,
+        smtp_message_id=payload.smtp_message_id,
+    )
+    await session.commit()
+    return ok(result, "uncertain reply send result reconciled")

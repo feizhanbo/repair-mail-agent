@@ -263,7 +263,24 @@ async def resolve_task(
             user_id=user_id,
             reason=resolution,
         )
-    elif next_action != "keep_manual_review":
+    elif next_action == "keep_manual_review":
+        task.resolution = resolution
+        await log_operation(
+            session,
+            user_id=user_id,
+            operation_type="manual_task_kept_open",
+            target_type="manual_review_task",
+            target_id=task.id,
+            description=resolution,
+            after_data={"resolution_type": resolution_type, "result_payload": result_payload},
+        )
+        return {
+            "task": serialize_task(task),
+            "ticket": await get_ticket_detail(session, ticket.id),
+            "followup_result": None,
+            "reparse_result": None,
+        }
+    else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_NEXT_ACTION_INVALID")
 
     task.status = "resolved"

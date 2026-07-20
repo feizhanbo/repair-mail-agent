@@ -114,6 +114,12 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "condition_desc": "补充信息邮件已成功发送。",
     },
     {
+        "from_status_code": "need_customer_info",
+        "to_status_code": "parsed",
+        "trigger_event": "customer_info_completed",
+        "condition_desc": "Required customer fields were completed during a deterministic reparse.",
+    },
+    {
         "from_status_code": "manual_review",
         "to_status_code": "auto_replied",
         "trigger_event": "reply_sent",
@@ -156,14 +162,8 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     {
         "from_status_code": "ready_for_export",
         "to_status_code": "closed",
-        "trigger_event": "export_completed",
-        "condition_desc": "导出或下游同步完成。",
-    },
-    {
-        "from_status_code": "ready_for_export",
-        "to_status_code": "closed",
-        "trigger_event": "customer_receipt_confirmed",
-        "condition_desc": "客户确认收到维修后设备，自动关单。",
+        "trigger_event": "device_receipt_ack_sent",
+        "condition_desc": "公司收到待修设备并成功向客户发送收货确认后关单。",
     },
 )
 
@@ -195,16 +195,6 @@ def _build_workflow_transitions() -> tuple[dict[str, Any], ...]:
                     "require_manual": True,
                 }
             )
-        transitions.append(
-            {
-                "from_status_code": from_status,
-                "to_status_code": "closed",
-                "trigger_event": "manual_close",
-                "condition_desc": "人工关闭。",
-                "require_manual": True,
-            }
-        )
-
     unique: dict[tuple[str, str, str], dict[str, Any]] = {}
     for transition in transitions:
         key = (transition["from_status_code"], transition["to_status_code"], transition["trigger_event"])

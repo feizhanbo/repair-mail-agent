@@ -53,13 +53,14 @@ async def enqueue_job(
     metadata: dict[str, Any] | None = None,
     max_attempts: int = 3,
     input_oss_object_id: int | None = None,
+    correlation_id: str | None = None,
 ) -> JobRunLog:
     if job_type not in JOB_TYPES:
         raise ValueError("JOB_TYPE_NOT_SUPPORTED")
     existing = await session.scalar(select(JobRunLog).where(JobRunLog.idempotency_key == idempotency_key))
     if existing is not None:
         return existing
-    correlation_id = get_correlation_id()
+    correlation_id = correlation_id or get_correlation_id()
     created_at = utcnow()
     job = JobRunLog(
         job_name=job_type,
@@ -159,6 +160,7 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
 
         return await run_imap_fetch_locked(
             session,
+            tracking_job=job,
             busy_is_error=True,
             folder_name=str(metadata.get("folder_name") or settings.IMAP_FOLDER),
             limit=int(metadata.get("limit") or settings.IMAP_FETCH_LIMIT),
@@ -276,8 +278,13 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
 
 async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLog:
     started = utcnow()
+    job_id = job.id
     try:
         result = await _execute_job_command(session, job)
+        # IMAP processes each message durably and may roll back one failed
+        # message. Reload the queue row before reading or writing it so an
+        # expired ORM instance cannot trigger implicit async IO.
+        job = await session.get(JobRunLog, job_id, with_for_update=True) or job
         business_status = str(result.get("status") or "") if isinstance(result, dict) else ""
         if business_status == "superseded":
             job.status = "superseded"
@@ -313,7 +320,6 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             diagnostic = f"{diagnostic}:{original.__class__.__name__}"
         if isinstance(original, (TypeError, ValueError)):
             diagnostic = f"{diagnostic}: {str(original)[:300]}"
-        job_id = job.id
         await session.rollback()
         recovered_job = await session.get(JobRunLog, job_id, with_for_update=True)
         if recovered_job is None:

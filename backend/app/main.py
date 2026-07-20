@@ -65,6 +65,8 @@ async def _scheduled_imap_fetch():
 
 
 async def _scheduled_auto_followup():
+    if not settings.AUTO_FOLLOWUP_ENABLED:
+        return
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -76,9 +78,6 @@ async def _scheduled_auto_followup():
             errors = 0
             for ticket in tickets:
                 if ticket.followup_count >= ticket.max_followup_count:
-                    skipped += 1
-                    continue
-                if not settings.AUTO_SEND_ENABLED:
                     skipped += 1
                     continue
                 try:

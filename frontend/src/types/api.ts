@@ -340,6 +340,12 @@ export type Ticket = {
   safety_check_snapshot?: JsonRecord | null;
   safety_check_hash?: string | null;
   safety_checked_at?: string | null;
+  device_received_at?: string | null;
+  device_received_source?: string | null;
+  device_received_email_id?: number | null;
+  device_received_note?: string | null;
+  device_received_idempotency_key?: string | null;
+  device_receipt_ack_status?: string;
   manual_locked: boolean;
   version: number;
   created_at?: string;
@@ -643,6 +649,7 @@ export type SystemInfo = {
   app: string;
   env: string;
   auto_send_enabled: boolean;
+  auto_followup_enabled: boolean;
   rma_auto_send_enabled: boolean;
   /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
@@ -651,6 +658,8 @@ export type SystemInfo = {
   max_follow_up: number;
   confidence_threshold: number;
   environment_note?: string;
+  mail_test_static_ready?: boolean;
+  mail_test_static_reasons?: string[];
   integrations: JsonRecord;
   workflow_statuses: WorkflowStatus[];
   workflow_transitions: WorkflowTransition[];
@@ -658,6 +667,7 @@ export type SystemInfo = {
 
 export type SystemConfig = {
   auto_send_enabled: boolean;
+  auto_followup_enabled: boolean;
   rma_auto_send_enabled: boolean;
   /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
@@ -666,7 +676,33 @@ export type SystemConfig = {
   max_follow_up: number;
   confidence_threshold: number;
   environment_note?: string;
+  mail_test_static_ready?: boolean;
+  mail_test_static_reasons?: string[];
   integrations: JsonRecord;
+};
+
+export type MailTestPreflightResult = {
+  status: 'passed' | 'failed';
+  reasons: string[];
+  database?: {
+    status: 'ready' | 'failed';
+    current_revision?: string | null;
+    required_revision: string;
+  } | null;
+  imap?: JsonRecord | null;
+  smtp?: (JsonRecord & {
+    status?: 'ready' | 'failed';
+    stage?: 'connect' | 'tls' | 'auth' | 'noop' | 'complete';
+    error_code?: string;
+    messages_sent?: number;
+  }) | null;
+  offline_rma?: JsonRecord | null;
+  integrations?: {
+    oss: { status: 'ready' | 'failed' };
+    text_ai: { status: 'ready' | 'failed' };
+    multimodal_ai: { status: 'ready' | 'failed' };
+  };
+  messages_sent: number;
 };
 
 export type SystemRuntimeStatus = {

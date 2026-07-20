@@ -22,6 +22,7 @@ class RepairTicket(TimestampMixin, Base):
         Index("idx_repair_tickets_relay_status", "relay_export_status", "updated_at"),
         Index("idx_repair_tickets_rma_status", "rma_status", "updated_at"),
         Index("idx_repair_tickets_sn_validation_status", "sn_validation_status", "updated_at"),
+        Index("idx_repair_tickets_device_ack_status", "device_receipt_ack_status", "updated_at"),
         CheckConstraint("followup_count >= 0", name="followup_count_non_negative"),
         CheckConstraint("max_followup_count >= followup_count", name="max_followup_count_gte_followup_count"),
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="confidence_between_0_and_1"),
@@ -58,6 +59,15 @@ class RepairTicket(TimestampMixin, Base):
     safety_check_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     safety_check_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     safety_checked_at: Mapped[Any | None] = datetime_column()
+    device_received_at: Mapped[Any | None] = datetime_column()
+    device_received_source: Mapped[str | None] = mapped_column(String(30))
+    device_received_email_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("emails.id", use_alter=True, name="fk_repair_tickets_device_received_email"),
+    )
+    device_received_note: Mapped[str | None] = mapped_column(Text)
+    device_received_idempotency_key: Mapped[str | None] = mapped_column(String(100))
+    device_receipt_ack_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="not_received")
     manual_locked: Mapped[bool] = bool_column(False)
     version: Mapped[int] = mapped_column(nullable=False, server_default="1")
 

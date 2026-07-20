@@ -233,6 +233,19 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
+  const confirmDeviceReceivedMutation = useMutation({
+    mutationFn: (id: number) => api.confirmDeviceReceived(id, {
+      idempotency_key: `manual-${id}-${Date.now()}`,
+      note: '操作员在工单中心确认公司已收到待修设备。',
+    }),
+    onSuccess: (result) => {
+      message.success(result.status === 'sent' ? '收货确认已发送并完成关单' : '公司收货事实已记录');
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['replies'] });
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
   const exportMutation = useMutation({
     mutationFn: () => api.exportSelectedTickets(selectedTicketKeys.map(Number)),
     onSuccess: (blob) => saveBlob(blob, 'tickets-selected-export.xlsx'),
@@ -372,6 +385,14 @@ export default function TicketsPage() {
                 onClick={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
               >
                 生成追问
+              </Button>
+              <Button
+                icon={<CheckCircleOutlined />}
+                loading={confirmDeviceReceivedMutation.isPending}
+                disabled={detailQuery.data.ticket.current_status_code === 'closed'}
+                onClick={() => confirmAction('确认公司已经收到客户寄来的待修设备及纸质 RMA 授权单？', () => confirmDeviceReceivedMutation.mutate(detailQuery.data.ticket.id))}
+              >
+                确认公司收货
               </Button>
               {canTransitionTicket ? (
                 <Button type="primary" onClick={() => setTransitionOpen(true)}>
@@ -540,6 +561,9 @@ function TicketDetailView({
         <Descriptions.Item label="SN 核心校验"><StatusTag value={detail.ticket.sn_validation_status || 'pending'} /></Descriptions.Item>
         <Descriptions.Item label="SQL Server"><StatusTag value={detail.ticket.relay_export_status || 'not_required'} /></Descriptions.Item>
         <Descriptions.Item label="RMA"><StatusTag value={detail.ticket.rma_status || 'not_required'} /></Descriptions.Item>
+        <Descriptions.Item label="公司收货">{detail.ticket.device_received_at ? formatTime(detail.ticket.device_received_at) : '-'}</Descriptions.Item>
+        <Descriptions.Item label="收货来源">{detail.ticket.device_received_source || '-'}</Descriptions.Item>
+        <Descriptions.Item label="收货确认回复"><StatusTag value={detail.ticket.device_receipt_ack_status || 'not_received'} /></Descriptions.Item>
         <Descriptions.Item label="寄送地址" span={3}>{detail.ticket.mailing_address || '-'}</Descriptions.Item>
         <Descriptions.Item label="问题描述" span={3}>{compactText(detail.ticket.problem_description, '-')}</Descriptions.Item>
       </Descriptions>

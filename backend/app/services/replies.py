@@ -19,7 +19,9 @@ from app.core.request_context import get_correlation_id
 from app.models import Email, EmailAttachment, EmailTicketLink, OssObject, ReplyRecord, ReplyTemplate, RepairTicket
 from app.services.ai import generate_ai_reply_draft
 from app.services.audit import log_operation, log_system_event
+from app.services.business_rules import is_followup_reply_type
 from app.services.common import model_to_dict, utcnow
+from app.services.mail_safety import TEST_MAIL_RECIPIENT, TEST_MAIL_SENDER, test_envelope_allowed, test_only_subject
 from app.services.rma_pdf import (
     RmaPdfError,
     TEMPLATE_VERSION as RMA_TEMPLATE_VERSION,
@@ -255,14 +257,11 @@ def _smtp_configured() -> bool:
 
 def _smtp_sender_is_exact_login() -> bool:
     login = settings.SMTP_USER.strip().lower()
-    return bool(login and parseaddr(settings.SMTP_USER)[1].lower() == login)
+    return bool(login and parseaddr(settings.SMTP_USER)[1].lower() == login == TEST_MAIL_SENDER)
 
 
 def _rma_envelope_valid(reply: ReplyRecord) -> bool:
-    return (
-        getattr(reply, "reply_type", None) != "rma_authorization"
-        or (len(_recipient_addresses(reply.to_addresses)) == 1 and not _recipient_addresses(reply.cc_addresses))
-    )
+    return test_envelope_allowed(reply.to_addresses, reply.cc_addresses)
 
 
 def _smtp_client() -> smtplib.SMTP:
@@ -272,13 +271,16 @@ def _smtp_client() -> smtplib.SMTP:
 
 
 def _recipient_in_whitelist(*values: str | None) -> bool:
-    addresses = _recipient_addresses(*values)
-    whitelist = {address.lower() for address in getattr(settings, "SMTP_RECIPIENT_WHITELIST", [])}
-    return bool(addresses) and bool(whitelist) and addresses <= whitelist
+    to_addresses = values[0] if values else None
+    cc_addresses = values[1] if len(values) > 1 else None
+    return test_envelope_allowed(to_addresses, cc_addresses)
 
 
 def _reply_can_auto_send(reply: ReplyRecord, *, confidence_score: float | None = None, risk_level: str | None = None) -> bool:
-    if not settings.AUTO_SEND_ENABLED:
+    if reply.reply_type == "sn_invalid":
+        return False
+    enabled = settings.AUTO_FOLLOWUP_ENABLED if is_followup_reply_type(reply.reply_type) else settings.AUTO_SEND_ENABLED
+    if not enabled:
         return False
     if not _valid_recipient(reply.to_addresses, reply.cc_addresses):
         return False
@@ -312,7 +314,7 @@ def _build_reply_message(
     message["To"] = reply.to_addresses
     if reply.cc_addresses:
         message["Cc"] = reply.cc_addresses
-    message["Subject"] = reply.subject or ""
+    message["Subject"] = test_only_subject(reply.subject)
     message["Message-ID"] = message_id
     if reply.in_reply_to:
         message["In-Reply-To"] = reply.in_reply_to
@@ -338,13 +340,15 @@ def _send_reply_via_smtp(
     if not _smtp_sender_is_exact_login():
         return False, None, "SMTP_SENDER_LOGIN_MISMATCH"
     if not _rma_envelope_valid(reply):
-        return False, None, "RMA_RECIPIENT_ENVELOPE_INVALID"
+        return False, None, "SMTP_TEST_ENVELOPE_INVALID"
     if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
         return False, None, "SMTP_RECIPIENT_NOT_ALLOWED"
     if not _valid_recipient(reply.to_addresses, reply.cc_addresses):
         return False, None, "SMTP_RECIPIENT_INVALID"
     if not _smtp_configured():
         return False, None, "SMTP_NOT_CONFIGURED"
+    if settings.SMTP_PORT not in {465, 587}:
+        return False, None, "SMTP_TLS_REQUIRED"
 
     message_id = _smtp_message_id(reply)
     message = _build_reply_message(
@@ -487,6 +491,20 @@ async def _ensure_reply_manual_task(
     email_id: int | None,
     user_id: int | None,
 ) -> None:
+    # Delivery failures for an otherwise export-ready ticket must not destroy
+    # the prerequisite needed by a later send reconciliation. The open manual
+    # task is the actionable signal while the ticket remains unclosed.
+    if ticket.current_status_code == "ready_for_export":
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type=task_type,
+            trigger_reason=reason,
+            priority="high",
+            email_id=email_id,
+            assigned_user_id=ticket.assigned_user_id,
+        )
+        return
     if ticket.current_status_code != "manual_review":
         await transition_ticket(
             session,
@@ -518,12 +536,23 @@ async def _send_reply_record(
     user_id: int | None,
     auto: bool,
 ) -> None:
-    ticket = await get_ticket(session, reply.ticket_id)
+    ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
+    if ticket is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
+    reply.subject = test_only_subject(reply.subject)
+
+    def sync_ticket_delivery_status() -> None:
+        if reply.reply_type == "device_received_ack":
+            ticket.device_receipt_ack_status = reply.send_status
+        elif reply.reply_type == "rma_authorization" and reply.send_status in {"send_failed", "send_uncertain"}:
+            ticket.rma_status = "manual_review"
+
     if reply.send_status == "sent" and reply.smtp_message_id:
         return
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
         reply.send_status = "send_uncertain"
         reply.error_message = "SMTP_SEND_RESULT_UNCERTAIN"
+        sync_ticket_delivery_status()
         await _ensure_reply_manual_task(
             session, ticket=ticket, task_type="reply_send_uncertain",
             reason="SMTP_SEND_RESULT_UNCERTAIN", email_id=reply.related_email_id, user_id=user_id,
@@ -532,6 +561,7 @@ async def _send_reply_record(
     if not _smtp_sender_is_exact_login():
         reply.send_status = "send_failed"
         reply.error_message = "SMTP_SENDER_LOGIN_MISMATCH"
+        sync_ticket_delivery_status()
         await _ensure_reply_manual_task(
             session, ticket=ticket, task_type="reply_send_failed",
             reason=reply.error_message, email_id=reply.related_email_id, user_id=user_id,
@@ -539,7 +569,8 @@ async def _send_reply_record(
         return
     if not _rma_envelope_valid(reply):
         reply.send_status = "send_failed"
-        reply.error_message = "RMA_RECIPIENT_ENVELOPE_INVALID"
+        reply.error_message = "SMTP_TEST_ENVELOPE_INVALID"
+        sync_ticket_delivery_status()
         await _ensure_reply_manual_task(
             session, ticket=ticket, task_type="reply_send_failed",
             reason=reply.error_message, email_id=reply.related_email_id, user_id=user_id,
@@ -548,6 +579,7 @@ async def _send_reply_record(
     if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
         reply.send_status = "send_failed"
         reply.error_message = "SMTP_RECIPIENT_NOT_ALLOWED"
+        sync_ticket_delivery_status()
         await _ensure_reply_manual_task(
             session, ticket=ticket, task_type="reply_send_failed",
             reason="SMTP_RECIPIENT_NOT_ALLOWED", email_id=reply.related_email_id, user_id=user_id,
@@ -581,6 +613,7 @@ async def _send_reply_record(
     except (StorageConfigurationError, StorageUploadError) as exc:
         reply.send_status = "send_failed"
         reply.error_message = "OUTBOUND_ARCHIVAL_FAILED"
+        sync_ticket_delivery_status()
         await log_system_event(
             session,
             event_type="smtp_send",
@@ -612,6 +645,7 @@ async def _send_reply_record(
             attachment_filename=attachment_filename,
         )
     if ok and sent_message_id:
+        was_counted = reply.send_status == "sent"
         reply.send_status = "sent"
         reply.sent_at = utcnow()
         reply.error_message = None
@@ -626,7 +660,46 @@ async def _send_reply_record(
             attachment_content=attachment_content,
             attachment_filename=attachment_filename,
         )
-        if reply.reply_type != "receipt" and ticket.current_status_code in {"need_customer_info", "manual_review"}:
+        if reply.reply_type == "rma_authorization":
+            ticket.rma_status = "sent"
+            if ticket.device_received_at is not None and ticket.device_receipt_ack_status == "pending_prerequisite":
+                from app.services.device_receipts import confirm_device_received
+
+                await confirm_device_received(
+                    session,
+                    ticket_id=ticket.id,
+                    user_id=user_id,
+                    source=ticket.device_received_source or "deferred",
+                    source_email_id=ticket.device_received_email_id,
+                    note=ticket.device_received_note,
+                    idempotency_key=ticket.device_received_idempotency_key or f"deferred-device-receipt:{ticket.id}",
+                )
+        if reply.reply_type == "device_received_ack":
+            ticket.device_receipt_ack_status = "sent"
+            if ticket.current_status_code == "ready_for_export" and ticket.rma_status == "sent":
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="closed",
+                    trigger_event="device_receipt_ack_sent",
+                    user_id=user_id,
+                    operator_type="system" if auto else "user",
+                    reason="公司收到待修设备并成功向客户发送收货确认，工单闭合。",
+                    metadata={"reply_id": reply.id, "smtp_message_id": sent_message_id},
+                )
+            else:
+                ticket.device_receipt_ack_status = "pending_prerequisite"
+                await _ensure_reply_manual_task(
+                    session,
+                    ticket=ticket,
+                    task_type="device_received_prerequisite",
+                    reason="DEVICE_RECEIPT_CLOSE_PREREQUISITE_FAILED",
+                    email_id=reply.related_email_id,
+                    user_id=user_id,
+                )
+        if is_followup_reply_type(reply.reply_type) and not was_counted:
+            ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
+        if is_followup_reply_type(reply.reply_type) and ticket.current_status_code in {"need_customer_info", "manual_review"}:
             await transition_ticket(
                 session,
                 ticket=ticket,
@@ -640,6 +713,8 @@ async def _send_reply_record(
     else:
         reply.send_status = "send_uncertain" if error == "SMTP_SEND_FAILED_UNCERTAIN" else "send_failed"
         reply.error_message = error or "SMTP_SEND_FAILED"
+        if reply.reply_type == "device_received_ack":
+            ticket.device_receipt_ack_status = reply.send_status
         await _ensure_reply_manual_task(
             session,
             ticket=ticket,
@@ -701,7 +776,7 @@ async def create_reply_draft(
     )
     if existing_draft is not None:
         return serialize_reply(existing_draft)
-    if reply_kind != "receipt" and ticket.followup_count >= ticket.max_followup_count:
+    if is_followup_reply_type(reply_kind) and ticket.followup_count >= ticket.max_followup_count:
         if ticket.current_status_code != "manual_review":
             await transition_ticket(
                 session,
@@ -773,9 +848,9 @@ async def create_reply_draft(
         related_email_id=related_email.id if related_email else None,
         template_id=template.id,
         reply_type=reply_kind,
-        followup_round=ticket.followup_count + 1,
+        followup_round=(ticket.followup_count + 1) if is_followup_reply_type(reply_kind) else ticket.followup_count,
         missing_fields=effective_missing_fields,
-        to_addresses=ticket.contact_email or (related_email.from_address if related_email else ""),
+        to_addresses=TEST_MAIL_RECIPIENT,
         cc_addresses=related_email.cc_addresses if related_email else None,
         subject=subject,
         draft_body=body,
@@ -794,27 +869,13 @@ async def create_reply_draft(
         logger.warning("Reply draft for ticket_id=%s has non-whitelisted recipient; forcing human review", ticket.id)
     can_auto_send = _reply_can_auto_send(reply, confidence_score=reply_confidence_score, risk_level=reply_risk_level)
     if not can_auto_send:
-        if ticket.current_status_code != "manual_review":
-            await transition_ticket(
-                session,
-                ticket=ticket,
-                to_status_code="manual_review",
-                trigger_event="manual_review_required",
-                user_id=user_id,
-                reason="回复草稿需要人工确认后发送。",
-                metadata={"reply_id": reply.id},
-                manual_task_type="reply_review",
-            )
-        else:
-            await create_manual_task_if_missing(
-                session,
-                ticket=ticket,
-                task_type="reply_review",
-                trigger_reason="回复草稿需要人工确认后发送。",
-                email_id=related_email.id if related_email else None,
-            )
-    if reply_kind != "receipt":
-        ticket.followup_count += 1
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="reply_review",
+            trigger_reason="回复草稿需要人工确认后发送。",
+            email_id=related_email.id if related_email else None,
+        )
     if can_auto_send:
         reply.review_status = "auto_approved"
         reply.reviewed_at = utcnow()
@@ -941,6 +1002,80 @@ async def reject_reply(session: AsyncSession, *, reply_id: int, user_id: int, re
     return serialize_reply(reply)
 
 
+async def reconcile_uncertain_reply(
+    session: AsyncSession,
+    *,
+    reply_id: int,
+    user_id: int,
+    outcome: str,
+    reason: str,
+    smtp_message_id: str | None = None,
+) -> dict[str, Any]:
+    reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_NOT_FOUND")
+    if reply.send_status != "send_uncertain":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_SEND_NOT_UNCERTAIN")
+    ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
+    if ticket is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
+
+    if outcome == "sent":
+        reply.send_status = "sent"
+        reply.sent_at = utcnow()
+        reply.smtp_message_id = smtp_message_id or reply.smtp_message_id
+        reply.error_message = None
+        if is_followup_reply_type(reply.reply_type):
+            ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
+            if ticket.current_status_code in {"need_customer_info", "manual_review"}:
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="auto_replied",
+                    trigger_event="reply_sent",
+                    user_id=user_id,
+                    operator_type="user",
+                    reason="人工确认结果不确定的追问邮件实际已成功发送。",
+                    metadata={"reply_id": reply.id, "reconciled": True},
+                )
+        elif reply.reply_type == "rma_authorization":
+            ticket.rma_status = "sent"
+        elif reply.reply_type == "device_received_ack":
+            ticket.device_receipt_ack_status = "sent"
+            if ticket.current_status_code == "ready_for_export" and ticket.rma_status == "sent":
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="closed",
+                    trigger_event="device_receipt_ack_sent",
+                    user_id=user_id,
+                    operator_type="user",
+                    reason="人工确认收货回复实际已发送，工单闭合。",
+                    metadata={"reply_id": reply.id, "reconciled": True},
+                )
+    elif outcome == "failed":
+        reply.send_status = "send_failed"
+        reply.error_message = "SMTP_SEND_CONFIRMED_FAILED"
+        if reply.reply_type == "device_received_ack":
+            ticket.device_receipt_ack_status = "send_failed"
+        if reply.reply_type == "rma_authorization":
+            ticket.rma_status = "manual_review"
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="REPLY_RECONCILE_OUTCOME_INVALID")
+
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="reply_send_reconciled",
+        target_type="reply_record",
+        target_id=reply.id,
+        ticket_id=ticket.id,
+        description=reason,
+        after_data={"outcome": outcome, "send_status": reply.send_status},
+    )
+    return serialize_reply(reply)
+
+
 async def _rma_manual_review(
     session: AsyncSession,
     *,
@@ -986,45 +1121,58 @@ async def create_and_send_rma_authorization(
         or normalize_rma_template_version(expected_rma_template_version) != RMA_TEMPLATE_VERSION
     ):
         return {"status": "superseded", "error_code": "TICKET_SNAPSHOT_SUPERSEDED", "ticket_id": ticket.id}
+    attach_rma = bool(settings.RMA_AUTO_SEND_ENABLED)
+    reply_type = "rma_authorization" if attach_rma else "receipt"
     existing = await session.scalar(
         select(ReplyRecord)
-        .where(ReplyRecord.ticket_id == ticket.id, ReplyRecord.reply_type == "rma_authorization", ReplyRecord.send_status == "sent")
+        .where(
+            ReplyRecord.ticket_id == ticket.id,
+            ReplyRecord.reply_type == reply_type,
+            ReplyRecord.send_status.in_({"pending_review", "approved_pending_send", "sending", "auto_sending", "sent", "send_uncertain"}),
+        )
         .order_by(ReplyRecord.id.desc())
     )
     if existing is not None:
-        ticket.rma_status = "sent"
-        return {"status": "succeeded", "ticket_id": ticket.id, "reply_id": existing.id, "idempotent_reuse": True}
-    if not settings.RMA_AUTO_SEND_ENABLED:
-        return await _rma_manual_review(session, ticket=ticket, task_type="rma_auto_send_disabled", reason="RMA_AUTO_SEND_DISABLED")
+        if existing.send_status == "sent" and attach_rma:
+            ticket.rma_status = "sent"
+        return {"status": existing.send_status, "ticket_id": ticket.id, "reply_id": existing.id, "idempotent_reuse": True}
 
-    try:
-        subject_template, body_template, reply_template_version = _rma_reply_content(ticket)
-    except RmaReplyRuleError as exc:
-        return await _rma_manual_review(session, ticket=ticket, task_type=exc.task_type, reason=exc.reason)
+    pdf_content: bytes | None = None
+    pdf_object: OssObject | None = None
+    data = None
+    if attach_rma:
+        try:
+            subject_template, body_template, reply_template_version = _rma_reply_content(ticket)
+        except RmaReplyRuleError as exc:
+            return await _rma_manual_review(session, ticket=ticket, task_type=exc.task_type, reason=exc.reason)
 
-    ticket.rma_status = "generating"
-    try:
-        data = await build_rma_pdf_data(
-            session,
-            ticket_id=ticket.id,
-            safety_snapshot=ticket.safety_check_snapshot,
+        ticket.rma_status = "generating"
+        try:
+            data = await build_rma_pdf_data(
+                session,
+                ticket_id=ticket.id,
+                safety_snapshot=ticket.safety_check_snapshot,
+            )
+            pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=True)
+            file_name = rma_pdf_file_name(data)
+            pdf_object = await upload_bytes_to_oss(
+                session,
+                content=pdf_content,
+                original_file_name=file_name,
+                content_type="application/pdf",
+                source_type="rma_authorization_pdf",
+                user_id=user_id,
+            )
+        except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
+            return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
+    else:
+        subject_template = "报修申请已受理：{{ ticket_no }} {{ customer_name }}"
+        body_template = (
+            "您好，{{ contact_person }}：\n\n"
+            "我们已收到并确认您的报修申请。RMA 维修授权单附件当前未启用自动发送，"
+            "后续将由工作人员单独处理。\n\n谢谢。"
         )
-        test_only = (
-            parseaddr(settings.SMTP_USER)[1].lower() == "rmatest1@accotest.com"
-            and parseaddr(ticket.contact_email or "")[1].lower() == "rmatest2@accotest.com"
-        )
-        pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=test_only)
-        file_name = rma_pdf_file_name(data)
-        pdf_object = await upload_bytes_to_oss(
-            session,
-            content=pdf_content,
-            original_file_name=file_name,
-            content_type="application/pdf",
-            source_type="rma_authorization_pdf",
-            user_id=user_id,
-        )
-    except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
-        return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
+        reply_template_version = "new_repair_receipt_without_rma_v1"
 
     related_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     subject = _render_template(subject_template, ticket=ticket, missing_fields=None)
@@ -1032,34 +1180,55 @@ async def create_and_send_rma_authorization(
     reply = ReplyRecord(
         ticket_id=ticket.id,
         related_email_id=related_email.id if related_email else None,
-        reply_type="rma_authorization",
-        followup_round=ticket.followup_count + 1,
-        to_addresses=ticket.contact_email or "",
+        reply_type=reply_type,
+        followup_round=ticket.followup_count,
+        to_addresses=TEST_MAIL_RECIPIENT,
         cc_addresses=None,
         subject=subject,
         draft_body=body,
         final_body=body,
-        generate_source="rma_template",
-        rma_pdf_oss_object_id=pdf_object.id,
+        generate_source="rma_template" if attach_rma else "new_repair_receipt",
+        rma_pdf_oss_object_id=pdf_object.id if pdf_object else None,
         reply_template_version=reply_template_version,
-        rma_template_version=RMA_TEMPLATE_VERSION,
-        rma_pdf_data_snapshot=rma_pdf_snapshot(
-            data,
-            pdf_content=pdf_content,
-            oss_object_id=pdf_object.id,
+        rma_template_version=RMA_TEMPLATE_VERSION if attach_rma else None,
+        rma_pdf_data_snapshot=(
+            rma_pdf_snapshot(data, pdf_content=pdf_content, oss_object_id=pdf_object.id)
+            if data is not None and pdf_content is not None and pdf_object is not None
+            else None
         ),
-        review_status="auto_approved",
-        reviewed_at=utcnow(),
-        send_status="approved_pending_send",
+        review_status="auto_approved" if settings.AUTO_SEND_ENABLED else "pending",
+        reviewed_at=utcnow() if settings.AUTO_SEND_ENABLED else None,
+        send_status="approved_pending_send" if settings.AUTO_SEND_ENABLED else "pending_review",
         in_reply_to=related_email.message_id if related_email else None,
         references_header=related_email.references_header if related_email else None,
     )
     session.add(reply)
     await session.flush()
-    ticket.rma_status = "sending"
+    if not settings.AUTO_SEND_ENABLED:
+        ticket.rma_status = "manual_review"
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="rma_reply_review" if attach_rma else "rma_attachment_disabled",
+            trigger_reason="普通回复自动发送已关闭，需要人工审核新报修回复。",
+            priority="high" if attach_rma else "normal",
+            email_id=related_email.id if related_email else None,
+        )
+        return {"status": "pending_review", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
+
+    ticket.rma_status = "sending" if attach_rma else "manual_review"
     await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
     if reply.send_status == "sent":
-        ticket.rma_status = "sent"
+        if not attach_rma:
+            ticket.rma_status = "manual_review"
+            await create_manual_task_if_missing(
+                session,
+                ticket=ticket,
+                task_type="rma_attachment_disabled",
+                trigger_reason="新报修确认已发送，但 RMA 授权单附件未发送。",
+                priority="normal",
+                email_id=related_email.id if related_email else None,
+            )
         await log_operation(
             session,
             user_id=user_id,
@@ -1069,12 +1238,17 @@ async def create_and_send_rma_authorization(
             ticket_id=ticket.id,
             after_data={
                 "reply_id": reply.id,
-                "pdf_oss_object_id": pdf_object.id,
+                "pdf_oss_object_id": pdf_object.id if pdf_object else None,
                 "recipient": reply.to_addresses,
                 "reply_template_version": reply.reply_template_version,
                 "rma_template_version": reply.rma_template_version,
             },
         )
-        return {"status": "succeeded", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
+        return {
+            "status": "succeeded" if attach_rma else "reply_sent_rma_pending",
+            "ticket_id": ticket.id,
+            "reply_id": reply.id,
+            "idempotent_reuse": False,
+        }
     ticket.rma_status = "manual_review"
     return {"status": "manual_review", "error_code": reply.error_message or reply.send_status, "ticket_id": ticket.id, "reply_id": reply.id}

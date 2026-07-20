@@ -24,6 +24,7 @@ import type {
   ManualTask,
   ManualTaskDetail,
   ManualTaskReparseResponse,
+  MailTestPreflightResult,
   NotificationEvent,
   ObjectDownloadUrl,
   PageData,
@@ -127,8 +128,24 @@ export function apiErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试';
     if (!error.response) return '网络连接失败，请检查后端服务';
-    const payload = error.response.data as { message?: string; detail?: string; data?: { correlation_id?: string; stage?: string } } | undefined;
-    const code = typeof payload?.message === 'string' ? payload.message : typeof payload?.detail === 'string' ? payload.detail : undefined;
+    const payload = error.response.data as {
+      message?: string;
+      detail?: string | { code?: string; reasons?: string[]; preflight?: { reasons?: string[] } };
+      data?: {
+        correlation_id?: string;
+        stage?: string;
+        preflight?: { reasons?: string[] };
+      };
+    } | undefined;
+    const detail = payload?.detail;
+    const code = typeof payload?.message === 'string'
+      ? payload.message
+      : typeof detail === 'string'
+        ? detail
+        : detail?.code;
+    const preflightReasons = payload?.data?.preflight?.reasons
+      ?? (typeof detail === 'object' ? (detail.preflight?.reasons ?? detail.reasons ?? []) : []);
+    if (preflightReasons.length) return `邮件预检未通过：${preflightReasons.join('、')}`;
     const base = friendlyServerMessage(error.response.status, code);
     return payload?.data?.correlation_id ? `${base}（关联 ID：${payload.data.correlation_id}）` : base;
   }
@@ -223,6 +240,8 @@ export const api = {
   transitionTicket: (id: number, body: Record<string, unknown>) => postData<TicketDetail>(`/tickets/${id}/transition`, body),
   validateTicketSn: (id: number) => postData<TicketDetail>(`/tickets/${id}/validate-sn`),
   validateTicketExport: (id: number) => postData(`/tickets/${id}/validate-export`),
+  confirmDeviceReceived: (id: number, body: { idempotency_key: string; note?: string }) =>
+    postData<{ ticket_id: number; status: string; reply_id?: number | null; idempotent_reuse: boolean }>(`/tickets/${id}/confirm-device-received`, body),
   applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => {
     const payload = typeof body === 'string' ? { reason: body } : body;
     return postData<TicketDetail>(`/parse-results/${id}/apply`, payload ?? { action: 'apply' });
@@ -234,6 +253,8 @@ export const api = {
   replies: (params: Record<string, unknown>) => getData<PageData<ReplyRecord>>('/replies', { params }),
   draftReply: (ticketId: number, body: Record<string, unknown>) => postData<ReplyRecord>(`/replies/${ticketId}/draft`, body),
   approveReply: (id: number) => postData(`/replies/${id}/approve-send`),
+  reconcileReplySend: (id: number, body: { outcome: 'sent' | 'failed'; reason: string; smtp_message_id?: string }) =>
+    postData<ReplyRecord>(`/replies/${id}/reconcile-send`, body),
   approveReplyJob: (id: number) => postData<{ reply: ReplyRecord; job?: JobRunLog | null }>(`/replies/${id}/approve-send/jobs`),
   rejectReply: (id: number, reason: string) => postData(`/replies/${id}/reject`, { reason }),
   snAssets: (params: Record<string, unknown>) => getData<PageData<SnAsset>>('/master-data/sn-assets', { params }),
@@ -277,7 +298,8 @@ export const api = {
   systemInfo: () => getData<SystemInfo>('/system/info'),
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
-  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'rma_auto_send_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
+  mailTestPreflight: () => postData<MailTestPreflightResult>('/system/mail-test/preflight'),
+  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'auto_followup_enabled' | 'rma_auto_send_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up'>>) =>
     patchData<SystemConfig>('/system/config', body),
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
   createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>

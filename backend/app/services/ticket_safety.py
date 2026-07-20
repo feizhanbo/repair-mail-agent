@@ -22,6 +22,7 @@ from app.models import (
     SnValidationResult,
     TicketRelayExport,
 )
+from app.services.business_rules import required_missing_for_ticket
 from app.services.common import utcnow
 from app.services.external_relay import relay_configured, validate_sn_against_relay
 from app.services.jobs import enqueue_job
@@ -122,6 +123,31 @@ async def build_sn_validation_report(
 ) -> dict[str, Any]:
     """Validate SN evidence only. This stage never marks a ticket exportable."""
     ticket, items = await _ticket_and_items(session, ticket_id)
+    if persist:
+        normalized_sns = [_clean_text(item.sn).upper() for item in items if _clean_text(item.sn)]
+        assets = list(
+            (
+                await session.execute(select(SnAsset).where(SnAsset.sn.in_(normalized_sns)))
+            ).scalars().all()
+        ) if normalized_sns else []
+        customer_codes = {asset.customer_code for asset in assets if asset.customer_code}
+        customer_names = {asset.customer_name for asset in assets if asset.customer_name}
+        assets_by_sn = {_clean_text(asset.sn).upper(): asset for asset in assets if _clean_text(asset.sn)}
+        if not ticket.customer_code and len(customer_codes) == 1:
+            ticket.customer_code = next(iter(customer_codes))
+        if not ticket.customer_name and len(customer_names) == 1:
+            ticket.customer_name = next(iter(customer_names))
+        # SN validation hashes the post-enrichment state. Otherwise filling
+        # material data during the same validation immediately makes the
+        # freshly stored hash stale when the full safety report recomputes it.
+        for item in items:
+            asset = assets_by_sn.get(_clean_text(item.sn).upper())
+            if asset is None:
+                continue
+            if not item.material_code:
+                item.material_code = asset.material_code
+            if not item.material_name:
+                item.material_name = asset.material_name
     input_snapshot = _sn_input_snapshot(ticket, items)
     input_hash = _stable_hash(input_snapshot)
 
@@ -347,7 +373,15 @@ async def validate_ticket_sn_core(
 
 
 async def _customer_source_email(session: AsyncSession, ticket: RepairTicket) -> Email | None:
-    internal_domains = {item.lower() for item in settings.INTERNAL_EMAIL_DOMAINS}
+    excluded_senders = {
+        address
+        for address in (
+            parseaddr(settings.IMAP_USER)[1].lower(),
+            parseaddr(settings.SMTP_USER)[1].lower(),
+            *(parseaddr(value)[1].lower() for value in settings.DEVICE_RECEIPT_TRUSTED_SENDERS),
+        )
+        if address
+    }
     if ticket.thread_id:
         emails = (
             await session.execute(
@@ -357,11 +391,11 @@ async def _customer_source_email(session: AsyncSession, ticket: RepairTicket) ->
             )
         ).scalars().all()
         for email in emails:
-            if _domain(email.from_address) not in internal_domains:
+            if parseaddr(email.from_address)[1].lower() not in excluded_senders:
                 return email
     if ticket.source_email_id:
         source = await session.get(Email, ticket.source_email_id)
-        if source and _domain(source.from_address) not in internal_domains:
+        if source and parseaddr(source.from_address)[1].lower() not in excluded_senders:
             return source
     return None
 
@@ -378,19 +412,8 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
         errors["sn_validation"] = "stale"
 
     source_email = await _customer_source_email(session, ticket)
-    required = {
-        "customer_code": ticket.customer_code,
-        "customer_name": ticket.customer_name,
-        "contact_person": ticket.contact_person,
-        "contact_phone": ticket.contact_phone,
-        "contact_email": ticket.contact_email,
-        "request_date": ticket.request_date,
-        "mailing_address": ticket.mailing_address,
-        "problem_description": ticket.problem_description,
-    }
-    for name, value in required.items():
-        if value is None or (isinstance(value, str) and not value.strip()):
-            errors[name] = "required"
+    for name in required_missing_for_ticket(ticket, items):
+        errors[name] = "required"
     for name, limit in _FIELD_LIMITS.items():
         value = _clean_text(getattr(ticket, name))
         if len(value) > limit:

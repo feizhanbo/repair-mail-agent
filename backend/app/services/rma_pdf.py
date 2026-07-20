@@ -77,7 +77,7 @@ class RmaPdfData(BaseModel):
     customer_name: str = Field(min_length=1, max_length=120)
     mailing_address: str = Field(min_length=1, max_length=220)
     mailing_contact_person: str = Field(min_length=1, max_length=60)
-    mailing_contact_phone: str = Field(min_length=1, max_length=60)
+    mailing_contact_phone: str = Field(default="", max_length=60)
     delivery_fee_paid_by_customer: str = Field(default="", max_length=100)
     repair_fee_paid_by_customer: str = Field(default="", max_length=100)
     total_cost: Decimal = Field(default=Decimal("0"), ge=0)
@@ -321,7 +321,6 @@ def _validate_snapshot(
     expected_top = {
         "ticket_id": ticket.id,
         "ticket_no": ticket.ticket_no,
-        "customer_code": ticket.customer_code,
         "customer_name": ticket.customer_name,
         "contact_person": ticket.contact_person,
         "contact_phone": ticket.contact_phone,
@@ -362,11 +361,9 @@ async def build_rma_pdf_data(
     if ticket.missing_fields or ticket.conflict_fields:
         raise RmaPdfError("RMA_TICKET_HAS_UNRESOLVED_FIELDS")
     required = {
-        "customer_code": ticket.customer_code,
         "customer_name": ticket.customer_name,
         "mailing_address": ticket.mailing_address,
         "contact_person": ticket.contact_person,
-        "contact_phone": ticket.contact_phone,
         "contact_email": ticket.contact_email,
         "request_date": ticket.request_date,
     }

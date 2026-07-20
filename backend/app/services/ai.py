@@ -18,6 +18,7 @@ from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
 from app.integrations.qwen_provider import QwenProvider
 from app.models import AiCallLog, Email, EmailAttachment, OssObject, ParseResult, RepairTicket, SnAsset
+from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
 from app.services.parser import clean_email_body
@@ -30,7 +31,7 @@ field_confidences, evidence, confidence_reasons, manual_review_direction, origin
 置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
 如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
 不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
-不要抽取联系电话或手机号，不要输出 contact_phone 或 phone 字段。
+联系电话或手机号可以抽取为 contact_phone，但它是选填字段，缺失时不得放入 missing_fields。
 """.strip()
 
 AI_REPLY_SYSTEM_PROMPT = """
@@ -661,15 +662,108 @@ def _valid_email(value: str | None) -> bool:
     return bool(parsed and "@" in parsed and "." in parsed.rsplit("@", 1)[-1])
 
 
-_PHONE_CANDIDATE_FIELDS = {"contact_phone", "phone"}
-
-
-def _remove_phone_candidate_fields(value: dict[str, Any]) -> dict[str, Any]:
-    return {str(key): item for key, item in value.items() if str(key) not in _PHONE_CANDIDATE_FIELDS}
-
-
 def _intent_requires_business_fields(intent_type: str | None) -> bool:
     return intent_type in {"new_repair", "customer_supplement"}
+
+
+def _structured_attachment_business_data(
+    attachments: list[EmailAttachment],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[int]]:
+    """Map deterministic attachment parser output to canonical ticket fields."""
+    field_aliases = {
+        "customer_name": "customer_name",
+        "contact_person": "contact_person",
+        "contact_email": "contact_email",
+        "contact_phone": "contact_phone",
+        "phone": "contact_phone",
+        "request_date": "request_date",
+        "mailing_address": "mailing_address",
+        "return_address": "mailing_address",
+        "problem_description": "problem_description",
+        "failure_description": "problem_description",
+    }
+    fields: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    source_ids: list[int] = []
+    for attachment in attachments:
+        payload = attachment.extracted_json
+        if not isinstance(payload, dict) or attachment.parse_status != "parsed":
+            continue
+        source_ids.append(int(attachment.id))
+        attachment_fields = payload.get("extracted_fields")
+        if isinstance(attachment_fields, dict):
+            for source_name, target_name in field_aliases.items():
+                value = attachment_fields.get(source_name)
+                if value is not None and str(value).strip() and target_name not in fields:
+                    fields[target_name] = value
+        attachment_items = payload.get("extracted_items")
+        if not isinstance(attachment_items, list):
+            continue
+        for index, raw_item in enumerate(attachment_items, start=1):
+            if not isinstance(raw_item, dict):
+                continue
+            serial_number = str(raw_item.get("serial_number") or "").strip()
+            sn = str(raw_item.get("sn") or raw_item.get("part_serial_no") or "").strip()
+            if not sn and serial_number and (not serial_number.isdigit() or len(serial_number) >= 6):
+                sn = serial_number
+            item = {
+                "line_no": int(serial_number) if serial_number.isdigit() else index,
+                "sn": sn or None,
+                "material_code": raw_item.get("material_code"),
+                "material_name": raw_item.get("material_name"),
+                "board_model": raw_item.get("board_model"),
+                "failure_description": raw_item.get("failure_description"),
+                "failure_information": raw_item.get("failure_information"),
+                "data_info": raw_item.get("data"),
+                "remarks": raw_item.get("remarks"),
+            }
+            items.append({key: value for key, value in item.items() if value is not None and str(value).strip()})
+    if not fields.get("problem_description"):
+        descriptions = [str(item["failure_description"]).strip() for item in items if item.get("failure_description")]
+        if descriptions:
+            fields["problem_description"] = "\n".join(dict.fromkeys(descriptions))
+    return fields, items, source_ids
+
+
+def _merge_attachment_business_data(
+    parsed: AiExtractResponse,
+    attachments: list[EmailAttachment],
+) -> AiExtractResponse:
+    attachment_fields, attachment_items, source_ids = _structured_attachment_business_data(attachments)
+    if not source_ids:
+        return parsed
+    fields = dict(parsed.extracted_fields or {})
+    conflicts = dict(parsed.conflict_fields or {})
+    confidences = dict(parsed.field_confidences or {})
+    for name, value in attachment_fields.items():
+        existing = fields.get(name)
+        if existing is None or not str(existing).strip():
+            fields[name] = value
+            confidences[name] = max(float(confidences.get(name) or 0), 0.99)
+        elif str(existing).strip().casefold() != str(value).strip().casefold():
+            conflicts.setdefault(name, "AI extraction conflicts with deterministic attachment parsing.")
+
+    items = [dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)]
+    for index, attachment_item in enumerate(attachment_items):
+        if index >= len(items):
+            items.append(dict(attachment_item))
+            continue
+        target = items[index]
+        for name, value in attachment_item.items():
+            existing = target.get(name)
+            if existing is None or not str(existing).strip():
+                target[name] = value
+            elif name == "sn" and str(existing).strip().casefold() != str(value).strip().casefold():
+                conflicts.setdefault("sn", "AI extraction conflicts with deterministic attachment parsing.")
+
+    evidence = dict(parsed.evidence or {})
+    evidence["structured_attachment_source_ids"] = source_ids
+    parsed.extracted_fields = fields
+    parsed.extracted_items = items
+    parsed.conflict_fields = conflicts
+    parsed.field_confidences = confidences
+    parsed.evidence = evidence
+    return parsed
 
 
 async def _enrich_ai_quality(
@@ -677,15 +771,13 @@ async def _enrich_ai_quality(
     *,
     parsed: AiExtractResponse,
     email: Email,
+    attachments: list[EmailAttachment],
 ) -> AiExtractResponse:
+    parsed = _merge_attachment_business_data(parsed, attachments)
     fields = dict(parsed.extracted_fields or {})
     missing = dict(parsed.missing_fields or {})
     conflicts = dict(parsed.conflict_fields or {})
     field_confidences = dict(parsed.field_confidences or {})
-    fields = _remove_phone_candidate_fields(fields)
-    missing = _remove_phone_candidate_fields(missing)
-    conflicts = _remove_phone_candidate_fields(conflicts)
-    field_confidences = _remove_phone_candidate_fields(field_confidences)
     evidence = dict(parsed.evidence or {})
     confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
@@ -699,12 +791,8 @@ async def _enrich_ai_quality(
         manual_directions.append("确认邮件类型和是否需要进入报修流程。")
 
     if _intent_requires_business_fields(parsed.intent_type):
-        if not fields.get("contact_email"):
-            missing.setdefault("contact_email", "缺少可用于回复客户的邮箱地址。")
-        elif not _valid_email(str(fields.get("contact_email"))):
+        if fields.get("contact_email") and not _valid_email(str(fields.get("contact_email"))):
             conflicts.setdefault("contact_email", "联系邮箱格式异常。")
-        if not fields.get("problem_description"):
-            missing.setdefault("problem_description", "缺少明确的故障描述。")
 
         items = parsed.extracted_items or []
         item_sns = [str(item.get("sn") or "").strip().upper() for item in items if isinstance(item, dict) and item.get("sn")]
@@ -720,6 +808,13 @@ async def _enrich_ai_quality(
                     invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
             if invalid_sns:
                 conflicts.setdefault("sn", "；".join(invalid_sns))
+
+    missing = required_missing_for_values(
+        intent_type=parsed.intent_type,
+        fields=fields,
+        items=parsed.extracted_items or [],
+        reported_missing=missing,
+    )
 
     if missing:
         manual_directions.append("补齐缺失字段：" + "、".join(sorted(missing.keys())))
@@ -823,7 +918,7 @@ async def create_ai_parse_candidate(
     )
     if not isinstance(parsed, AiExtractResponse) or ai_log is None:
         return None
-    parsed = await _enrich_ai_quality(session, parsed=parsed, email=email)
+    parsed = await _enrich_ai_quality(session, parsed=parsed, email=email, attachments=attachments)
 
     parse_result = ParseResult(
         email_id=email.id,

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import CurrentUser, get_current_user
 from app.api.v1 import emails as email_api
+from app.api.v1 import system as system_api
 from app.config import settings
 from app.core.database import get_session
 from app.main import app
@@ -22,6 +23,7 @@ from app.services import master_data as master_data_service
 from app.services import replies as reply_service
 from app.services import tickets as ticket_service
 from app.services import users as user_service
+from app.services.mail_test_preflight import MailTestPreflightError
 
 
 class FakeScalarResult:
@@ -617,6 +619,9 @@ def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "RMA_AUTO_SEND_ENABLED", True)
     monkeypatch.setattr(settings, "CONFIDENCE_THRESHOLD", 0.8)
     monkeypatch.setattr(settings, "MAX_FOLLOW_UP", 2)
+    async def passed_preflight() -> dict:
+        return {"status": "passed", "messages_sent": 0}
+    monkeypatch.setattr(system_api, "run_mail_test_preflight", passed_preflight)
 
     with make_client(roles=["admin"]) as client:
         response = client.patch(
@@ -633,6 +638,35 @@ def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     assert payload["data"]["auto_send_min_confidence"] == 0.88
     assert payload["data"]["confidence_threshold"] == 0.91
     assert payload["data"]["max_follow_up"] == 3
+
+
+def test_mail_preflight_failure_preserves_safe_stage_details(monkeypatch) -> None:
+    safe_result = {
+        "status": "failed",
+        "reasons": ["SMTP_PREFLIGHT_FAILED:auth:SMTP_AUTH_FAILED"],
+        "smtp": {
+            "status": "failed",
+            "host": "***.accotest.com",
+            "account": "rm***@accotest.com",
+            "stage": "auth",
+            "error_code": "SMTP_AUTH_FAILED",
+            "messages_sent": 0,
+        },
+        "messages_sent": 0,
+    }
+
+    async def failed_preflight() -> dict:
+        raise MailTestPreflightError(safe_result)
+
+    monkeypatch.setattr(system_api, "run_mail_test_preflight", failed_preflight)
+
+    with make_client(roles=["admin"]) as client:
+        response = client.post("/api/v1/system/mail-test/preflight")
+
+    payload = response.json()
+    assert response.status_code == 409
+    assert payload["message"] == "MAIL_TEST_PREFLIGHT_FAILED"
+    assert payload["data"]["preflight"] == safe_result
 
 
 def test_operator_can_query_statistics_summary() -> None:

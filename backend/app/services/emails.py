@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from email.utils import parseaddr
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import parse_attachment
 from app.services.audit import log_operation, log_system_event
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, to_plain, utcnow
+from app.services.device_receipts import confirm_device_received
 from app.services.parser import (
     RuleAnalysisResult,
     analyze_email_rules,
@@ -28,6 +30,7 @@ from app.services.parser import (
 from app.services.replies import create_reply_draft
 from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.tickets import EMAIL_FIELDS, apply_parse_result, ensure_manual_review_ticket_from_parse_result, serialize_email, serialize_parse_result
+from app.services.workflow import create_manual_task_if_missing
 
 
 def attachment_file_size_kb(file_size: int | None) -> int | None:
@@ -183,42 +186,53 @@ async def _find_thread_for_email(
     normalized_subject: str | None,
     from_domain: str | None,
 ) -> EmailThread:
+    closed_parent_message_id: str | None = None
+
+    async def active_thread_for(parent: Email) -> EmailThread | None:
+        nonlocal closed_parent_message_id
+        if not parent.thread_id:
+            return None
+        candidate = await session.get(EmailThread, parent.thread_id)
+        if candidate is None:
+            return None
+        if candidate.ticket_id:
+            ticket = await session.get(RepairTicket, candidate.ticket_id)
+            if ticket and ticket.current_status_code == "closed":
+                closed_parent_message_id = parent.message_id
+                return None
+        return candidate
+
     if references_header:
         for reference_id in reversed(re.findall(r"<[^<>]+>", references_header)):
             parent = await session.scalar(select(Email).where(Email.message_id == reference_id))
-            if parent and parent.thread_id:
-                thread = await session.get(EmailThread, parent.thread_id)
+            if parent:
+                thread = await active_thread_for(parent)
                 if thread:
-                    thread.merge_confidence = 0.9500
-                    thread.merge_reason = "References matched an existing email."
+                    thread.merge_confidence = 1.0000
+                    thread.merge_reason = "References exactly matched an email in an active thread."
                     return thread
-    if in_reply_to:
+                if closed_parent_message_id:
+                    break
+    if in_reply_to and not closed_parent_message_id:
         parent = await session.scalar(select(Email).where(Email.message_id == in_reply_to))
-        if parent and parent.thread_id:
-            thread = await session.get(EmailThread, parent.thread_id)
+        if parent:
+            thread = await active_thread_for(parent)
             if thread:
-                thread.merge_confidence = 0.9500
-                thread.merge_reason = "In-Reply-To 精确命中已入库邮件。"
+                thread.merge_confidence = 1.0000
+                thread.merge_reason = "In-Reply-To exactly matched an email in an active thread."
                 return thread
-    if normalized_subject and from_domain:
-        thread = await session.scalar(
-            select(EmailThread)
-            .join(Email, Email.id == EmailThread.latest_email_id)
-            .where(EmailThread.normalized_subject == normalized_subject)
-            .where(Email.from_domain == from_domain)
-            .order_by(EmailThread.updated_at.desc(), EmailThread.id.desc())
-        )
-        if thread:
-            thread.merge_confidence = 0.6500
-            thread.merge_reason = "归一化主题命中，等待后续规则或人工确认。"
-            return thread
+    create_reason = (
+        f"Created a new thread because source Message-ID {closed_parent_message_id} belongs to a closed ticket."
+        if closed_parent_message_id
+        else "Created a new thread because no exact active Message-ID relationship matched."
+    )
     thread = EmailThread(
         thread_key=sha256_text(f"{message_id}:{normalized_subject or ''}")[:128],
         normalized_subject=normalized_subject,
         root_message_id=message_id,
         email_count=0,
         merge_confidence=1.0000,
-        merge_reason="新建邮件线程。",
+        merge_reason=create_reason,
     )
     session.add(thread)
     await session.flush()
@@ -347,6 +361,10 @@ async def ingest_email(
             "intent_type": analysis.intent_type,
             "classification_confidence": analysis.classification_confidence,
             "rule_parse_result_id": rule_parse.id,
+            "thread_id": thread.id,
+            "thread_reason": thread.merge_reason,
+            "in_reply_to": payload.in_reply_to,
+            "references_header": payload.references_header,
         },
     )
     await log_system_event(
@@ -396,7 +414,6 @@ def _parse_requires_manual(
     return (
         parse_result.intent_type in {None, "", "unknown"}
         or confidence < settings.AUTO_APPLY_MIN_CONFIDENCE
-        or bool(parse_result.missing_fields)
         or bool(parse_result.conflict_fields)
         or any(
             attachment.parse_status in {"needs_manual_review", "unsupported", "failed"}
@@ -424,12 +441,47 @@ def _manual_reason(parse_result: ParseResult | None) -> str:
     return "；".join(reasons) or "需要人工复核 AI 解析结果。"
 
 
-def _reply_type_for_parse(parse_result: ParseResult | None) -> str:
-    if parse_result and parse_result.conflict_fields and "sn" in parse_result.conflict_fields:
-        return "sn_invalid"
-    if parse_result and parse_result.missing_fields:
-        return "missing_fields"
-    return "receipt"
+ORPHAN_REVIEW_RULES: dict[str, tuple[str, str]] = {
+    "customer_supplement": (
+        "customer_supplement_orphaned",
+        "补充邮件缺少可精确关联的 In-Reply-To/References，仅创建独立人工核对工单，不关联既有工单。",
+    ),
+    "normal_reply": (
+        "normal_reply_orphaned",
+        "普通回复缺少可精确关联的 In-Reply-To/References，仅创建独立人工核对工单，不创建空白已解析工单。",
+    ),
+    "rma_sent": (
+        "rma_sent_orphaned",
+        "RMA 状态邮件缺少可精确关联的 In-Reply-To/References，仅创建独立人工核对工单。",
+    ),
+    "device_received": (
+        "device_received_orphaned",
+        "收货通知缺少可精确关联的 In-Reply-To/References，仅创建独立人工核对工单，不修改任何已有工单。",
+    ),
+}
+
+
+async def _create_orphan_review_ticket(
+    session: AsyncSession,
+    *,
+    email: Email,
+    parse_result: ParseResult,
+) -> tuple[RepairTicket, str] | None:
+    rule = ORPHAN_REVIEW_RULES.get(parse_result.intent_type or "")
+    if rule is None:
+        return None
+    task_type, reason = rule
+    ticket = await ensure_manual_review_ticket_from_parse_result(
+        session,
+        email=email,
+        parse_result=parse_result,
+        reason=reason,
+        task_type=task_type,
+    )
+    parse_result.apply_status = "needs_manual_review"
+    parse_result.accepted = False
+    email.parse_status = "needs_manual"
+    return ticket, reason
 
 
 async def _try_create_reply_draft(
@@ -442,14 +494,22 @@ async def _try_create_reply_draft(
 ) -> dict[str, Any] | None:
     if ticket_id is None:
         return None
+    ticket = await session.get(RepairTicket, ticket_id)
+    effective_missing_fields = ticket.missing_fields if ticket is not None else (parse_result.missing_fields if parse_result else None)
+    if parse_result and parse_result.conflict_fields and "sn" in parse_result.conflict_fields:
+        reply_type = "sn_invalid"
+    elif effective_missing_fields:
+        reply_type = "missing_fields"
+    else:
+        reply_type = "receipt"
     try:
         return await create_reply_draft(
             session,
             ticket_id=ticket_id,
             user_id=user_id,
-            reply_type=_reply_type_for_parse(parse_result),
+            reply_type=reply_type,
             related_email_id=email_id,
-            missing_fields=parse_result.missing_fields if parse_result else None,
+            missing_fields=effective_missing_fields,
         )
     except HTTPException as exc:
         error_code = str(exc.detail) if isinstance(exc.detail, str) else "REPLY_DRAFT_FAILED"
@@ -602,22 +662,11 @@ async def reparse_email(
         elif ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse, list(attachments)):
             ai_parse.apply_status = "auto_skipped"
             email.parse_status = "skipped"
-        elif ai_parse.intent_type == "device_received" and thread_ticket is None:
-            # A receipt reply without its original repair thread is evidence only.
-            # It must not manufacture customer provenance or a new RMA ticket.
-            ai_parse.apply_status = "deferred_event"
-            ai_parse.accepted = False
-            email.parse_status = "parsed"
-            await log_operation(
-                session,
-                user_id=user_id,
-                operation_type="device_received_orphaned",
-                target_type="email",
-                target_id=email.id,
-                email_id=email.id,
-                description="收货事件未命中原始报修工单，仅保留延迟事件证据。",
-                after_data={"references_header": email.references_header, "message_id": email.message_id},
-            )
+        elif thread_ticket is None and ai_parse.intent_type in ORPHAN_REVIEW_RULES:
+            orphan_review = await _create_orphan_review_ticket(session, email=email, parse_result=ai_parse)
+            if orphan_review is not None:
+                ticket, orphan_reason = orphan_review
+                manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": orphan_reason}
         elif _parse_requires_manual(ai_parse, list(attachments)):
             ticket = await ensure_manual_review_ticket_from_parse_result(
                 session,
@@ -650,33 +699,41 @@ async def reparse_email(
                 else ai_parse.ticket_id
             )
             if ticket_id is not None:
-                validated = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=None)
-                ai_applied = {**ai_applied, "export_validation": validated}
-                if validated.get("status") != "ready_for_export":
-                    validation_reason = (
-                        "SN 核心校验或完整安全校验未通过，AI 结果已保留但不得进入可导出状态。"
-                    )
-                    ticket = await ensure_manual_review_ticket_from_parse_result(
-                        session,
-                        email=email,
-                        parse_result=ai_parse,
-                        reason=validation_reason,
-                        task_type="sn_validation_required",
-                    )
-                    email.parse_status = "needs_manual"
-                    manual_ticket = {
-                        "ticket_id": ticket.id,
-                        "ticket_no": ticket.ticket_no,
-                        "reason": validation_reason,
-                    }
-                    draft_result = await _try_create_reply_draft(
-                        session,
-                        ticket_id=ticket.id,
-                        user_id=user_id,
-                        email_id=email.id,
-                        parse_result=ai_parse,
-                    )
-                else:
+                applied_ticket = await session.get(RepairTicket, ticket_id)
+                if ai_parse.intent_type == "device_received" and applied_ticket is not None:
+                    sender = parseaddr(email.from_address)[1].lower()
+                    trusted_senders = {parseaddr(value)[1].lower() for value in settings.DEVICE_RECEIPT_TRUSTED_SENDERS if parseaddr(value)[1]}
+                    exact_thread_link = bool(email.in_reply_to or email.references_header)
+                    if (
+                        sender in trusted_senders
+                        and exact_thread_link
+                        and float(ai_parse.confidence_score or 0) >= settings.AUTO_APPLY_MIN_CONFIDENCE
+                    ):
+                        receipt_result = await confirm_device_received(
+                            session,
+                            ticket_id=applied_ticket.id,
+                            user_id=user_id,
+                            source="trusted_internal_email",
+                            source_email_id=email.id,
+                            note="受信任内部邮箱通知公司已收到待修设备。",
+                            idempotency_key=f"internal:{sha256_text(email.message_id)[:64]}",
+                        )
+                        ai_applied = {**ai_applied, "device_receipt": receipt_result}
+                    else:
+                        email.parse_status = "needs_manual"
+                        await create_manual_task_if_missing(
+                            session,
+                            ticket=applied_ticket,
+                            task_type="device_received_untrusted",
+                            trigger_reason="收货通知并非来自精确受信任内部邮箱、缺少邮件头关联或置信度不足。",
+                            priority="high",
+                            email_id=email.id,
+                        )
+                elif (
+                    applied_ticket
+                    and applied_ticket.current_status_code == "need_customer_info"
+                    and bool(ai_parse.missing_fields)
+                ):
                     draft_result = await _try_create_reply_draft(
                         session,
                         ticket_id=ticket_id,
@@ -684,20 +741,42 @@ async def reparse_email(
                         email_id=email.id,
                         parse_result=ai_parse,
                     )
-    elif rule_parse.intent_type == "device_received" and thread_ticket is None:
-        rule_parse.apply_status = "deferred_event"
-        rule_parse.accepted = False
-        email.parse_status = "parsed"
-        await log_operation(
-            session,
-            user_id=user_id,
-            operation_type="device_received_orphaned",
-            target_type="email",
-            target_id=email.id,
-            email_id=email.id,
-            description="收货事件未命中原始报修工单，仅保留延迟事件证据。",
-            after_data={"references_header": email.references_header, "message_id": email.message_id},
-        )
+                elif ai_parse.intent_type in {"new_repair", "customer_supplement"}:
+                    validated = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=None)
+                    ai_applied = {**ai_applied, "export_validation": validated}
+                    if validated.get("status") != "ready_for_export":
+                        validation_reason = "SN 核心校验或完整安全校验未通过，AI 结果已保留但不得进入可导出状态。"
+                        ticket = await ensure_manual_review_ticket_from_parse_result(
+                            session,
+                            email=email,
+                            parse_result=ai_parse,
+                            reason=validation_reason,
+                            task_type="sn_validation_required",
+                        )
+                        email.parse_status = "needs_manual"
+                        manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": validation_reason}
+                        draft_result = await _try_create_reply_draft(
+                            session,
+                            ticket_id=ticket.id,
+                            user_id=user_id,
+                            email_id=email.id,
+                            parse_result=ai_parse,
+                        )
+                    else:
+                        ready_ticket = await session.get(RepairTicket, ticket_id)
+                        if not ready_ticket or not ready_ticket.rma_required:
+                            draft_result = await _try_create_reply_draft(
+                                session,
+                                ticket_id=ticket_id,
+                                user_id=user_id,
+                                email_id=email.id,
+                                parse_result=ai_parse,
+                            )
+    elif thread_ticket is None and rule_parse.intent_type in ORPHAN_REVIEW_RULES:
+        orphan_review = await _create_orphan_review_ticket(session, email=email, parse_result=rule_parse)
+        if orphan_review is not None:
+            ticket, orphan_reason = orphan_review
+            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": orphan_reason}
     else:
         ticket = await ensure_manual_review_ticket_from_parse_result(
             session,
@@ -755,35 +834,8 @@ async def merge_threads(
     user_id: int,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    if source_thread_id == target_thread_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EMAIL_THREAD_SAME_TARGET")
-    source = await session.get(EmailThread, source_thread_id)
-    target = await session.get(EmailThread, target_thread_id)
-    if source is None or target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_THREAD_NOT_FOUND")
-    emails = (await session.execute(select(Email).where(Email.thread_id == source.id))).scalars().all()
-    for email in emails:
-        email.thread_id = target.id
-    target.email_count = (target.email_count or 0) + len(emails)
-    if emails:
-        target.latest_email_id = max(emails, key=lambda email: email.received_at or email.created_at).id
-    target.merge_confidence = 1.0000
-    target.merge_reason = reason or "人工合并线程。"
-    source.email_count = 0
-    source.manual_locked = True
-    await log_operation(
-        session,
-        user_id=user_id,
-        operation_type="email_thread_merged",
-        target_type="email_thread",
-        target_id=target.id,
-        description=reason,
-        after_data={"source_thread_id": source.id, "moved_email_count": len(emails)},
-    )
-    return {
-        "source_thread": model_to_dict(source, ("id", "thread_key", "email_count", "manual_locked")),
-        "target_thread": model_to_dict(target, ("id", "thread_key", "email_count", "latest_email_id", "merge_reason")),
-    }
+    del session, source_thread_id, target_thread_id, user_id, reason
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="EMAIL_THREAD_MERGE_FORBIDDEN")
 
 
 async def split_thread(

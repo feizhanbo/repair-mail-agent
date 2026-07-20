@@ -56,7 +56,6 @@ def _as_string_list(value: Any) -> list[str]:
     return []
 
 
-_PHONE_CANDIDATE_FIELDS = {"contact_phone", "phone"}
 _INTENT_ALIASES = {"customer_reply": "customer_supplement", "internal_forward": "normal_reply"}
 _ALLOWED_INTENTS = {
     "new_repair", "customer_supplement", "normal_reply", "rma_sent",
@@ -64,8 +63,8 @@ _ALLOWED_INTENTS = {
 }
 
 
-def _without_phone_candidate_fields(value: dict[str, Any]) -> dict[str, Any]:
-    return {str(key): item for key, item in value.items() if str(key) not in _PHONE_CANDIDATE_FIELDS}
+def _without_optional_phone_requirement(value: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): item for key, item in value.items() if str(key) not in {"contact_phone", "phone"}}
 
 
 def _confidence(value: Any) -> float:
@@ -88,14 +87,14 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
         normalized["intent_type"] = mapped_intent if mapped_intent in _ALLOWED_INTENTS else "unknown"
         for field in ("extracted_fields", "missing_fields", "conflict_fields", "evidence"):
             normalized[field] = _as_mapping(normalized.get(field))
-        for field in ("extracted_fields", "missing_fields", "conflict_fields"):
-            normalized[field] = _without_phone_candidate_fields(normalized[field])
+        normalized["missing_fields"] = _without_optional_phone_requirement(normalized["missing_fields"])
+        normalized["conflict_fields"] = _without_optional_phone_requirement(normalized["conflict_fields"])
         items = normalized.get("extracted_items")
         if isinstance(items, dict):
             items = items.get("items") if isinstance(items.get("items"), list) else [items]
         normalized["extracted_items"] = items if isinstance(items, list) else []
         normalized["confidence_score"] = _confidence(normalized.get("confidence_score"))
-        normalized["field_confidences"] = _without_phone_candidate_fields({
+        normalized["field_confidences"] = _without_optional_phone_requirement({
             str(key): _confidence(value)
             for key, value in _as_mapping(normalized.get("field_confidences")).items()
         })

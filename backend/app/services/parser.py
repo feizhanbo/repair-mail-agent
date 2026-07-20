@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import Email
+from app.services.business_rules import required_missing_for_values
 
 
 @dataclass(frozen=True)
@@ -197,8 +198,12 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     body = clean_email_body(email)
     intent_type, classification_confidence, classification_reason = classify_email(email, body)
     extracted = extract_fields(email)
-    if intent_type not in {"new_repair", "customer_supplement"}:
-        extracted["missing_fields"] = {}
+    extracted["missing_fields"] = required_missing_for_values(
+        intent_type=intent_type,
+        fields=extracted["fields"],
+        items=extracted["items"],
+        reported_missing=extracted["missing_fields"],
+    )
     return RuleAnalysisResult(
         intent_type=intent_type,
         classification_confidence=classification_confidence,

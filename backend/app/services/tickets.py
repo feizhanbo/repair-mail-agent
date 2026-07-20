@@ -24,6 +24,7 @@ from app.models import (
     TicketStatusLog,
 )
 from app.services.audit import log_operation
+from app.services.business_rules import required_missing_for_ticket
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
@@ -60,6 +61,12 @@ TICKET_FIELDS = (
     "safety_check_snapshot",
     "safety_check_hash",
     "safety_checked_at",
+    "device_received_at",
+    "device_received_source",
+    "device_received_email_id",
+    "device_received_note",
+    "device_received_idempotency_key",
+    "device_receipt_ack_status",
     "manual_locked",
     "version",
     "created_at",
@@ -779,6 +786,8 @@ async def create_ticket_from_parse_result(
     from app.services.routing import choose_system_owner
 
     fields = parse_result.extracted_fields or {}
+    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+        fields = {}
     if selected_fields is not None:
         fields = {key: value for key, value in fields.items() if key in selected_fields}
     owner_id, language_code, routing_reason = await choose_system_owner(session, email)
@@ -792,6 +801,8 @@ async def create_ticket_from_parse_result(
         contact_person=fields.get("contact_person"),
         contact_phone=fields.get("contact_phone"),
         contact_email=fields.get("contact_email") or email.from_address,
+        request_date=_coerce_ticket_value("request_date", fields.get("request_date")) if fields.get("request_date") else None,
+        mailing_address=fields.get("mailing_address"),
         problem_description=fields.get("problem_description"),
         missing_fields=parse_result.missing_fields if selected_fields is None else {},
         conflict_fields=parse_result.conflict_fields if selected_fields is None else {},
@@ -889,6 +900,8 @@ async def ensure_manual_review_ticket_from_parse_result(
 ) -> RepairTicket:
     ticket = await _existing_ticket_for_email(session, email, parse_result)
     fields = parse_result.extracted_fields or {}
+    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+        fields = {}
     if ticket is None:
         from app.services.routing import choose_system_owner
 
@@ -903,6 +916,8 @@ async def ensure_manual_review_ticket_from_parse_result(
             contact_person=fields.get("contact_person"),
             contact_phone=fields.get("contact_phone"),
             contact_email=fields.get("contact_email") or email.from_address,
+            request_date=_coerce_ticket_value("request_date", fields.get("request_date")) if fields.get("request_date") else None,
+            mailing_address=fields.get("mailing_address"),
             problem_description=fields.get("problem_description"),
             missing_fields=parse_result.missing_fields,
             conflict_fields=parse_result.conflict_fields,
@@ -979,29 +994,74 @@ async def _create_items_from_parse_result(
         item_payloads = extracted
     else:
         item_payloads = []
-    existing_sns = set(
+    existing_items = list(
         (
             await session.execute(
-                select(RepairTicketItem.sn).where(RepairTicketItem.ticket_id == ticket.id, RepairTicketItem.sn.is_not(None))
+                select(RepairTicketItem)
+                .where(RepairTicketItem.ticket_id == ticket.id)
+                .order_by(RepairTicketItem.line_no, RepairTicketItem.id)
             )
         ).scalars().all()
     )
-    max_line_no = int(
-        (
-            await session.execute(select(RepairTicketItem.line_no).where(RepairTicketItem.ticket_id == ticket.id).order_by(RepairTicketItem.line_no.desc()))
-        ).scalars().first()
-        or 0
-    )
+    existing_sns = {str(item.sn).strip().upper() for item in existing_items if item.sn and str(item.sn).strip()}
+    existing_by_line = {int(item.line_no): item for item in existing_items}
+    max_line_no = max((int(item.line_no) for item in existing_items), default=0)
+    reconciled_item_ids: set[int] = set()
+
+    def is_parser_placeholder(item: RepairTicketItem) -> bool:
+        return (
+            not item.manual_locked
+            and not (item.sn and str(item.sn).strip())
+            and not (item.material_code and str(item.material_code).strip())
+            and not (item.material_name and str(item.material_name).strip())
+        )
+
     for item_index, payload in enumerate(item_payloads):
         if selected_item_indices is not None and item_index not in selected_item_indices:
             continue
         sn = (payload.get("sn") or "").strip().upper() if isinstance(payload, dict) else ""
         if sn and sn in existing_sns:
             continue
+        requested_line_no = int(payload.get("line_no") or 0) if isinstance(payload, dict) else 0
+        placeholder = existing_by_line.get(requested_line_no) if requested_line_no > 0 else None
+        if placeholder is None or not is_parser_placeholder(placeholder):
+            placeholder = next(
+                (item for item in existing_items if item.id not in reconciled_item_ids and is_parser_placeholder(item)),
+                None,
+            )
+        if placeholder is not None:
+            old_value = _audit_value(serialize_item(placeholder))
+            placeholder.sn = sn or None
+            placeholder.material_code = payload.get("material_code") or placeholder.material_code
+            placeholder.material_name = payload.get("material_name") or placeholder.material_name
+            placeholder.quantity = payload.get("quantity") or placeholder.quantity or 1
+            placeholder.failure_description = payload.get("failure_description") or placeholder.failure_description or ticket.problem_description
+            placeholder.failure_information = payload.get("failure_information") or placeholder.failure_information
+            placeholder.data_info = payload.get("data_info") or placeholder.data_info
+            placeholder.remarks = payload.get("remarks") or placeholder.remarks
+            placeholder.accessories = payload.get("accessories") or placeholder.accessories
+            reconciled_item_ids.add(int(placeholder.id))
+            if sn:
+                existing_sns.add(sn)
+            session.add(
+                FieldAuditLog(
+                    ticket_id=ticket.id,
+                    ticket_item_id=placeholder.id,
+                    field_name="item",
+                    old_value=old_value,
+                    new_value=_audit_value(payload),
+                    source_type="parse_result",
+                    reason="Reconciled parser placeholder with structured attachment item.",
+                    operator_user_id=user_id,
+                    parse_result_id=parse_result.id,
+                )
+            )
+            continue
         max_line_no += 1
+        line_no = requested_line_no if requested_line_no > 0 and requested_line_no not in existing_by_line else max_line_no
         item = RepairTicketItem(
             ticket_id=ticket.id,
-            line_no=payload.get("line_no") or max_line_no,
+            line_no=line_no,
             material_code=payload.get("material_code"),
             material_name=payload.get("material_name"),
             sn=sn or None,
@@ -1010,6 +1070,9 @@ async def _create_items_from_parse_result(
         )
         session.add(item)
         await session.flush()
+        existing_by_line[int(item.line_no)] = item
+        if sn:
+            existing_sns.add(sn)
         session.add(
             FieldAuditLog(
                 ticket_id=ticket.id,
@@ -1023,6 +1086,11 @@ async def _create_items_from_parse_result(
                 parse_result_id=parse_result.id,
             )
         )
+
+    if item_payloads and reconciled_item_ids:
+        for item in existing_items:
+            if item.id not in reconciled_item_ids and is_parser_placeholder(item):
+                await session.delete(item)
 
 
 async def apply_parse_result(
@@ -1091,6 +1159,8 @@ async def apply_parse_result(
         )
 
     fields = parse_result.extracted_fields or {}
+    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+        fields = {}
     if field_selection is not None:
         fields = {key: value for key, value in fields.items() if key in field_selection}
     changed: dict[str, Any] = {}
@@ -1133,6 +1203,16 @@ async def apply_parse_result(
         user_id,
         selected_item_indices=item_selection,
     )
+    if parse_result.intent_type in {"new_repair", "customer_supplement"}:
+        await session.flush()
+        current_items = (
+            await session.execute(
+                select(RepairTicketItem)
+                .where(RepairTicketItem.ticket_id == ticket.id)
+                .order_by(RepairTicketItem.line_no, RepairTicketItem.id)
+            )
+        ).scalars().all()
+        ticket.missing_fields = required_missing_for_ticket(ticket, current_items)
 
     result_status = apply_status or ("partially_applied" if action == "partial_apply" or ticket.manual_locked else ("manually_applied" if user_id else "auto_applied"))
     parse_result.apply_status = result_status
@@ -1166,31 +1246,19 @@ async def apply_parse_result(
             metadata={"parse_result_id": parse_result.id, "email_id": email.id},
         )
     if (
-        parse_result.intent_type == "device_received"
-        and ticket.current_status_code == "ready_for_export"
-        and ticket.rma_status == "sent"
+        ticket.current_status_code == "need_customer_info"
+        and parse_result.intent_type in {"new_repair", "customer_supplement"}
+        and not ticket.missing_fields
     ):
         await transition_ticket(
             session,
             ticket=ticket,
-            to_status_code="closed",
-            trigger_event="customer_receipt_confirmed",
+            to_status_code="parsed",
+            trigger_event="customer_info_completed",
             user_id=user_id,
             operator_type="user" if user_id else "system",
-            reason="客户确认收到维修后设备，自动关单。",
+            reason="All required customer fields are now complete; resume validation.",
             metadata={"parse_result_id": parse_result.id, "email_id": email.id},
-        )
-    elif parse_result.intent_type == "device_received":
-        await log_operation(
-            session,
-            user_id=user_id,
-            operation_type="device_received_deferred",
-            target_type="repair_ticket",
-            target_id=ticket.id,
-            email_id=email.id,
-            ticket_id=ticket.id,
-            description="设备收货事件已记录；RMA 尚未成功发送或工单尚未可导出，暂不自动关单。",
-            after_data={"rma_status": ticket.rma_status, "ticket_status": ticket.current_status_code},
         )
     if ticket.current_status_code == "new_email":
         if parse_result.confidence_score is not None and float(parse_result.confidence_score) < settings.CONFIDENCE_THRESHOLD:

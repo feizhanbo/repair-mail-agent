@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
@@ -21,15 +21,8 @@ async def merge_thread(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    result = await email_service.merge_threads(
-        session,
-        source_thread_id=thread_id,
-        target_thread_id=payload.target_thread_id,
-        user_id=current_user.id,
-        reason=payload.reason,
-    )
-    await session.commit()
-    return ok(result, "email thread merged")
+    del thread_id, payload, session, current_user
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="EMAIL_THREAD_MERGE_FORBIDDEN")
 
 
 @router.post("/{thread_id}/split")

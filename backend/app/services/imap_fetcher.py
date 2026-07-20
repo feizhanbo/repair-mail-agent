@@ -254,30 +254,35 @@ async def fetch_imap_emails(
     auto_parse: bool = True,
     archive_to_oss: bool = True,
     user_id: int | None = None,
+    tracking_job: JobRunLog | None = None,
 ) -> dict[str, Any]:
     if not archive_to_oss:
         raise ImapConfigurationError("OSS_ARCHIVE_REQUIRED")
     if not _oss_configured():
         raise ImapConfigurationError("OSS_NOT_CONFIGURED")
     started = time.monotonic()
-    job = JobRunLog(
-        job_name="imap_fetch_now",
-        job_type="imap_fetch",
-        status="running",
-        started_at=utcnow(),
-        processed_count=0,
-        success_count=0,
-        failed_count=0,
-        metadata_json={
-            "folder_name": folder_name,
-            "limit": limit,
-            "unseen_only": unseen_only,
-            "message_id": message_id,
-            "archive_to_oss": archive_to_oss,
-        },
-    )
-    session.add(job)
-    await session.flush()
+    job = tracking_job
+    if job is None:
+        job = JobRunLog(
+            job_name="imap_fetch_now",
+            job_type="imap_fetch",
+            status="running",
+            started_at=utcnow(),
+            processed_count=0,
+            success_count=0,
+            failed_count=0,
+            metadata_json={},
+        )
+        session.add(job)
+        await session.flush()
+    job.metadata_json = {
+        **dict(job.metadata_json or {}),
+        "folder_name": folder_name,
+        "limit": limit,
+        "unseen_only": unseen_only,
+        "message_id": message_id,
+        "archive_to_oss": archive_to_oss,
+    }
 
     fetched: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -311,6 +316,8 @@ async def fetch_imap_emails(
         job.processed_count = len(selected_uids)
 
         for uid in selected_uids:
+            job_id = int(job.id)
+            previous_failed_count = int(job.failed_count or 0)
             try:
                 raw = await _mail_io(_uid_fetch_raw, client, uid)
                 payload = payload_from_eml_bytes(raw, mailbox_account=settings.IMAP_USER, folder_name=folder_name)
@@ -412,6 +419,9 @@ async def fetch_imap_emails(
                 await _commit(session)
             except Exception as exc:
                 await _rollback(session)
+                job = await session.get(JobRunLog, job_id, with_for_update=True)
+                if job is None:
+                    raise RuntimeError("IMAP_JOB_NOT_FOUND_AFTER_ROLLBACK") from exc
                 existing_failure = await _find_fetch_record(
                     session,
                     mailbox_account=settings.IMAP_USER,
@@ -439,7 +449,7 @@ async def fetch_imap_emails(
                 existing_failure.next_retry_at = next_retry_at if attempt_count < settings.IMAP_MAX_RETRIES else None
                 existing_failure.error_message = error_code
                 failures.append({"uid": uid, "error": error_code})
-                job.failed_count += 1
+                job.failed_count = previous_failed_count + 1
                 await _commit(session)
         job.status = "success" if not failures else "partial_success"
     except Exception as exc:

@@ -15,6 +15,8 @@ from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdate
 from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
 from app.services.external_relay import relay_configuration_status
+from app.services.mail_test_preflight import MailTestPreflightError, run_mail_test_preflight
+from app.services.mail_safety import test_mail_configuration_reasons
 from app.services.rma_test_preflight import build_rma_test_preflight
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 from app.services.storage import find_orphan_oss_objects
@@ -24,15 +26,19 @@ router = APIRouter()
 
 def _config_payload() -> dict:
     runtime = read_runtime_config()
+    mail_test_reasons = test_mail_configuration_reasons()
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
+        "auto_followup_enabled": runtime["auto_followup_enabled"],
         "rma_auto_send_enabled": runtime["rma_auto_send_enabled"],
         "reply_send_mode": "auto_send" if runtime["auto_send_enabled"] else "human_review",
         "auto_apply_min_confidence": runtime["auto_apply_min_confidence"],
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
         "max_follow_up": runtime["max_follow_up"],
         "confidence_threshold": runtime["confidence_threshold"],
-        "environment_note": "普通回复默认人工审核；新报修 RMA 由独立开关控制自动生成发送。",
+        "environment_note": "仅允许测试邮箱发送；普通回复是主控，自动追问独立，RMA 开关只控制授权单附件。",
+        "mail_test_static_ready": not mail_test_reasons,
+        "mail_test_static_reasons": mail_test_reasons,
         "integrations": {
             "imap_configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
             "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD),
@@ -164,8 +170,36 @@ async def update_config(
 ) -> dict:
     del current_user
     values = payload.model_dump(exclude_unset=True)
+    current = read_runtime_config()
+    enabling_send = any(
+        values.get(key) is True and not bool(current.get(key))
+        for key in ("auto_send_enabled", "auto_followup_enabled", "rma_auto_send_enabled")
+    ) or (values.get("reply_send_mode") == "auto_send" and not current["auto_send_enabled"])
+    if enabling_send:
+        try:
+            await run_mail_test_preflight()
+        except MailTestPreflightError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "MAIL_TEST_PREFLIGHT_REQUIRED", "data": {"preflight": exc.result}},
+            ) from exc
     write_runtime_config(values)
     return ok(_config_payload(), "system config updated")
+
+
+@router.post("/mail-test/preflight")
+async def mail_test_preflight(
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    del current_user
+    try:
+        result = await run_mail_test_preflight()
+    except MailTestPreflightError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MAIL_TEST_PREFLIGHT_FAILED", "data": {"preflight": exc.result}},
+        ) from exc
+    return ok(result, "mail test preflight passed without sending messages")
 
 
 @router.post("/rma-test/preflight")

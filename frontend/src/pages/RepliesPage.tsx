@@ -90,6 +90,19 @@ export default function RepliesPage() {
     },
     onError: handleMutationError,
   });
+  const reconcileMutation = useMutation({
+    mutationFn: ({ id, outcome }: { id: number; outcome: 'sent' | 'failed' }) => api.reconcileReplySend(id, {
+      outcome,
+      reason: outcome === 'sent' ? '操作员核对测试邮箱后确认邮件实际已发送。' : '操作员核对测试邮箱后确认邮件未发送。',
+    }),
+    onSuccess: () => {
+      message.success('不确定发送结果已核对');
+      setSelected(null);
+      void queryClient.invalidateQueries({ queryKey: ['replies'] });
+      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
+    },
+    onError: handleMutationError,
+  });
 
   const columns: ColumnsType<ReplyRecord> = [
     { title: '工单', dataIndex: 'ticket_id', width: 90 },
@@ -141,8 +154,17 @@ export default function RepliesPage() {
         extra={
           selected && canReviewReplies ? (
             <Space>
-              <Button danger onClick={() => confirmAction('确认驳回该回复？', () => rejectMutation.mutate({ id: selected.id, reason: '人工驳回' }))}>驳回</Button>
-              <Button type="primary" onClick={() => confirmAction('确认审核通过该回复？', () => approveMutation.mutate(selected.id))}>通过</Button>
+              {selected.send_status === 'send_uncertain' ? (
+                <>
+                  <Button danger onClick={() => confirmAction('确认该邮件实际未发送？', () => reconcileMutation.mutate({ id: selected.id, outcome: 'failed' }))}>确认未发送</Button>
+                  <Button type="primary" onClick={() => confirmAction('确认该邮件实际已发送？', () => reconcileMutation.mutate({ id: selected.id, outcome: 'sent' }))}>确认已发送</Button>
+                </>
+              ) : (
+                <>
+                  <Button danger onClick={() => confirmAction('确认驳回该回复？', () => rejectMutation.mutate({ id: selected.id, reason: '人工驳回' }))}>驳回</Button>
+                  <Button type="primary" onClick={() => confirmAction('确认审核通过该回复？', () => approveMutation.mutate(selected.id))}>通过</Button>
+                </>
+              )}
             </Space>
           ) : null
         }

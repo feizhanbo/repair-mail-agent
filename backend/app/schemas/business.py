@@ -59,6 +59,11 @@ class TicketTransitionRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class DeviceReceivedConfirmRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=100)
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class TicketExportConfirmRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
@@ -137,6 +142,12 @@ class ReplyRejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class ReplySendReconcileRequest(BaseModel):
+    outcome: Literal["sent", "failed"]
+    reason: str = Field(min_length=1, max_length=500)
+    smtp_message_id: str | None = Field(default=None, max_length=500)
+
+
 class SnAssetImportItem(BaseModel):
     customer_code: str = Field(max_length=50)
     customer_name: str = Field(max_length=255)
@@ -177,6 +188,7 @@ class BoardCardImportRequest(BaseModel):
 
 class SystemConfigUpdateRequest(BaseModel):
     auto_send_enabled: bool | None = None
+    auto_followup_enabled: bool | None = None
     rma_auto_send_enabled: bool | None = None
     reply_send_mode: Literal["human_review", "auto_send"] | None = Field(
         default=None,

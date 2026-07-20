@@ -107,6 +107,18 @@ def test_fixed_box_overflow_aborts_generation() -> None:
         render_rma_pdf(_data(1, test_long_text=True))
 
 
+def test_realistic_dotted_material_code_wraps_inside_part_number_cell() -> None:
+    data = _data(1)
+    data.rma_no = "20260720085727251439"
+    data.items[0].part_no = "Z.SM.8123V120A"
+
+    with fitz.open(stream=render_rma_pdf(data), filetype="pdf") as document:
+        compact_text = "".join(page.get_text() for page in document).replace(" ", "").replace("\n", "")
+
+    assert "Z.SM.8123V120A" in compact_text
+    assert "20260720085727251439" in compact_text
+
+
 def test_template_integrity_and_snapshot_record_hashes() -> None:
     health = validate_rma_template_integrity()
     assert health["template_version"] == TEMPLATE_VERSION
