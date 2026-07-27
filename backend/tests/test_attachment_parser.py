@@ -268,7 +268,7 @@ async def test_oversized_attachment_is_uploaded_but_not_auto_parsed(monkeypatch:
 
 
 @pytest.mark.anyio
-async def test_qwen_failure_marks_attachment_manual_without_blocking_text(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_qwen_failure_uses_local_text_without_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
@@ -291,9 +291,106 @@ async def test_qwen_failure_marks_attachment_manual_without_blocking_text(monkey
 
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
-    assert attachment.parse_status == "needs_manual_review"
-    assert attachment.parse_error == "QWEN_TEMPORARILY_UNAVAILABLE"
+    assert attachment.parse_status == "parsed"
+    assert attachment.parse_error is None
     assert attachment.extracted_text == "SN001 needs repair"
     assert result is not None
     assert result["raw_text"] == "SN001 needs repair"
     assert "QWEN_TEMPORARILY_UNAVAILABLE" in result["warnings"]
+    assert "QWEN_FAILED_LOCAL_TEXT_FALLBACK" in result["warnings"]
+
+
+@pytest.mark.anyio
+async def test_text_prc_is_supported_and_uses_local_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return b"TYPE: POW\r\nSerial No.: P80012205200178\r\nPASS"
+
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
+    monkeypatch.setattr(attachment_parser, "_qwen_configured", lambda **_kwargs: False)
+    attachment = _attachment(file_name="self-check.prc", content_type="application/octet-stream", size=50)
+
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    assert attachment_parser.attachment_type(attachment) == "prc"
+    assert attachment.parse_status == "parsed"
+    assert attachment.parse_error is None
+    assert result is not None
+    assert "P80012205200178" in (attachment.extracted_text or "")
+
+
+@pytest.mark.anyio
+async def test_large_txt_skips_attachment_qwen_and_keeps_local_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    content = ("SN=P80012205200178\n" * 200).encode()
+
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return content
+
+    class FailIfCalled:
+        def __init__(self, **_kwargs):
+            raise AssertionError("large TXT must not instantiate Qwen")
+
+    monkeypatch.setattr(settings, "ATTACHMENT_TEXT_MAX_CHARS", 1000)
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
+    monkeypatch.setattr(attachment_parser, "QwenProvider", FailIfCalled)
+    attachment = _attachment(file_name="large.txt", content_type="text/plain", size=len(content))
+
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    assert attachment.parse_status == "parsed"
+    assert attachment.parse_error is None
+    assert result is not None
+    assert result["truncated"] is True
+    assert "QWEN_SKIPPED_LARGE_TEXT_LOCAL_FALLBACK" in result["warnings"]
+
+
+@pytest.mark.anyio
+async def test_named_archive_is_skipped_without_download_or_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail_download(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("recognized archive must not be downloaded for content parsing")
+
+    class FailQwenProvider:
+        def __init__(self, **kwargs):
+            del kwargs
+            raise AssertionError("archive must not be sent to Qwen")
+
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fail_download)
+    monkeypatch.setattr(attachment_parser, "QwenProvider", FailQwenProvider)
+    attachment = _attachment(file_name="self-check.7z", content_type="application/octet-stream", size=128)
+
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    assert attachment.parse_status == "skipped"
+    assert attachment.parse_error is None
+    assert attachment.extracted_text is None
+    assert attachment.content_type == "application/x-7z-compressed"
+    assert result is not None
+    assert result["attachment_role"] == "engineering_reference"
+    assert result["ai_parse_required"] is False
+    assert result["blocks_ticket_flow"] is False
+    assert result["security_status"] == "unscanned_archive"
+
+
+@pytest.mark.anyio
+async def test_extensionless_legacy_zip_is_detected_from_magic_and_then_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert oss_object_id == 12
+        return b"PK\x03\x04data"
+
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
+    attachment = _attachment(file_name="20260629_934", content_type="application/octet-stream", size=128)
+
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    assert calls == 1
+    assert attachment.parse_status == "skipped"
+    assert attachment.parse_error is None
+    assert attachment.content_type == "application/zip"
+    assert result is not None
+    assert result["detected_format"] == "zip"

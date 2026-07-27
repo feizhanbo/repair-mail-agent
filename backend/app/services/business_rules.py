@@ -24,7 +24,7 @@ CUSTOMER_REQUIRED_FIELD_MESSAGES: dict[str, str] = {
 }
 
 CUSTOMER_REQUIRED_FIELD_SET = frozenset((*NEW_REPAIR_REQUIRED_FIELDS, "sn"))
-FOLLOWUP_REPLY_TYPES = frozenset({"missing_fields"})
+FOLLOWUP_REPLY_TYPES = frozenset({"missing_fields", "followup"})
 
 
 def _missing(value: Any) -> bool:

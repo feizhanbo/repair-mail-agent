@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.business_rules import required_missing_for_ticket, required_missing_for_values
+from app.services.business_rules import is_followup_reply_type, required_missing_for_ticket, required_missing_for_values
 
 
 def test_new_repair_missing_fields_use_business_required_matrix() -> None:
@@ -35,6 +35,12 @@ def test_non_business_intents_never_create_customer_missing_fields() -> None:
         ) == {}
 
 
+def test_followup_reply_types_include_legacy_and_current_names() -> None:
+    assert is_followup_reply_type("missing_fields") is True
+    assert is_followup_reply_type("followup") is True
+    assert is_followup_reply_type("rma_authorization") is False
+
+
 def test_ticket_required_matrix_requires_sn_but_not_phone_or_customer_code() -> None:
     ticket = SimpleNamespace(
         customer_name="测试客户",
@@ -48,4 +54,3 @@ def test_ticket_required_matrix_requires_sn_but_not_phone_or_customer_code() -> 
     )
 
     assert required_missing_for_ticket(ticket, []) == {"sn": "缺少设备 SN，无法校验资产。"}
-

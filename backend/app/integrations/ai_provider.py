@@ -9,6 +9,8 @@ from typing import Any, Generic, TypeVar
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.repair_items import normalize_repair_item
+
 
 class AiProviderError(RuntimeError):
     """Raised when an AI provider call fails before a valid schema is returned."""
@@ -92,7 +94,13 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
         items = normalized.get("extracted_items")
         if isinstance(items, dict):
             items = items.get("items") if isinstance(items.get("items"), list) else [items]
-        normalized["extracted_items"] = items if isinstance(items, list) else []
+        normalized_items: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            normalized_item = normalize_repair_item(item)
+            normalized_items.append(normalized_item)
+        normalized["extracted_items"] = normalized_items
         normalized["confidence_score"] = _confidence(normalized.get("confidence_score"))
         normalized["field_confidences"] = _without_optional_phone_requirement({
             str(key): _confidence(value)

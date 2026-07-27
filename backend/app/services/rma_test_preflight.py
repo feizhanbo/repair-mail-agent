@@ -33,7 +33,7 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
     """Build and inspect a synthetic three-page message without connecting to SMTP."""
     stamp = timestamp or datetime.now().strftime("%Y%m%d%H%M%S")
     # Keep the synthetic value within the fixed RMA# table cell.
-    authorization_no = f"T{stamp[-10:]}"
+    authorization_no = f"RMA{datetime.now():%Y%m%d}01A"
     data = RmaPdfData(
         rma_no=authorization_no,
         request_date=date.today(),

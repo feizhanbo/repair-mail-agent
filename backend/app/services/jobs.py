@@ -5,7 +5,7 @@ import socket
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -100,15 +100,41 @@ async def enqueue_job(
 
 async def recover_stale_jobs(session: AsyncSession) -> int:
     stale_before = utcnow() - timedelta(seconds=settings.ASYNC_JOB_STALE_SECONDS)
-    result = await session.execute(
-        update(JobRunLog)
-        .where(JobRunLog.status == "running", JobRunLog.locked_at < stale_before)
-        .values(
-            status="retry_wait", locked_at=None, locked_by=None, next_run_at=utcnow(),
-            error_code="JOB_STALE_LOCK_RECOVERED",
+    stale_jobs = (
+        await session.execute(
+            select(JobRunLog)
+            .where(
+                JobRunLog.status == "running",
+                or_(
+                    JobRunLog.locked_at < stale_before,
+                    (JobRunLog.locked_at.is_(None) & (JobRunLog.started_at < stale_before)),
+                ),
+            )
+            .with_for_update(skip_locked=True)
         )
-    )
-    return int(result.rowcount or 0)
+    ).scalars().all()
+    now = utcnow()
+    for job in stale_jobs:
+        if job.locked_at is None:
+            job.status = "failed"
+            job.error_code = "JOB_ORPHANED_NO_LOCK"
+            job.error_message = "Legacy running job had no owner lock and was terminated without replay."
+            job.finished_at = now
+            job.next_run_at = None
+        elif job.attempt_count < job.max_attempts:
+            job.status = "retry_wait"
+            job.error_code = "JOB_STALE_LOCK_RECOVERED"
+            job.error_message = "Expired worker lock recovered for retry."
+            job.next_run_at = now
+        else:
+            job.status = "failed"
+            job.error_code = "JOB_STALE_RETRY_EXHAUSTED"
+            job.error_message = "Expired worker lock reached the retry limit."
+            job.finished_at = now
+            job.next_run_at = None
+        job.locked_at = None
+        job.locked_by = None
+    return len(stale_jobs)
 
 
 async def claim_next_job(session: AsyncSession, *, worker_id: str | None = None) -> JobRunLog | None:
@@ -308,18 +334,27 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
                 job.finished_at = utcnow()
         else:
             job.status = "success"
-            job.success_count = 1
+            job.success_count = int(result.get("success_count") or 1) if isinstance(result, dict) else 1
+            job.failed_count = int(result.get("failed_count") or 0) if isinstance(result, dict) else 0
             job.result_json = sanitize_log_payload(result)
             job.error_code = None
             job.error_message = None
     except Exception as exc:
-        error_code = safe_error_code(exc, exc.__class__.__name__.upper()) or "JOB_FAILED"
+        class_error_codes = {
+            "TypeError": "JOB_TYPE_ERROR",
+            "StatementError": "DB_STATEMENT_ERROR",
+            "IntegrityError": "DB_INTEGRITY_ERROR",
+        }
+        error_code = class_error_codes.get(exc.__class__.__name__) or safe_error_code(
+            exc, exc.__class__.__name__.upper()
+        ) or "JOB_FAILED"
         original = getattr(exc, "orig", None)
         diagnostic = exc.__class__.__name__
         if original is not None:
             diagnostic = f"{diagnostic}:{original.__class__.__name__}"
-        if isinstance(original, (TypeError, ValueError)):
-            diagnostic = f"{diagnostic}: {str(original)[:300]}"
+            original_args = getattr(original, "args", ())
+            if original_args and isinstance(original_args[0], int):
+                diagnostic = f"{diagnostic}:vendor_code={original_args[0]}"
         await session.rollback()
         recovered_job = await session.get(JobRunLog, job_id, with_for_update=True)
         if recovered_job is None:

@@ -6,13 +6,13 @@ import binascii
 import hashlib
 import imaplib
 import logging
-from datetime import date
+from datetime import date, timedelta
 from email.message import EmailMessage
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
@@ -31,8 +31,9 @@ from app.services.email_flow_trace import build_email_flow_trace
 from app.services.email_preview import build_attachment_preview, build_email_preview
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
+from app.services.common import utcnow
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
-from app.services.jobs import enqueue_job, serialize_job
+from app.services.jobs import enqueue_job, recover_stale_jobs, serialize_job
 from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 logger = logging.getLogger(__name__)
@@ -352,7 +353,18 @@ async def fetch_imap_status(
     )
     active = await session.scalar(
         select(JobRunLog)
-        .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+        .where(
+            JobRunLog.job_type == "imap_fetch",
+            or_(
+                JobRunLog.status == "queued",
+                (
+                    (JobRunLog.status == "running")
+                    & JobRunLog.locked_at.is_not(None)
+                    & (JobRunLog.locked_at >= utcnow() - timedelta(seconds=settings.ASYNC_JOB_STALE_SECONDS))
+                ),
+                ((JobRunLog.status == "retry_wait") & (JobRunLog.attempt_count < JobRunLog.max_attempts)),
+            ),
+        )
         .order_by(JobRunLog.created_at.asc())
         .limit(1)
     )
@@ -658,9 +670,16 @@ async def fetch_imap_job(
 ) -> dict:
     if not ({"admin", "operator", "supervisor"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    if await recover_stale_jobs(session):
+        await session.commit()
+    active_predicates = (
+        JobRunLog.job_type == "imap_fetch",
+        JobRunLog.status.in_(("queued", "running", "retry_wait")),
+        or_(JobRunLog.status != "retry_wait", JobRunLog.attempt_count < JobRunLog.max_attempts),
+    )
     active = await session.scalar(
         select(JobRunLog)
-        .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+        .where(*active_predicates)
         .order_by(JobRunLog.created_at.asc())
         .limit(1)
     )
@@ -672,7 +691,7 @@ async def fetch_imap_job(
         if not acquired:
             active = await session.scalar(
                 select(JobRunLog)
-                .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+                .where(*active_predicates)
                 .order_by(JobRunLog.created_at.asc())
                 .limit(1)
             )
@@ -681,7 +700,7 @@ async def fetch_imap_job(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="IMAP_FETCH_BUSY")
         active = await session.scalar(
             select(JobRunLog)
-            .where(JobRunLog.job_type == "imap_fetch", JobRunLog.status.in_(("queued", "running", "retry_wait")))
+            .where(*active_predicates)
             .order_by(JobRunLog.created_at.asc())
             .limit(1)
         )

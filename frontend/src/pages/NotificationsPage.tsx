@@ -102,7 +102,7 @@ export default function NotificationsPage() {
             <Select
               allowClear
               style={{ width: 140 }}
-              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }, { value: 'resolved', label: '已解决' }]}
+              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
               placeholder="消息状态"
             />
           </Form.Item>

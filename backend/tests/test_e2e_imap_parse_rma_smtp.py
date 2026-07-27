@@ -864,6 +864,26 @@ def main() -> int:
         phase_summary(start_time)
         return 1
 
+    # --- Wait for async parsing to complete ---
+    _hdr("等待异步解析完成")
+    parse_timeout = 60  # seconds
+    for email_id in email_ids:
+        waited = 0
+        while waited < parse_timeout:
+            try:
+                email_resp = _req("GET", f"/api/v1/emails/{email_id}")
+                parse_status = email_resp.get("data", {}).get("email", {}).get("parse_status", "?")
+                print(f"{IDENT}email_id={email_id} parse_status={parse_status} (waited {waited}s)")
+                if parse_status not in ("pending", "parsing"):
+                    _ok(f"email_id={email_id} 解析完成: {parse_status}")
+                    break
+            except Exception as exc:
+                print(f"{IDENT}查询状态失败: {exc}")
+            time.sleep(3)
+            waited += 3
+        if waited >= parse_timeout:
+            _warn(f"email_id={email_id} 解析超时 ({parse_timeout}s), 状态仍为 pending, 继续测试")
+
     # --- Phase 2 ---
     tickets = phase_trace_parse(email_ids)
     if not tickets:

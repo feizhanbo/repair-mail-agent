@@ -154,6 +154,24 @@ async def build_attachment_preview(session: AsyncSession, attachment_id: int) ->
         "file_type": file_type,
         "parse_status": attachment.parse_status,
     }
+    if (
+        isinstance(attachment.extracted_json, dict)
+        and attachment.extracted_json.get("attachment_role") == "engineering_reference"
+    ):
+        return {
+            **base,
+            "mode": "download_only",
+            "url": None,
+            "text": None,
+            "html": None,
+            "extracted_json": attachment.extracted_json,
+            "warnings": [
+                {
+                    "code": "ARCHIVE_CONTENT_NOT_SCANNED",
+                    "message": "工程辅助压缩附件未经内容扫描，请仅在受控环境中下载并打开。",
+                }
+            ],
+        }
     if file_type == "image":
         if not attachment.oss_object_id:
             raise _missing_archive_error(attachment, stage="attachment_image_lookup")

@@ -15,7 +15,7 @@ from app.services.replies import create_reply_draft
 from app.services.tickets import get_ticket, get_ticket_detail
 from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.notifications import resolve_notifications_for_target
-from app.services.workflow import transition_ticket
+from app.services.workflow import OPEN_TASK_STATUSES, transition_ticket
 
 TASK_FIELDS = (
     "id",
@@ -212,8 +212,13 @@ async def resolve_task(
     followup_result: dict[str, Any] | None = None
     reparse_result: dict[str, Any] | None = None
     if next_action == "transition_ready_for_export":
-        safety_result = await validate_and_mark_ready_for_export(session, ticket_id=ticket.id, user_id=user_id)
-        if safety_result["status"] == "safety_failed":
+        safety_result = await validate_and_mark_ready_for_export(
+            session,
+            ticket_id=ticket.id,
+            user_id=user_id,
+            resolving_task_id=task.id,
+        )
+        if safety_result["status"] != "ready_for_export":
             return {
                 "task": serialize_task(task),
                 "ticket": await get_ticket_detail(session, ticket.id),
@@ -230,6 +235,7 @@ async def resolve_task(
                 trigger_event="manual_resolved",
                 user_id=user_id,
                 reason=resolution,
+                resolving_task_id=task.id,
             )
         elif ticket.current_status_code == "parsed":
             await transition_ticket(
@@ -249,11 +255,38 @@ async def resolve_task(
                 trigger_event="manual_resolved",
                 user_id=user_id,
                 reason=resolution,
+                resolving_task_id=task.id,
             )
         followup_result = await create_reply_draft(session, ticket_id=ticket.id, user_id=user_id, related_email_id=task.email_id)
     elif next_action == "reparse":
         if task.email_id:
+            task.status = "resolved"
+            task.resolved_by_user_id = user_id
+            task.resolved_at = utcnow()
+            task.resolution = resolution
+            await session.flush()
             reparse_result = await reparse_email(session, email_id=task.email_id, user_id=user_id, reason=resolution)
+            if ticket.current_status_code == "manual_review":
+                replacement_task_id = await session.scalar(
+                    select(ManualReviewTask.id)
+                    .where(
+                        ManualReviewTask.ticket_id == ticket.id,
+                        ManualReviewTask.id != task.id,
+                        ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                    )
+                    .limit(1)
+                )
+                if replacement_task_id is None:
+                    task.status = "pending"
+                    task.resolved_by_user_id = None
+                    task.resolved_at = None
+                    task.resolution = "重新解析未解除人工复核根因：" + resolution
+                    return {
+                        "task": serialize_task(task),
+                        "ticket": await get_ticket_detail(session, ticket.id),
+                        "followup_result": None,
+                        "reparse_result": reparse_result,
+                    }
     elif next_action == "close_ticket":
         await transition_ticket(
             session,
@@ -262,6 +295,7 @@ async def resolve_task(
             trigger_event="manual_close",
             user_id=user_id,
             reason=resolution,
+            resolving_task_id=task.id,
         )
     elif next_action == "keep_manual_review":
         task.resolution = resolution

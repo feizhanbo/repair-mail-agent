@@ -29,6 +29,7 @@ export const parseStatusLabels: Record<string, string> = {
   manually_applied: '人工应用',
   partially_applied: '部分应用',
   rejected: '已拒绝',
+  engineering_reference_stored: '工程辅助资料已保存',
 };
 
 export const reviewStatusLabels: Record<string, string> = {

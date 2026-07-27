@@ -35,6 +35,7 @@ const defaultColors: Record<string, string> = {
   needs_manual_review: 'orange',
   candidate_only: 'default',
   auto_skipped: 'default',
+  engineering_reference_stored: 'default',
 };
 
 const defaultLabels: Record<string, string> = {

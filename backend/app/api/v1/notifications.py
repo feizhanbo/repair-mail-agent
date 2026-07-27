@@ -40,6 +40,8 @@ async def list_notifications(
     if delivery_status:
         normalized = "unread" if delivery_status == "pending" else delivery_status
         statement = statement.where(NotificationUserState.status == normalized)
+    else:
+        statement = statement.where(NotificationUserState.status != "resolved")
     if event_type:
         statement = statement.where(NotificationEvent.event_type == event_type)
     if priority:

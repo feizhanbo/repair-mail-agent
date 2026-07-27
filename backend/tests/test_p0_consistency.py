@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
-from app.models import Email, JobRunLog, OssObject, ParseResult, RepairTicket
+from app.models import Email, EmailAttachment, JobRunLog, OssObject, ParseResult, RepairTicket
 from app.api.deps import CurrentUser
 from app.api.v1.jobs import _EXPORT_FILTERS, _can_access_job
 from app.schemas.business import EmailIngestRequest
 from app.services import email_archival
-from app.services.email_archival import EmailArchivalError, archive_email_bundle
+from app.services.email_archival import EmailArchivalError, archive_email_bundle, validate_archive_bundle
 from app.services.emails import _parse_requires_manual, ingest_email
-from app.services.jobs import _job_error_is_retryable, enqueue_job
+from app.services.common import utcnow
+from app.services.jobs import _job_error_is_retryable, enqueue_job, recover_stale_jobs
 from app.services.logging_safety import safe_error_code, sanitize_log_payload
 from app.services import storage
 from app.services.storage import StorageUploadError, _object_key, normalized_content_type
@@ -185,6 +187,80 @@ def test_auto_apply_uses_dedicated_high_confidence_threshold(monkeypatch: pytest
     assert _parse_requires_manual(candidate, []) is False
 
 
+def test_skipped_engineering_archive_does_not_require_manual_review() -> None:
+    candidate = ParseResult(
+        email_id=1,
+        parser_type="deepseek",
+        intent_type="new_repair",
+        confidence_score=0.95,
+        missing_fields={},
+        conflict_fields={},
+    )
+    attachment = EmailAttachment(
+        email_id=1,
+        file_name="self-check.zip",
+        content_type="application/zip",
+        parse_status="skipped",
+        extracted_json={
+            "attachment_role": "engineering_reference",
+            "blocks_ticket_flow": False,
+        },
+    )
+
+    assert _parse_requires_manual(candidate, [attachment]) is False
+
+
+def test_prc_failure_only_blocks_when_customer_fields_are_still_missing() -> None:
+    attachment = EmailAttachment(
+        email_id=1,
+        file_name="self-check.prc",
+        content_type="application/octet-stream",
+        parse_status="needs_manual_review",
+        parse_error="PRC_TEXT_UNRECOGNIZED",
+    )
+    candidate = ParseResult(
+        email_id=1,
+        parser_type="deepseek",
+        intent_type="new_repair",
+        confidence_score=0.95,
+        missing_fields={},
+        conflict_fields={},
+    )
+    assert _parse_requires_manual(candidate, [attachment]) is False
+    candidate.missing_fields = {"mailing_address": "required"}
+    assert _parse_requires_manual(candidate, [attachment]) is True
+
+
+@pytest.mark.anyio
+async def test_stale_job_recovery_terminates_unlocked_orphan_without_replay() -> None:
+    job = JobRunLog(
+        id=170,
+        job_name="imap_fetch_now",
+        job_type="imap_fetch",
+        status="running",
+        started_at=utcnow() - timedelta(hours=2),
+        locked_at=None,
+        attempt_count=1,
+        max_attempts=3,
+    )
+
+    class Rows:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [job]
+
+    class RecoverySession:
+        async def execute(self, _statement):
+            return Rows()
+
+    assert await recover_stale_jobs(RecoverySession()) == 1
+    assert job.status == "failed"
+    assert job.error_code == "JOB_ORPHANED_NO_LOCK"
+    assert job.finished_at is not None
+
+
 @pytest.mark.anyio
 async def test_archive_bundle_maps_every_successful_object(monkeypatch: pytest.MonkeyPatch) -> None:
     session = FakeSession()
@@ -210,6 +286,31 @@ async def test_archive_bundle_maps_every_successful_object(monkeypatch: pytest.M
     assert payload.raw_eml_oss_object_id == 101
     assert payload.attachments[0]["oss_object_id"] == 102
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("raw_eml", "blobs", "expected_code"),
+    [
+        (b"raw", [{"content": b"12345"}], "ATTACHMENT_ARCHIVE_TOO_LARGE"),
+        (b"123456789", [], "EMAIL_ARCHIVE_TOO_LARGE"),
+        (b"raw", [{"content": b"x"}, {"content": b"y"}], "TOO_MANY_ATTACHMENTS"),
+    ],
+)
+def test_archive_hard_limits_remain_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_eml: bytes,
+    blobs: list[dict[str, bytes]],
+    expected_code: str,
+) -> None:
+    monkeypatch.setattr(email_archival.settings, "ATTACHMENT_MAX_ARCHIVE_BYTES", 4)
+    monkeypatch.setattr(email_archival.settings, "EMAIL_MAX_ARCHIVE_BYTES", 8)
+    monkeypatch.setattr(email_archival.settings, "EMAIL_MAX_ATTACHMENTS", 1)
+
+    with pytest.raises(EmailArchivalError) as exc_info:
+        validate_archive_bundle(raw_eml, blobs)
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.stage == "validate"
 
 
 @pytest.mark.anyio

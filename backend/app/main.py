@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
-
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
 from app.core.request_context import bind_request_context, normalize_correlation_id, reset_request_context
-from app.models import JobRunLog, RepairTicket
-from app.services.imap_fetcher import run_imap_fetch_locked
+from app.models import JobRunLog
 from app.services.ai import maintain_ai_jsonl_logs
-from app.services.jobs import claim_next_job, execute_claimed_job
-from app.services.replies import create_reply_draft
+from app.services.jobs import claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
+from app.services.notification_task_repair import repair_notification_and_task_data
 from app.services.rma_pdf import validate_rma_runtime_health
 from app.services.runtime_config import read_runtime_config
 from app.services.common import utcnow
@@ -44,58 +42,26 @@ async def _scheduled_imap_fetch():
         return
     try:
         async with AsyncSessionLocal() as session:
-            result = await run_imap_fetch_locked(
+            interval = max(1, settings.IMAP_POLL_INTERVAL_MINUTES)
+            now = utcnow()
+            bucket = now.replace(minute=(now.minute // interval) * interval, second=0, microsecond=0)
+            job = await enqueue_job(
                 session,
-                folder_name=settings.IMAP_FOLDER,
-                limit=settings.IMAP_FETCH_LIMIT,
-                unseen_only=settings.IMAP_UNSEEN_ONLY,
-                archive_to_oss=settings.IMAP_ARCHIVE_TO_OSS,
+                job_type="imap_fetch",
+                resource_type="mailbox",
+                resource_id=None,
+                idempotency_key=f"imap_fetch:scheduled:{settings.IMAP_USER}:{settings.IMAP_FOLDER}:{bucket.isoformat()}",
+                metadata={
+                    "folder_name": settings.IMAP_FOLDER,
+                    "limit": settings.IMAP_FETCH_LIMIT,
+                    "unseen_only": settings.IMAP_UNSEEN_ONLY,
+                    "auto_parse": True,
+                },
             )
             await session.commit()
-            logger.info(
-                "Scheduled IMAP fetch completed: job_id=%s status=%s processed=%s success=%s failed=%s",
-                result.get("job_id"),
-                result.get("status"),
-                result.get("processed_count"),
-                result.get("success_count"),
-                result.get("failed_count"),
-            )
+            logger.info("Scheduled IMAP fetch queued: job_id=%s", job.id)
     except Exception:
         logger.exception("Scheduled IMAP fetch failed")
-
-
-async def _scheduled_auto_followup():
-    if not settings.AUTO_FOLLOWUP_ENABLED:
-        return
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(RepairTicket).where(RepairTicket.current_status_code == "need_customer_info")
-            )
-            tickets = result.scalars().all()
-            processed = 0
-            skipped = 0
-            errors = 0
-            for ticket in tickets:
-                if ticket.followup_count >= ticket.max_followup_count:
-                    skipped += 1
-                    continue
-                try:
-                    await create_reply_draft(session, ticket_id=ticket.id, user_id=None)
-                    processed += 1
-                except Exception:
-                    logger.exception("Auto follow-up failed for ticket %s", ticket.ticket_no)
-                    errors += 1
-            await session.commit()
-            logger.info(
-                "Scheduled auto follow-up completed: total=%d, processed=%d, skipped=%d, errors=%d",
-                len(tickets),
-                processed,
-                skipped,
-                errors,
-            )
-    except Exception:
-        logger.exception("Scheduled auto follow-up failed")
 
 
 async def _scheduled_job_worker():
@@ -136,6 +102,21 @@ async def _scheduled_ai_log_maintenance():
     )
 
 
+async def _scheduled_consistency_recovery():
+    try:
+        async with AsyncSessionLocal() as session:
+            stale_jobs = await recover_stale_jobs(session)
+            repair_result = await repair_notification_and_task_data(session, apply=True)
+            await session.commit()
+        logger.info(
+            "Consistency recovery completed: stale_jobs=%d normalized_tasks=%d",
+            stale_jobs,
+            repair_result.get("counts", {}).get("normalized_tasks", 0),
+        )
+    except Exception:
+        logger.exception("Consistency recovery deferred because the database is unavailable")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -167,13 +148,6 @@ async def lifespan(app: FastAPI):
     elif settings.IMAP_FETCH_ENABLED:
         logger.error("IMAP scheduler disabled: IMAP_ARCHIVE_TO_OSS must be true")
     scheduler.add_job(
-        _scheduled_auto_followup,
-        "interval",
-        minutes=settings.AUTO_FOLLOWUP_INTERVAL_MINUTES,
-        id="auto_followup",
-        replace_existing=True,
-    )
-    scheduler.add_job(
         _scheduled_job_worker,
         "interval",
         seconds=max(1, settings.ASYNC_JOB_POLL_SECONDS),
@@ -192,8 +166,18 @@ async def lifespan(app: FastAPI):
         coalesce=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        _scheduled_consistency_recovery,
+        "interval",
+        minutes=5,
+        next_run_time=utcnow() + timedelta(seconds=5),
+        id="consistency_recovery",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     scheduler.start()
-    logger.info("Schedulers started: IMAP poll interval=%d min, auto follow-up interval=%d min", settings.IMAP_POLL_INTERVAL_MINUTES, settings.AUTO_FOLLOWUP_INTERVAL_MINUTES)
+    logger.info("Schedulers started: IMAP poll interval=%d min; follow-ups are event-driven", settings.IMAP_POLL_INTERVAL_MINUTES)
     logger.info("SMTP whitelist configured: count=%d", len(settings.SMTP_RECIPIENT_WHITELIST))
     if not settings.SMTP_RECIPIENT_WHITELIST:
         logger.warning("SECURITY: SMTP_RECIPIENT_WHITELIST is empty, all outbound email will be blocked!")

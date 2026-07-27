@@ -5,10 +5,11 @@ from datetime import date
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.repair_items import normalize_repair_item
 from app.models import (
     Email,
     EmailAttachment,
@@ -22,9 +23,10 @@ from app.models import (
     ReplyRecord,
     SnValidationResult,
     TicketStatusLog,
+    WorkflowStatus,
 )
 from app.services.audit import log_operation
-from app.services.business_rules import required_missing_for_ticket
+from app.services.business_rules import FOLLOWUP_REPLY_TYPES, required_missing_for_ticket
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
@@ -150,6 +152,24 @@ EMAIL_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+async def _next_ticket_no(session: AsyncSession) -> str:
+    """Serialize daily ticket-number allocation without adding a database sequence."""
+    await session.scalar(
+        select(WorkflowStatus)
+        .where(WorkflowStatus.status_code == "new_email")
+        .with_for_update()
+    )
+    today_prefix = f"0{utcnow():%Y%m%d}"
+    max_ticket_no = await session.scalar(
+        select(func.max(RepairTicket.ticket_no)).where(
+            RepairTicket.ticket_no.like(f"{today_prefix}%"),
+            RepairTicket.ticket_no.op("REGEXP")(r"^0\d{10}$"),
+        )
+    )
+    sequence = int(max_ticket_no[9:11]) + 1 if max_ticket_no else 1
+    return f"{today_prefix}{sequence:02d}" if sequence < 100 else f"0{utcnow():%Y%m%d%H%M%S%f}"
 
 
 def _attachment_file_size_kb(file_size: int | None) -> int | None:
@@ -791,8 +811,9 @@ async def create_ticket_from_parse_result(
     if selected_fields is not None:
         fields = {key: value for key, value in fields.items() if key in selected_fields}
     owner_id, language_code, routing_reason = await choose_system_owner(session, email)
+    ticket_no = await _next_ticket_no(session)
     ticket = RepairTicket(
-        ticket_no=f"RMA{utcnow():%Y%m%d%H%M%S%f}",
+        ticket_no=ticket_no,
         current_status_code="new_email",
         source_email_id=email.id,
         thread_id=email.thread_id,
@@ -906,8 +927,9 @@ async def ensure_manual_review_ticket_from_parse_result(
         from app.services.routing import choose_system_owner
 
         owner_id, language_code, routing_reason = await choose_system_owner(session, email)
+        ticket_no = await _next_ticket_no(session)
         ticket = RepairTicket(
-            ticket_no=f"RMA{utcnow():%Y%m%d%H%M%S%f}",
+            ticket_no=ticket_no,
             current_status_code="manual_review",
             source_email_id=email.id,
             thread_id=email.thread_id,
@@ -1003,6 +1025,57 @@ async def _create_items_from_parse_result(
             )
         ).scalars().all()
     )
+
+    if parse_result.intent_type == "customer_supplement" and item_payloads:
+        source_email = await session.get(Email, parse_result.email_id)
+        supplement_text = (
+            (source_email.latest_reply_segment if source_email is not None else None)
+            or (source_email.clean_body if source_email is not None else None)
+            or (source_email.text_body if source_email is not None else None)
+            or ""
+        )
+        normalized_text = " ".join(str(supplement_text).lower().split())
+        correction_markers = (
+            "录入有误",
+            "sn有误",
+            "sn 有误",
+            "更正为",
+            "修正为",
+            "改为",
+            "replace the sn",
+            "replace sn",
+            "corrected sn",
+            "sn was wrong",
+        )
+        if any(marker in normalized_text for marker in correction_markers):
+            replacement_sns = {
+                normalized["sn"]
+                for index, payload in enumerate(item_payloads, start=1)
+                if isinstance(payload, dict)
+                and (normalized := normalize_repair_item(payload, default_line_no=index)).get("sn")
+            }
+            retained_items: list[RepairTicketItem] = []
+            for existing_item in existing_items:
+                existing_sn = str(existing_item.sn or "").strip().upper()
+                if existing_item.manual_locked or not existing_sn or existing_sn in replacement_sns:
+                    retained_items.append(existing_item)
+                    continue
+                session.add(
+                    FieldAuditLog(
+                        ticket_id=ticket.id,
+                        ticket_item_id=existing_item.id,
+                        field_name="item",
+                        old_value=_audit_value(serialize_item(existing_item)),
+                        new_value=None,
+                        source_type="parse_result",
+                        reason="Customer explicitly corrected the previously supplied SN set.",
+                        operator_user_id=user_id,
+                        parse_result_id=parse_result.id,
+                    )
+                )
+                await session.delete(existing_item)
+            existing_items = retained_items
+
     existing_sns = {str(item.sn).strip().upper() for item in existing_items if item.sn and str(item.sn).strip()}
     existing_by_line = {int(item.line_no): item for item in existing_items}
     max_line_no = max((int(item.line_no) for item in existing_items), default=0)
@@ -1019,6 +1092,8 @@ async def _create_items_from_parse_result(
     for item_index, payload in enumerate(item_payloads):
         if selected_item_indices is not None and item_index not in selected_item_indices:
             continue
+        if isinstance(payload, dict):
+            payload = normalize_repair_item(payload, default_line_no=item_index + 1)
         sn = (payload.get("sn") or "").strip().upper() if isinstance(payload, dict) else ""
         if sn and sn in existing_sns:
             continue
@@ -1213,6 +1288,15 @@ async def apply_parse_result(
             )
         ).scalars().all()
         ticket.missing_fields = required_missing_for_ticket(ticket, current_items)
+        if parse_result.intent_type == "customer_supplement":
+            sent_followups = await session.scalar(
+                select(func.count(ReplyRecord.id)).where(
+                    ReplyRecord.ticket_id == ticket.id,
+                    ReplyRecord.reply_type.in_(FOLLOWUP_REPLY_TYPES),
+                    ReplyRecord.send_status == "sent",
+                )
+            )
+            ticket.followup_count = min(ticket.max_followup_count, int(sent_followups or 0))
 
     result_status = apply_status or ("partially_applied" if action == "partial_apply" or ticket.manual_locked else ("manually_applied" if user_id else "auto_applied"))
     parse_result.apply_status = result_status
@@ -1234,7 +1318,10 @@ async def apply_parse_result(
         after_data={"ticket_id": ticket.id, "changed_fields": changed, "apply_status": result_status, "action": action},
     )
 
-    if ticket.current_status_code == "auto_replied" and parse_result.intent_type in {"normal_reply", "customer_supplement"}:
+    if ticket.current_status_code == "auto_replied" and parse_result.intent_type in {
+        "normal_reply",
+        "customer_supplement",
+    }:
         await transition_ticket(
             session,
             ticket=ticket,

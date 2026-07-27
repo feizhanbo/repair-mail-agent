@@ -7,7 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ManualReviewTask, NotificationEvent, NotificationUserState, RepairTicket, Role, User, UserRole
+from app.services.audit import create_notification
 from app.services.common import utcnow
+from app.services.notifications import resolve_notifications_for_target
+from app.services.routing import choose_available_operator
 
 
 OPEN_LEGACY_STATUSES = ("pending", "assigned", "claimed", "assignment_failed")
@@ -118,12 +121,15 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
             ),
             None,
         )
-        new_status = "pending" if owner_id is not None else "assignment_failed"
+        if owner_id is None:
+            fallback = await choose_available_operator(session)
+            owner_id = fallback.id if fallback is not None else None
+        new_status = "pending"
         if task.status != new_status or task.assigned_user_id != owner_id or task.claimed_by_user_id is not None or task.claimed_at is not None:
             counts["normalized_tasks"] += 1
             if len(samples["normalized_tasks"]) < 20:
                 samples["normalized_tasks"].append(task.id)
-            if new_status == "assignment_failed":
+            if owner_id is None:
                 counts["assignment_failed_tasks"] += 1
                 if len(samples["assignment_failed_tasks"]) < 20:
                     samples["assignment_failed_tasks"].append(task.id)
@@ -132,5 +138,22 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
                 task.assigned_user_id = owner_id
                 task.claimed_by_user_id = None
                 task.claimed_at = None
+                if owner_id is not None:
+                    await resolve_notifications_for_target(
+                        session,
+                        target_type="manual_review_task",
+                        target_id=task.id,
+                    )
+                    await create_notification(
+                        session,
+                        event_type="manual_review_assigned",
+                        target_type="manual_review_task",
+                        target_id=task.id,
+                        title="人工复核任务已重新分配",
+                        content=task.trigger_reason or "人工复核任务已分配给可用操作员。",
+                        priority=task.priority,
+                        recipient_user_id=owner_id,
+                        metadata={"ticket_id": task.ticket_id, "task_type": task.task_type, "recovered": True},
+                    )
 
     return {"mode": "apply" if apply else "dry_run", "counts": dict(counts), "samples": samples}

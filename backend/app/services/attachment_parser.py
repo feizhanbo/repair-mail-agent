@@ -21,12 +21,17 @@ from app.config import settings
 from app.integrations.ai_provider import AiProviderError
 from app.integrations.qwen_provider import QwenProvider
 from app.models import EmailAttachment
+from app.services.attachment_precheck import (
+    ARCHIVE_CONTENT_TYPES,
+    detect_archive_format,
+    engineering_reference_metadata,
+)
 from app.services.common import utcnow
 from app.services.logging_safety import safe_error_code
 from app.services.storage import download_oss_object_bytes, generate_presigned_url_for_object
 
 
-SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "html", "image", "pdf"}
+SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "prc", "html", "image", "pdf"}
 _file_parse_semaphore = asyncio.Semaphore(max(1, settings.FILE_PARSE_CONCURRENCY))
 
 
@@ -87,7 +92,7 @@ def attachment_type(attachment: EmailAttachment) -> str | None:
         return "image"
     if content_type == "application/pdf" or suffix == "pdf":
         return "pdf"
-    if suffix in {"docx", "xlsx", "csv", "txt", "html", "htm"}:
+    if suffix in {"docx", "xlsx", "csv", "txt", "prc", "html", "htm"}:
         return "html" if suffix == "htm" else suffix
     if content_type in {"text/plain", "application/json", "application/xml", "text/xml"}:
         return "txt"
@@ -156,6 +161,17 @@ def _truncate_text(text: str) -> tuple[str, bool]:
 
 def _extract_txt(content: bytes) -> str:
     return _decode_text(content)
+
+
+def _extract_prc(content: bytes) -> str:
+    if not content or content.count(b"\x00") / len(content) > 0.02:
+        raise ValueError("PRC_TEXT_UNRECOGNIZED")
+    text = _decode_text(content)
+    sample = text[:10000]
+    printable = sum(character.isprintable() or character in "\r\n\t" for character in sample)
+    if sample and printable / len(sample) < 0.9:
+        raise ValueError("PRC_TEXT_UNRECOGNIZED")
+    return text
 
 
 def _extract_html(content: bytes) -> str:
@@ -491,20 +507,55 @@ def _mark_attachment(
     parsed: AttachmentParseJson | None,
     text: str | None,
     error: str | None = None,
+    extracted_json: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     attachment.parse_status = status
     attachment.extracted_text = text
-    attachment.extracted_json = {
-        **(parsed.model_dump() if parsed else {}),
+    attachment.extracted_json = extracted_json or ({
+        **parsed.model_dump(),
         "parsed_at": utcnow().isoformat(),
-    } if parsed else None
+    } if parsed else None)
     attachment.parse_error = error
     return attachment.extracted_json
 
 
 async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
+    archive_format, warnings = detect_archive_format(
+        file_name=attachment.file_name,
+        content_type=attachment.content_type,
+    )
+    if archive_format:
+        attachment.content_type = ARCHIVE_CONTENT_TYPES[archive_format]
+        return _mark_attachment(
+            attachment,
+            status="skipped",
+            parsed=None,
+            text=None,
+            extracted_json=engineering_reference_metadata(archive_format, warnings),
+        )
+
     file_type = attachment_type(attachment)
     if file_type not in SUPPORTED_ATTACHMENT_TYPES:
+        content = None
+        if attachment.oss_object_id:
+            try:
+                content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
+            except Exception:
+                content = None
+        archive_format, warnings = detect_archive_format(
+            file_name=attachment.file_name,
+            content_type=attachment.content_type,
+            content=content,
+        )
+        if archive_format:
+            attachment.content_type = ARCHIVE_CONTENT_TYPES[archive_format]
+            return _mark_attachment(
+                attachment,
+                status="skipped",
+                parsed=None,
+                text=None,
+                extracted_json=engineering_reference_metadata(archive_format, warnings),
+            )
         return _mark_attachment(
             attachment,
             status="unsupported",
@@ -562,6 +613,8 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
         if file_type == "txt":
             text = await _file_io(_extract_txt, content)
+        elif file_type == "prc":
+            text = await _file_io(_extract_prc, content)
         elif file_type == "csv":
             text = await _file_io(_extract_csv, content)
         elif file_type == "html":
@@ -597,10 +650,21 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         truncated = truncated or text_truncated
         if text_truncated:
             warnings.append("TEXT_TRUNCATED_FOR_MODEL_INPUT")
+        if file_type == "txt" and text_truncated:
+            parsed = _fallback_json(
+                file_type,
+                text,
+                warnings=[*warnings, "QWEN_SKIPPED_LARGE_TEXT_LOCAL_FALLBACK"],
+                truncated=True,
+            )
+            return _mark_attachment(attachment, status="parsed", parsed=parsed, text=text)
         parsed = await _qwen_text_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, text=text, warnings=warnings, truncated=truncated)
         return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text or text)
     except AiProviderError as exc:
         parsed = _fallback_json(file_type, text, warnings=[*warnings, str(exc)], truncated=truncated)
+        if file_type in {"txt", "prc"} and text.strip():
+            parsed.warnings.append("QWEN_FAILED_LOCAL_TEXT_FALLBACK")
+            return _mark_attachment(attachment, status="parsed", parsed=parsed, text=text)
         return _mark_attachment(attachment, status="needs_manual_review", parsed=parsed, text=text or None, error=str(exc))
     except Exception as exc:
         parsed = _fallback_json(file_type, text, warnings=[*warnings, exc.__class__.__name__], truncated=truncated)

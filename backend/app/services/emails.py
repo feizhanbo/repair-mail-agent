@@ -16,7 +16,7 @@ from app.core.request_context import get_correlation_id
 from app.models import Email, EmailAttachment, EmailThread, ParseResult, RepairTicket
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
-from app.services.attachment_parser import parse_attachment
+from app.services.attachment_parser import attachment_type, parse_attachment
 from app.services.audit import log_operation, log_system_event
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, to_plain, utcnow
 from app.services.device_receipts import confirm_device_received
@@ -411,18 +411,25 @@ def _parse_requires_manual(
     if parse_result is None:
         return True
     confidence = float(parse_result.confidence_score or 0)
-    return (
+    if (
         parse_result.intent_type in {None, "", "unknown"}
         or confidence < settings.AUTO_APPLY_MIN_CONFIDENCE
         or bool(parse_result.conflict_fields)
-        or any(
-            attachment.parse_status in {"needs_manual_review", "unsupported", "failed"}
-            for attachment in (attachments or [])
-        )
-    )
+    ):
+        return True
+    for attachment in attachments or []:
+        if attachment.parse_status not in {"needs_manual_review", "unsupported", "failed"}:
+            continue
+        if attachment_type(attachment) == "prc" and not parse_result.missing_fields:
+            continue
+        return True
+    return False
 
 
-def _manual_reason(parse_result: ParseResult | None) -> str:
+def _manual_reason(
+    parse_result: ParseResult | None,
+    attachments: list[EmailAttachment] | None = None,
+) -> str:
     if parse_result is None:
         return "AI 未返回有效解析结果，需要人工根据原始邮件确认。"
     evidence = parse_result.evidence or {}
@@ -438,6 +445,13 @@ def _manual_reason(parse_result: ParseResult | None) -> str:
         reasons.append("存在缺失字段：" + "、".join(sorted(parse_result.missing_fields.keys())))
     if parse_result.conflict_fields:
         reasons.append("存在冲突或异常字段：" + "、".join(sorted(parse_result.conflict_fields.keys())))
+    attachment_errors = [
+        f"{attachment.file_name}:{attachment.parse_error or attachment.parse_status}"
+        for attachment in attachments or []
+        if attachment.parse_status in {"needs_manual_review", "unsupported", "failed"}
+    ]
+    if attachment_errors:
+        reasons.append("附件需要人工复核：" + "；".join(attachment_errors[:10]))
     return "；".join(reasons) or "需要人工复核 AI 解析结果。"
 
 
@@ -495,10 +509,16 @@ async def _try_create_reply_draft(
     if ticket_id is None:
         return None
     ticket = await session.get(RepairTicket, ticket_id)
+    if ticket is None:
+        return None
+    if ticket.current_status_code == "manual_review" or ticket.sn_validation_status == "failed":
+        return {"created": False, "error_code": "MANUAL_REVIEW_BLOCKS_AUTO_REPLY"}
     effective_missing_fields = ticket.missing_fields if ticket is not None else (parse_result.missing_fields if parse_result else None)
     if parse_result and parse_result.conflict_fields and "sn" in parse_result.conflict_fields:
-        reply_type = "sn_invalid"
+        return {"created": False, "error_code": "FIELD_CONFLICT_BLOCKS_AUTO_REPLY"}
     elif effective_missing_fields:
+        if ticket.current_status_code != "need_customer_info":
+            return {"created": False, "error_code": "FOLLOWUP_TICKET_NOT_WAITING_CUSTOMER_INFO"}
         reply_type = "missing_fields"
     else:
         reply_type = "receipt"
@@ -606,11 +626,11 @@ async def reparse_email(
 
     multimodal_results: list[dict[str, Any]] = []
     for attachment in attachments:
-        if attachment.parse_status in {"parsed", "skipped_decorative", "unsupported"}:
+        if attachment.parse_status in {"parsed", "skipped", "skipped_decorative", "unsupported"}:
             attachment_result = attachment.extracted_json
         else:
             attachment_result = await parse_attachment(session, attachment)
-        if attachment_result:
+        if attachment_result and attachment.parse_status != "skipped":
             multimodal_results.append(attachment_result)
         if durable_attachment_stages:
             await session.commit()
@@ -672,11 +692,24 @@ async def reparse_email(
                 session,
                 email=email,
                 parse_result=ai_parse,
-                reason=_manual_reason(ai_parse),
+                reason=_manual_reason(ai_parse, list(attachments)),
                 task_type="ai_review_required",
             )
             email.parse_status = "needs_manual"
-            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": _manual_reason(ai_parse)}
+            manual_ticket = {
+                "ticket_id": ticket.id,
+                "ticket_no": ticket.ticket_no,
+                "reason": _manual_reason(ai_parse, list(attachments)),
+            }
+            if user_id is not None and ticket.current_status_code == "manual_review":
+                ai_applied = await apply_parse_result(
+                    session,
+                    parse_result_id=ai_parse.id,
+                    user_id=user_id,
+                    reason=reason or "Manual-review reparse refreshed ticket fields and items.",
+                    apply_status="needs_manual_review",
+                )
+                email.parse_status = "needs_manual"
             draft_result = await _try_create_reply_draft(
                 session,
                 ticket_id=ticket.id,
@@ -741,6 +774,18 @@ async def reparse_email(
                         email_id=email.id,
                         parse_result=ai_parse,
                     )
+                elif (
+                    ai_parse.intent_type in {"new_repair", "customer_supplement"}
+                    and applied_ticket is not None
+                    and applied_ticket.current_status_code == "manual_review"
+                ):
+                    ai_applied = {
+                        **ai_applied,
+                        "export_validation": {
+                            "status": "awaiting_manual_resolution",
+                            "reason": "MANUAL_REVIEW_REPARSE_REQUIRES_EXPLICIT_RESOLUTION",
+                        },
+                    }
                 elif ai_parse.intent_type in {"new_repair", "customer_supplement"}:
                     validated = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=None)
                     ai_applied = {**ai_applied, "export_validation": validated}

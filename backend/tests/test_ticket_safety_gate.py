@@ -205,6 +205,55 @@ async def test_sn_failure_stops_export_validation_immediately(monkeypatch) -> No
 
 
 @pytest.mark.anyio
+async def test_manual_ready_resolution_clears_historical_parse_markers(monkeypatch) -> None:
+    ticket = _ticket()
+    ticket.current_status_code = "manual_review"
+    ticket.missing_fields = {"request_date": "required"}
+    ticket.conflict_fields = {"postal_code": ["100094", "610000"]}
+
+    class Session:
+        async def get(self, model, identity, **_kwargs):
+            assert model is RepairTicket and identity == 1
+            return ticket
+
+    async def fake_sn(*_args, **_kwargs):
+        return {"ticket_id": 1, "status": "passed", "report": {"passed": True}}
+
+    async def fake_safety(*_args, **_kwargs):
+        return {
+            "passed": True,
+            "errors": {},
+            "sn_source": "local_sn_assets",
+            "snapshot_hash": "a" * 64,
+            "snapshot": {
+                "ticket_version": ticket.version + 1,
+                "language_code": "zh-CN",
+                "rma_required": False,
+            },
+        }
+
+    async def fake_transition(_session, *, ticket, **_kwargs):
+        ticket.current_status_code = "ready_for_export"
+        ticket.version += 1
+
+    monkeypatch.setattr(ticket_safety, "validate_ticket_sn_core", fake_sn)
+    monkeypatch.setattr(ticket_safety, "build_safety_report", fake_safety)
+    monkeypatch.setattr(ticket_safety, "transition_ticket", fake_transition)
+    monkeypatch.setattr(ticket_safety, "relay_configured", lambda: False)
+
+    result = await ticket_safety.validate_and_mark_ready_for_export(
+        Session(),
+        ticket_id=1,
+        user_id=7,
+        resolving_task_id=19,
+    )
+
+    assert result["status"] == "ready_for_export"
+    assert ticket.missing_fields == {}
+    assert ticket.conflict_fields == {}
+
+
+@pytest.mark.anyio
 async def test_changed_sn_input_marks_previous_validation_stale(monkeypatch) -> None:
     ticket = _ticket()
     item = _item()

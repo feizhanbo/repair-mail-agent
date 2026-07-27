@@ -1,10 +1,41 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any
 
 from app.config import settings
 from app.schemas.business import EmailIngestRequest
+from app.services.common import utcnow
+
+
+ARCHIVE_CONTENT_TYPES = {
+    "zip": "application/zip",
+    "rar": "application/vnd.rar",
+    "7z": "application/x-7z-compressed",
+    "tar": "application/x-tar",
+    "tar_gz": "application/gzip",
+    "gzip": "application/gzip",
+}
+ARCHIVE_MIME_FORMATS = {
+    "application/zip": "zip",
+    "application/x-zip": "zip",
+    "application/x-zip-compressed": "zip",
+    "application/rar": "rar",
+    "application/vnd.rar": "rar",
+    "application/x-rar": "rar",
+    "application/x-rar-compressed": "rar",
+    "application/x-7z-compressed": "7z",
+    "application/x-tar": "tar",
+    "application/x-gtar": "tar",
+    "application/gzip": "gzip",
+    "application/x-gzip": "gzip",
+}
+OFFICE_EXTENSIONS = {"docx", "xlsx"}
+OFFICE_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 
 @dataclass(frozen=True)
@@ -12,6 +43,108 @@ class AttachmentPrecheckResult:
     kept_count: int
     skipped_decorative_count: int
     skipped: tuple[dict[str, Any], ...]
+
+
+def _normalized_mime(value: Any) -> str:
+    return str(value or "").lower().split(";", 1)[0].strip()
+
+
+def _archive_format_from_name(file_name: str | None) -> str | None:
+    name = (file_name or "").lower().strip()
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "tar_gz"
+    return {
+        ".zip": "zip",
+        ".rar": "rar",
+        ".7z": "7z",
+        ".tar": "tar",
+        ".gz": "gzip",
+    }.get(PurePath(name).suffix.lower())
+
+
+def _archive_format_from_magic(content: bytes | None, *, file_name: str | None) -> str | None:
+    if not content:
+        return None
+    if content.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return "zip"
+    if content.startswith((b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")):
+        return "rar"
+    if content.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7z"
+    if len(content) >= 262 and content[257:262] == b"ustar":
+        return "tar"
+    if content.startswith(b"\x1f\x8b"):
+        return "tar_gz" if (file_name or "").lower().endswith((".tar.gz", ".tgz")) else "gzip"
+    return None
+
+
+def detect_archive_format(
+    *,
+    file_name: str | None,
+    content_type: str | None,
+    content: bytes | None = None,
+) -> tuple[str | None, list[str]]:
+    """Identify archive containers without opening or extracting their members."""
+    mime = _normalized_mime(content_type)
+    suffix = PurePath(file_name or "").suffix.lower().lstrip(".")
+    magic_format = _archive_format_from_magic(content, file_name=file_name)
+    is_office_declaration = suffix in OFFICE_EXTENSIONS or mime in OFFICE_MIME_TYPES
+    if is_office_declaration and magic_format in {None, "zip"}:
+        return None, []
+
+    name_format = _archive_format_from_name(file_name)
+    mime_format = ARCHIVE_MIME_FORMATS.get(mime)
+    detected = magic_format or name_format or mime_format
+    if detected == "gzip" and name_format == "tar_gz":
+        detected = "tar_gz"
+
+    def compatible(left: str, right: str) -> bool:
+        return left == right or {left, right} <= {"gzip", "tar_gz"}
+
+    warnings: list[str] = []
+    declared = [value for value in (name_format, mime_format) if value]
+    if magic_format and any(not compatible(magic_format, value) for value in declared):
+        warnings.append("TYPE_DECLARATION_MISMATCH")
+    elif name_format and mime_format and not compatible(name_format, mime_format):
+        warnings.append("TYPE_DECLARATION_MISMATCH")
+    elif is_office_declaration and magic_format:
+        warnings.append("TYPE_DECLARATION_MISMATCH")
+    return detected, warnings
+
+
+def engineering_reference_metadata(archive_format: str, warnings: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "file_type": "archive",
+        "detected_format": archive_format,
+        "attachment_role": "engineering_reference",
+        "business_required": False,
+        "ai_parse_required": False,
+        "blocks_ticket_flow": False,
+        "security_status": "unscanned_archive",
+        "parse_skip_reason": "ENGINEERING_REFERENCE_NOT_REQUIRED",
+        "detection_warnings": list(warnings or []),
+        "classified_at": utcnow().isoformat(),
+    }
+
+
+def classify_engineering_reference(attachment: dict[str, Any], blob: dict[str, Any]) -> str | None:
+    content = blob.get("content")
+    archive_format, warnings = detect_archive_format(
+        file_name=str(blob.get("file_name") or attachment.get("file_name") or ""),
+        content_type=str(blob.get("content_type") or attachment.get("content_type") or ""),
+        content=content if isinstance(content, bytes) else None,
+    )
+    if not archive_format:
+        return None
+
+    content_type = ARCHIVE_CONTENT_TYPES[archive_format]
+    attachment["content_type"] = content_type
+    attachment["parse_status"] = "skipped"
+    attachment["extracted_text"] = None
+    attachment["extracted_json"] = engineering_reference_metadata(archive_format, warnings)
+    attachment["parse_error"] = None
+    blob["content_type"] = content_type
+    return archive_format
 
 
 def image_dimensions(content: bytes) -> tuple[int, int] | None:
@@ -74,6 +207,7 @@ def filter_decorative_attachments(
                 }
             )
             continue
+        classify_engineering_reference(attachment, blob)
         kept_payloads.append(attachment)
         kept_blobs.append(blob)
 

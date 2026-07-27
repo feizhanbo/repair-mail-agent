@@ -35,7 +35,7 @@ function targetPath(record: NotificationEvent) {
 export default function NotificationCenterPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'read' | 'resolved'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'read'>('all');
   const params = { page: 1, page_size: 50, delivery_status: activeTab === 'all' ? undefined : activeTab };
   const query = useQuery({
     queryKey: ['notification-center', params],
@@ -78,12 +78,11 @@ export default function NotificationCenterPage() {
       <SectionPanel className="notification-center-panel">
         <Tabs
           activeKey={activeTab}
-          onChange={(value) => setActiveTab(value as 'all' | 'pending' | 'read' | 'resolved')}
+          onChange={(value) => setActiveTab(value as 'all' | 'pending' | 'read')}
           items={[
             { key: 'all', label: '全部通知' },
             { key: 'pending', label: '未读' },
             { key: 'read', label: '已读' },
-            { key: 'resolved', label: '已解决' },
           ]}
         />
         {list.length ? (

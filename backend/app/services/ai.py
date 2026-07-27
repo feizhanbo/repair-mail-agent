@@ -14,10 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.repair_items import canonical_sn, normalize_repair_item, normalize_repair_items
 from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
 from app.integrations.qwen_provider import QwenProvider
-from app.models import AiCallLog, Email, EmailAttachment, OssObject, ParseResult, RepairTicket, SnAsset
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, SnAsset
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
@@ -617,6 +618,39 @@ def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) ->
     attachment_chars = 0
     for attachment in attachments:
         extracted_json = attachment.extracted_json
+        if (
+            isinstance(extracted_json, dict)
+            and extracted_json.get("attachment_role") == "engineering_reference"
+        ):
+            metadata_keys = (
+                "file_type",
+                "detected_format",
+                "attachment_role",
+                "business_required",
+                "ai_parse_required",
+                "blocks_ticket_flow",
+                "security_status",
+                "parse_skip_reason",
+                "detection_warnings",
+                "classified_at",
+            )
+            item = {
+                "id": attachment.id,
+                "file_name": attachment.file_name,
+                "content_type": attachment.content_type,
+                "parse_status": attachment.parse_status,
+                "classification": {
+                    key: extracted_json[key]
+                    for key in metadata_keys
+                    if key in extracted_json
+                },
+            }
+            item_chars = len(_safe_json(item))
+            if attachment_chars + item_chars > attachment_budget:
+                break
+            attachment_items.append(item)
+            attachment_chars += item_chars
+            continue
         extracted_json_text = _safe_json(extracted_json) if extracted_json else ""
         if len(extracted_json_text) > 3000:
             extracted_json = {
@@ -702,20 +736,20 @@ def _structured_attachment_business_data(
         for index, raw_item in enumerate(attachment_items, start=1):
             if not isinstance(raw_item, dict):
                 continue
-            serial_number = str(raw_item.get("serial_number") or "").strip()
-            sn = str(raw_item.get("sn") or raw_item.get("part_serial_no") or "").strip()
-            if not sn and serial_number and (not serial_number.isdigit() or len(serial_number) >= 6):
-                sn = serial_number
+            normalized_item = normalize_repair_item(raw_item, default_line_no=index)
             item = {
-                "line_no": int(serial_number) if serial_number.isdigit() else index,
-                "sn": sn or None,
-                "material_code": raw_item.get("material_code"),
-                "material_name": raw_item.get("material_name"),
-                "board_model": raw_item.get("board_model"),
-                "failure_description": raw_item.get("failure_description"),
-                "failure_information": raw_item.get("failure_information"),
-                "data_info": raw_item.get("data"),
-                "remarks": raw_item.get("remarks"),
+                "line_no": normalized_item.get("line_no", index),
+                "sn": normalized_item.get("sn"),
+                "material_code": normalized_item.get("material_code"),
+                "material_name": normalized_item.get("material_name"),
+                "board_model": normalized_item.get("board_model"),
+                "failure_description": (
+                    normalized_item.get("failure_description")
+                    or normalized_item.get("failure_information")
+                ),
+                "failure_information": normalized_item.get("failure_information"),
+                "data_info": normalized_item.get("data"),
+                "remarks": normalized_item.get("remarks"),
             }
             items.append({key: value for key, value in item.items() if value is not None and str(value).strip()})
     if not fields.get("problem_description"):
@@ -743,18 +777,33 @@ def _merge_attachment_business_data(
         elif str(existing).strip().casefold() != str(value).strip().casefold():
             conflicts.setdefault(name, "AI extraction conflicts with deterministic attachment parsing.")
 
-    items = [dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)]
-    for index, attachment_item in enumerate(attachment_items):
-        if index >= len(items):
-            items.append(dict(attachment_item))
+    ai_items = normalize_repair_items(
+        dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)
+    )
+    deterministic_items = normalize_repair_items(attachment_items)
+    ai_sns = {canonical_sn(item) for item in ai_items if canonical_sn(item)}
+    deterministic_sns = {canonical_sn(item) for item in deterministic_items if canonical_sn(item)}
+    if ai_sns and deterministic_sns and ai_sns != deterministic_sns:
+        conflicts.setdefault("sn", "AI extraction conflicts with deterministic attachment parsing.")
+
+    items_by_sn = {canonical_sn(item): item for item in ai_items if canonical_sn(item)}
+    items = list(ai_items)
+    for attachment_item in deterministic_items:
+        sn = canonical_sn(attachment_item)
+        target = items_by_sn.get(sn) if sn else None
+        if target is None:
+            target = dict(attachment_item)
+            items.append(target)
+            if sn:
+                items_by_sn[sn] = target
             continue
-        target = items[index]
         for name, value in attachment_item.items():
-            existing = target.get(name)
-            if existing is None or not str(existing).strip():
+            if (
+                (target.get(name) is None or (isinstance(target.get(name), str) and not target.get(name).strip()))
+                and value is not None
+                and (not isinstance(value, str) or bool(value.strip()))
+            ):
                 target[name] = value
-            elif name == "sn" and str(existing).strip().casefold() != str(value).strip().casefold():
-                conflicts.setdefault("sn", "AI extraction conflicts with deterministic attachment parsing.")
 
     evidence = dict(parsed.evidence or {})
     evidence["structured_attachment_source_ids"] = source_ids
@@ -764,6 +813,63 @@ def _merge_attachment_business_data(
     parsed.field_confidences = confidences
     parsed.evidence = evidence
     return parsed
+
+
+async def _request_date_source(
+    session: AsyncSession,
+    *,
+    email: Email,
+    intent_type: str | None,
+) -> tuple[Email, RepairTicket | None]:
+    if intent_type != "customer_supplement" or not email.thread_id:
+        return email, None
+    thread = await session.get(EmailThread, email.thread_id)
+    ticket = await session.get(RepairTicket, thread.ticket_id) if thread and thread.ticket_id else None
+    if ticket and ticket.source_email_id:
+        source_email = await session.get(Email, ticket.source_email_id)
+        if source_email is not None:
+            return source_email, ticket
+    source_email = await session.scalar(
+        select(Email)
+        .where(Email.thread_id == email.thread_id, Email.mail_direction == "inbound")
+        .order_by(Email.sent_at.asc(), Email.received_at.asc(), Email.id.asc())
+        .limit(1)
+    )
+    return source_email or email, ticket
+
+
+def _apply_request_date_fallback(
+    *,
+    fields: dict[str, Any],
+    evidence: dict[str, Any],
+    field_confidences: dict[str, float],
+    source_email: Email,
+    existing_request_date: Any | None = None,
+) -> None:
+    if existing_request_date:
+        fields["request_date"] = (
+            existing_request_date.isoformat()
+            if hasattr(existing_request_date, "isoformat")
+            else str(existing_request_date)
+        )
+        evidence.setdefault("derived_fields", {})["request_date"] = {
+            "source": "existing_ticket",
+            "email_id": source_email.id,
+        }
+        field_confidences["request_date"] = 1.0
+        return
+    if fields.get("request_date"):
+        return
+    source_time = source_email.sent_at or source_email.received_at
+    if source_time is None:
+        return
+    fields["request_date"] = source_time.date().isoformat()
+    evidence.setdefault("derived_fields", {})["request_date"] = {
+        "source": "email_sent_at" if source_email.sent_at else "email_received_at",
+        "email_id": source_email.id,
+        "timestamp": source_time.isoformat(),
+    }
+    field_confidences["request_date"] = 1.0
 
 
 async def _enrich_ai_quality(
@@ -781,6 +887,23 @@ async def _enrich_ai_quality(
     evidence = dict(parsed.evidence or {})
     confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
+
+    normalized_items = normalize_repair_items(
+        dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)
+    )
+    parsed.extracted_items = normalized_items
+    if not fields.get("problem_description"):
+        descriptions = [
+            str(item.get("failure_description")).strip()
+            for item in normalized_items
+            if item.get("failure_description") and str(item.get("failure_description")).strip()
+        ]
+        if descriptions:
+            fields["problem_description"] = "\n".join(dict.fromkeys(descriptions))
+            field_confidences["problem_description"] = max(
+                float(field_confidences.get("problem_description") or 0),
+                0.95,
+            )
 
     if not fields.get("contact_email") and _valid_email(email.from_address):
         fields["contact_email"] = parseaddr(email.from_address)[1] or email.from_address
@@ -808,6 +931,20 @@ async def _enrich_ai_quality(
                     invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
             if invalid_sns:
                 conflicts.setdefault("sn", "；".join(invalid_sns))
+
+    if parsed.intent_type in {"new_repair", "customer_supplement"}:
+        source_email, existing_ticket = await _request_date_source(
+            session,
+            email=email,
+            intent_type=parsed.intent_type,
+        )
+        _apply_request_date_fallback(
+            fields=fields,
+            evidence=evidence,
+            field_confidences=field_confidences,
+            source_email=source_email,
+            existing_request_date=existing_ticket.request_date if existing_ticket else None,
+        )
 
     missing = required_missing_for_values(
         intent_type=parsed.intent_type,

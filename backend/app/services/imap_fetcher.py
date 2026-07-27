@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -23,6 +23,7 @@ from app.services.common import utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload, precheck_imap_uid
 from app.services.jobs import enqueue_job
+from app.services.logging_safety import safe_error_code
 
 
 class ImapConfigurationError(RuntimeError):
@@ -133,6 +134,30 @@ async def _find_fetch_record(
             MailFetchRecord.imap_uid == imap_uid,
         )
     )
+
+
+async def _due_retry_uids(
+    session: AsyncSession,
+    *,
+    folder_name: str,
+    uid_validity: int,
+) -> list[str]:
+    rows = (
+        await session.execute(
+            select(MailFetchRecord.imap_uid).where(
+                MailFetchRecord.mailbox_account == settings.IMAP_USER,
+                MailFetchRecord.folder_name == folder_name,
+                MailFetchRecord.uid_validity == uid_validity,
+                MailFetchRecord.fetch_status.in_(("retry_wait", "failed")),
+                MailFetchRecord.attempt_count < settings.IMAP_MAX_RETRIES,
+                or_(
+                    MailFetchRecord.next_retry_at.is_(None),
+                    MailFetchRecord.next_retry_at <= utcnow(),
+                ),
+            )
+        )
+    ).scalars().all()
+    return [str(uid) for uid in rows]
 
 
 async def _save_fetch_result(
@@ -271,6 +296,9 @@ async def fetch_imap_emails(
             processed_count=0,
             success_count=0,
             failed_count=0,
+            attempt_count=1,
+            locked_at=utcnow(),
+            locked_by="direct-imap-fetch",
             metadata_json={},
         )
         session.add(job)
@@ -293,6 +321,14 @@ async def fetch_imap_emails(
         uid_validity = await _select_readonly(client, folder_name)
         job.metadata_json = {**dict(job.metadata_json or {}), "uid_validity": uid_validity}
         uids = await _mail_io(_uid_search, client, message_id=message_id, unseen_only=unseen_only)
+        retry_uid_set: set[str] = set()
+        if message_id is None:
+            retry_uids = await _due_retry_uids(session, folder_name=folder_name, uid_validity=uid_validity)
+            retry_uid_set = set(retry_uids)
+            for retry_uid in retry_uids:
+                normalized_uid = str(retry_uid)
+                if normalized_uid not in uids:
+                    uids.append(normalized_uid)
         uids.sort(key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
         # The mailbox remains unread by design. Remove already handled/not-due
         # UIDs before applying the batch limit, otherwise the newest handled
@@ -432,7 +468,14 @@ async def fetch_imap_emails(
                 attempt_count = (existing_failure.attempt_count if existing_failure else 0) + 1
                 retry_index = min(attempt_count - 1, len(_RETRY_MINUTES) - 1)
                 next_retry_at = utcnow() + timedelta(minutes=_RETRY_MINUTES[retry_index])
-                error_code = exc.code if isinstance(exc, EmailArchivalError) else exc.__class__.__name__
+                if isinstance(exc, EmailArchivalError):
+                    error_code = exc.code
+                elif isinstance(exc, (ImapFetchError, ImapConfigurationError)):
+                    error_code = str(exc) or exc.__class__.__name__
+                else:
+                    error_code = safe_error_code(exc, exc.__class__.__name__.upper()) or "IMAP_MESSAGE_FAILED"
+                if uid in retry_uid_set and error_code in {"IMAP_FETCH_FAILED", "IMAP_FETCH_EMPTY"}:
+                    error_code = "IMAP_UID_NOT_FOUND"
                 if existing_failure is None:
                     existing_failure = MailFetchRecord(
                         mailbox_account=settings.IMAP_USER,
@@ -454,6 +497,7 @@ async def fetch_imap_emails(
         job.status = "success" if not failures else "partial_success"
     except Exception as exc:
         job.status = "failed"
+        job.error_code = safe_error_code(exc, "IMAP_FETCH_FAILED")
         job.error_message = exc.__class__.__name__
         await _commit(session)
         raise
@@ -463,6 +507,8 @@ async def fetch_imap_emails(
         metadata = dict(job.metadata_json or {})
         metadata["skipped_count"] = skipped_count
         job.metadata_json = metadata
+        job.locked_at = None
+        job.locked_by = None
         if client is not None:
             try:
                 await _mail_io(client.close)

@@ -49,6 +49,7 @@ import type {
   TicketDetail,
   TicketLine,
 } from '../types/api';
+import { ARCHIVE_DOWNLOAD_WARNING, attachmentTypeLabel, isEngineeringReference } from '../utils/attachments';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatFileSizeKb, formatTime, numberText } from '../utils/format';
 import { saveBlob } from '../utils/download';
@@ -545,6 +546,19 @@ function TicketDetailView({
     },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
+  const downloadAttachment = (record: Attachment) => {
+    if (!isEngineeringReference(record)) {
+      attachmentDownloadMutation.mutate(record.id);
+      return;
+    }
+    Modal.confirm({
+      title: '下载工程辅助资料？',
+      content: ARCHIVE_DOWNLOAD_WARNING,
+      okText: '继续下载',
+      cancelText: '取消',
+      onOk: () => attachmentDownloadMutation.mutate(record.id),
+    });
+  };
 
   return (
     <div className="drawer-stack">
@@ -730,10 +744,11 @@ function TicketDetailView({
                   { title: '文件名', dataIndex: 'file_name', ellipsis: true },
                   { title: '邮件 ID', dataIndex: 'email_id', width: 90 },
                   { title: '类型', dataIndex: 'content_type', width: 160, render: (value?: string) => value || '-' },
-                  { title: '附件类型', dataIndex: 'is_inline', width: 110, render: (value?: boolean | null) => value ? '正文嵌入附件' : '普通附件' },
+                  { title: '附件类型', width: 170, render: (_, record) => attachmentTypeLabel(record) },
                   { title: '发送时间', dataIndex: 'sent_at', width: 150, render: formatTime },
                   { title: '大小', dataIndex: 'file_size_kb', width: 100, render: (_value, record) => formatFileSizeKb(record.file_size_kb, record.file_size) },
-                  { title: '解析状态', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
+                  { title: '解析状态', dataIndex: 'parse_status', width: 150, render: (value: string, record) => <StatusTag value={isEngineeringReference(record) ? 'engineering_reference_stored' : value} kind="parse" /> },
+                  { title: '安全提示', width: 140, render: (_, record) => isEngineeringReference(record) ? <Typography.Text type="warning">未经内容扫描</Typography.Text> : '-' },
                   { title: '解析错误', dataIndex: 'parse_error', ellipsis: true, render: (value?: string) => value || '-' },
                   {
                     title: '操作',
@@ -747,7 +762,7 @@ function TicketDetailView({
                           icon={<DownloadOutlined />}
                           disabled={!record.oss_object_id}
                           loading={attachmentDownloadMutation.isPending}
-                          onClick={() => attachmentDownloadMutation.mutate(record.id)}
+                          onClick={() => downloadAttachment(record)}
                           title="下载"
                         />
                       </Space>

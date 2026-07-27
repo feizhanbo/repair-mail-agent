@@ -6,22 +6,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ManualReviewTask, NotificationEvent, RepairTicket, Role, TicketStatusLog, User, UserRole, WorkflowStatus, WorkflowTransition
+from app.models import ManualReviewTask, NotificationEvent, RepairTicket, TicketStatusLog, WorkflowStatus, WorkflowTransition
 from app.services.audit import create_notification, log_operation
 from app.services.common import utcnow
+from app.services.routing import choose_available_operator
 
 OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
-
-
-async def _active_operator(session: AsyncSession, user_id: int | None) -> User | None:
-    if user_id is None:
-        return None
-    return await session.scalar(
-        select(User)
-        .join(UserRole, UserRole.user_id == User.id)
-        .join(Role, Role.id == UserRole.role_id)
-        .where(User.id == user_id, User.status == "active", Role.role_code == "operator")
-    )
 
 
 def task_type_for_event(trigger_event: str) -> str:
@@ -55,16 +45,44 @@ async def create_manual_task_if_missing(
     )
     existing = result.scalars().first()
     if existing is not None:
+        owner = await choose_available_operator(
+            session,
+            existing.assigned_user_id or assigned_user_id or ticket.assigned_user_id,
+        )
+        if owner is not None and (existing.status == "assignment_failed" or existing.assigned_user_id != owner.id):
+            from app.services.notifications import resolve_notifications_for_target
+
+            existing.status = "pending"
+            existing.assigned_user_id = owner.id
+            existing.claimed_by_user_id = None
+            existing.claimed_at = None
+            await resolve_notifications_for_target(
+                session,
+                target_type="manual_review_task",
+                target_id=existing.id,
+            )
+            await create_notification(
+                session,
+                event_type="manual_review_assigned",
+                target_type="manual_review_task",
+                target_id=existing.id,
+                title="人工复核任务已重新分配",
+                content=trigger_reason or existing.trigger_reason,
+                priority=priority,
+                recipient_user_id=owner.id,
+                recipient_role_code=None,
+                metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
+            )
         return existing
 
     sticky_assignee = assigned_user_id or ticket.assigned_user_id
-    owner = await _active_operator(session, sticky_assignee)
+    owner = await choose_available_operator(session, sticky_assignee)
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
         task_type=task_type,
         priority=priority,
-        status="pending" if owner is not None else "assignment_failed",
+        status="pending",
         description=f"工单 {ticket.ticket_no} 需要人工复核。",
         trigger_reason=trigger_reason,
         assigned_user_id=owner.id if owner is not None else None,
@@ -117,12 +135,23 @@ async def transition_ticket(
     metadata: dict[str, Any] | None = None,
     manual_task_type: str | None = None,
     manual_task_priority: str | None = None,
+    resolving_task_id: int | None = None,
 ) -> RepairTicket:
     from_status_code = ticket.current_status_code
     if from_status_code == "closed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TICKET_ALREADY_CLOSED")
     if to_status_code == "ready_for_export" and not (metadata or {}).get("safety_check_hash"):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
+    if from_status_code == "manual_review" and to_status_code != "manual_review":
+        blocker_query = select(ManualReviewTask.id).where(
+            ManualReviewTask.ticket_id == ticket.id,
+            ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+        )
+        if resolving_task_id is not None:
+            blocker_query = blocker_query.where(ManualReviewTask.id != resolving_task_id)
+        blocker_id = await session.scalar(blocker_query.limit(1))
+        if blocker_id is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_TASKS_UNRESOLVED")
 
     target_status = await session.scalar(
         select(WorkflowStatus).where(WorkflowStatus.status_code == to_status_code, WorkflowStatus.enabled == True)  # noqa: E712
@@ -175,26 +204,6 @@ async def transition_ticket(
             priority=manual_task_priority or ("high" if trigger_event in {"system_error", "field_conflict"} else "normal"),
             email_id=ticket.source_email_id,
         )
-    elif from_status_code == "manual_review":
-        from app.services.notifications import resolve_notifications_for_target
-
-        open_tasks = (
-            await session.execute(
-                select(ManualReviewTask).where(
-                    ManualReviewTask.ticket_id == ticket.id,
-                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
-                )
-            )
-        ).scalars().all()
-        for task in open_tasks:
-            task.status = "closed"
-            task.resolved_at = task.resolved_at or utcnow()
-            task.resolution = task.resolution or f"Ticket transitioned to {to_status_code}"
-            await resolve_notifications_for_target(
-                session,
-                target_type="manual_review_task",
-                target_id=task.id,
-            )
     return ticket
 
 

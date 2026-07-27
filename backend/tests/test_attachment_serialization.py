@@ -30,5 +30,5 @@ def test_serialize_attachment_uses_email_sent_time_and_kb_size() -> None:
 
     data = serialize_attachment(attachment, email)
 
-    assert data["sent_at"] == "2026-07-16T10:30:00"
+    assert data["sent_at"] == "2026-07-16T10:30:00+00:00"
     assert data["file_size_kb"] == 2

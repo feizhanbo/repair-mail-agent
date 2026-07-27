@@ -51,6 +51,15 @@ def _reply() -> SimpleNamespace:
     )
 
 
+def test_followup_headers_keep_original_mail_thread() -> None:
+    assert replies._reply_subject("Re: Repair request SN001", "RMA001") == "Re: Repair request SN001"
+    assert replies._message_id_chain(
+        "<root@example.com> <older@example.com>",
+        "<current@example.com>",
+        "<root@example.com>",
+    ) == "<root@example.com> <older@example.com> <current@example.com>"
+
+
 def test_send_reply_uses_smtp_ssl_for_port_465(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple] = []
     _configure_smtp(monkeypatch, port=465)

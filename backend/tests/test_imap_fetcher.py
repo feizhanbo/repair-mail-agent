@@ -36,6 +36,9 @@ class FakeSession:
     async def scalar(self, _statement):
         return self.scalar_result
 
+    async def execute(self, _statement):
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
     async def flush(self) -> None:
         for instance in self.added:
             if getattr(instance, "id", None) is None:
@@ -381,3 +384,42 @@ async def test_retry_success_updates_existing_uidvalidity_record(monkeypatch: py
     assert existing.attempt_count == 2
     assert existing.next_retry_at is None
     assert [item for item in session.added if isinstance(item, MailFetchRecord)] == []
+
+
+@pytest.mark.anyio
+async def test_due_seen_retry_uid_is_merged_with_unseen_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    client = MultiUidImapClient(["101"])
+    ingested: list[str] = []
+
+    async def due_retries(*_args, **_kwargs):
+        return ["99"]
+
+    async def allow_uid(*_args, **_kwargs):
+        return None
+
+    async def fake_archive(*_args, **_kwargs):
+        return None
+
+    async def fake_ingest(_session, *, payload, **_kwargs):
+        ingested.append(payload.imap_uid)
+        return {"duplicate": False, "email": {"id": len(ingested), "parse_status": "pending"}}
+
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher, "_due_retry_uids", due_retries)
+    monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", allow_uid)
+    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+
+    result = await imap_fetcher.fetch_imap_emails(
+        session,
+        limit=2,
+        unseen_only=True,
+        auto_parse=False,
+        archive_to_oss=True,
+        user_id=7,
+    )
+
+    assert result["processed_count"] == 2
+    assert ingested == ["99", "101"]

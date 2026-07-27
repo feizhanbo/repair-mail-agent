@@ -65,7 +65,7 @@ async def test_manual_task_is_pending_with_system_owner(monkeypatch: pytest.Monk
 
 
 @pytest.mark.anyio
-async def test_missing_required_operator_becomes_assignment_failed_and_notifies_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_required_operator_stays_visible_and_notifies_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     session = Session(None)
     notices: list[dict] = []
 
@@ -77,7 +77,7 @@ async def test_missing_required_operator_becomes_assignment_failed_and_notifies_
 
     task = await workflow.create_manual_task_if_missing(session, ticket=ticket, task_type="manual")
 
-    assert task.status == "assignment_failed"
+    assert task.status == "pending"
     assert task.assigned_user_id is None
     assert notices[0]["event_type"] == "manual_review_assignment_failed"
     assert notices[0]["recipient_role_code"] == "admin"
@@ -110,3 +110,22 @@ async def test_missing_user_notification_state_returns_explicit_404(monkeypatch:
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "NOTIFICATION_NOT_FOUND"
+
+
+@pytest.mark.anyio
+async def test_manual_review_cannot_leave_while_another_task_is_open() -> None:
+    class BlockingSession:
+        async def scalar(self, _statement):
+            return 42
+
+    ticket = SimpleNamespace(id=8, current_status_code="manual_review")
+    with pytest.raises(HTTPException) as exc_info:
+        await workflow.transition_ticket(
+            BlockingSession(),
+            ticket=ticket,
+            to_status_code="need_customer_info",
+            trigger_event="manual_resolved",
+            resolving_task_id=7,
+        )
+    assert exc_info.value.detail == "MANUAL_TASKS_UNRESOLVED"
+    assert ticket.current_status_code == "manual_review"

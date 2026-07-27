@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import smtplib
 from datetime import date
 from email.message import EmailMessage
@@ -70,6 +71,36 @@ REPLY_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+def _message_id_chain(*values: str | None) -> str | None:
+    message_ids: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        found = re.findall(r"<[^<>\s]+>", value)
+        if not found and "@" in value:
+            found = [value if value.startswith("<") else f"<{value.strip('<>')}>"]
+        for message_id in found:
+            if message_id not in message_ids:
+                message_ids.append(message_id)
+    return " ".join(message_ids[-50:]) or None
+
+
+def _reply_subject(subject: str | None, ticket_no: str) -> str:
+    base = (subject or f"Repair request {ticket_no}").strip()
+    base = re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", base, flags=re.IGNORECASE).strip()
+    return f"Re: {base}"[:500]
+
+
+async def _latest_customer_email(session: AsyncSession, ticket: RepairTicket) -> Email | None:
+    return await session.scalar(
+        select(Email)
+        .join(EmailTicketLink, EmailTicketLink.email_id == Email.id)
+        .where(EmailTicketLink.ticket_id == ticket.id, Email.mail_direction == "inbound")
+        .order_by(Email.received_at.desc(), Email.id.desc())
+        .limit(1)
+    )
 
 RMA_ZH_SUBJECT = "RMA维修授权：{{ ticket_no }} {{ customer_name }}"
 RMA_REPLY_ZH_VERSION = "rma_reply_zh_v1"
@@ -699,7 +730,7 @@ async def _send_reply_record(
                 )
         if is_followup_reply_type(reply.reply_type) and not was_counted:
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
-        if is_followup_reply_type(reply.reply_type) and ticket.current_status_code in {"need_customer_info", "manual_review"}:
+        if is_followup_reply_type(reply.reply_type) and ticket.current_status_code == "need_customer_info":
             await transition_ticket(
                 session,
                 ticket=ticket,
@@ -762,7 +793,14 @@ async def create_reply_draft(
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
-    effective_related_email_id = related_email_id or ticket.source_email_id
+    if is_followup_reply_type(reply_kind) and ticket.current_status_code != "need_customer_info":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="FOLLOWUP_TICKET_NOT_WAITING_CUSTOMER_INFO")
+    related_email = await session.get(Email, related_email_id) if related_email_id else None
+    if related_email is None and is_followup_reply_type(reply_kind):
+        related_email = await _latest_customer_email(session, ticket)
+    if related_email is None and ticket.source_email_id:
+        related_email = await session.get(Email, ticket.source_email_id)
+    effective_related_email_id = related_email.id if related_email else None
     existing_draft = await session.scalar(
         select(ReplyRecord)
         .where(
@@ -800,7 +838,6 @@ async def create_reply_draft(
 
     template = await _select_template(session, reply_kind, language)
 
-    related_email = await session.get(Email, effective_related_email_id) if effective_related_email_id else None
     effective_missing_fields = missing_fields if missing_fields is not None else ticket.missing_fields
     if template is None:
         fallback_subject, fallback_body = _fallback_reply_content(reply_kind, ticket=ticket, missing_fields=effective_missing_fields)
@@ -843,6 +880,9 @@ async def create_reply_draft(
         reply_risk_level = ai_draft.get("risk_level")
         ai_call_log_id = ai_draft["ai_call_log"].id
         generate_source = "ai"
+    if is_followup_reply_type(reply_kind):
+        source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
+        subject = _reply_subject(source_email.subject if source_email else related_email.subject if related_email else None, ticket.ticket_no)
     reply = ReplyRecord(
         ticket_id=ticket.id,
         related_email_id=related_email.id if related_email else None,
@@ -851,7 +891,7 @@ async def create_reply_draft(
         followup_round=(ticket.followup_count + 1) if is_followup_reply_type(reply_kind) else ticket.followup_count,
         missing_fields=effective_missing_fields,
         to_addresses=TEST_MAIL_RECIPIENT,
-        cc_addresses=related_email.cc_addresses if related_email else None,
+        cc_addresses=None,
         subject=subject,
         draft_body=body,
         final_body=body,
@@ -860,7 +900,11 @@ async def create_reply_draft(
         review_status="pending",
         send_status="pending_review",
         in_reply_to=related_email.message_id if related_email else None,
-        references_header=related_email.references_header if related_email else None,
+        references_header=(
+            _message_id_chain(related_email.references_header, related_email.message_id)
+            if related_email
+            else None
+        ),
     )
     session.add(reply)
     await session.flush()
@@ -1027,7 +1071,7 @@ async def reconcile_uncertain_reply(
         reply.error_message = None
         if is_followup_reply_type(reply.reply_type):
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
-            if ticket.current_status_code in {"need_customer_info", "manual_review"}:
+            if ticket.current_status_code == "need_customer_info":
                 await transition_ticket(
                     session,
                     ticket=ticket,
@@ -1200,7 +1244,11 @@ async def create_and_send_rma_authorization(
         reviewed_at=utcnow() if settings.AUTO_SEND_ENABLED else None,
         send_status="approved_pending_send" if settings.AUTO_SEND_ENABLED else "pending_review",
         in_reply_to=related_email.message_id if related_email else None,
-        references_header=related_email.references_header if related_email else None,
+        references_header=(
+            _message_id_chain(related_email.references_header, related_email.message_id)
+            if related_email
+            else None
+        ),
     )
     session.add(reply)
     await session.flush()

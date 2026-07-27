@@ -7,11 +7,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.config import settings
-from app.models import AiCallLog, EmailAttachment
+from app.models import AiCallLog, Email, EmailAttachment
 from app.schemas.business import EmailIngestRequest
-from app.services import email_preview
+from app.services import ai, email_preview
 from app.services.ai import read_ai_log_detail, sanitize_ai_detail
-from app.services.attachment_precheck import filter_decorative_attachments
+from app.services.attachment_precheck import (
+    detect_archive_format,
+    engineering_reference_metadata,
+    filter_decorative_attachments,
+)
 from app.services.email_preview import build_attachment_preview, sanitize_email_html
 from app.services.common import sha256_text
 
@@ -52,6 +56,152 @@ def test_decorative_inline_image_is_removed_before_archival() -> None:
     assert [item["file_name"] for item in kept] == ["fault.png"]
     assert [item["file_name"] for item in payload.attachments] == ["fault.png"]
     assert result.skipped_decorative_count == 1
+
+
+@pytest.mark.parametrize(
+    ("file_name", "content_type", "content", "expected_format"),
+    [
+        ("files.zip", "application/zip", b"PK\x03\x04data", "zip"),
+        ("files.rar", "application/vnd.rar", b"Rar!\x1a\x07\x00data", "rar"),
+        ("files.7z", "application/x-7z-compressed", b"7z\xbc\xaf\x27\x1cdata", "7z"),
+        ("files.tar", "application/x-tar", b"\x00" * 257 + b"ustar" + b"\x00", "tar"),
+        ("files.tar.gz", "application/gzip", b"\x1f\x8bdata", "tar_gz"),
+        ("files.tgz", "application/gzip", b"\x1f\x8bdata", "tar_gz"),
+        ("files.gz", "application/gzip", b"\x1f\x8bdata", "gzip"),
+        ("20260629_934", "application/octet-stream", b"PK\x03\x04data", "zip"),
+    ],
+)
+def test_archive_detector_uses_magic_mime_and_filename(
+    file_name: str,
+    content_type: str,
+    content: bytes,
+    expected_format: str,
+) -> None:
+    detected, warnings = detect_archive_format(
+        file_name=file_name,
+        content_type=content_type,
+        content=content,
+    )
+
+    assert detected == expected_format
+    assert warnings == []
+
+
+def test_archive_detector_prefers_magic_and_records_declaration_mismatch() -> None:
+    detected, warnings = detect_archive_format(
+        file_name="self-check.rar",
+        content_type="application/vnd.rar",
+        content=b"PK\x03\x04data",
+    )
+
+    assert detected == "zip"
+    assert warnings == ["TYPE_DECLARATION_MISMATCH"]
+
+
+def test_archive_detector_records_mime_mismatch_even_when_extension_matches_magic() -> None:
+    detected, warnings = detect_archive_format(
+        file_name="self-check.zip",
+        content_type="application/vnd.rar",
+        content=b"PK\x03\x04data",
+    )
+
+    assert detected == "zip"
+    assert warnings == ["TYPE_DECLARATION_MISMATCH"]
+
+
+def test_non_zip_magic_overrides_false_office_declaration() -> None:
+    detected, warnings = detect_archive_format(
+        file_name="self-check.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content=b"Rar!\x1a\x07\x00data",
+    )
+
+    assert detected == "rar"
+    assert warnings == ["TYPE_DECLARATION_MISMATCH"]
+
+
+@pytest.mark.parametrize(
+    ("file_name", "content_type"),
+    [
+        ("repair.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("repair.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ],
+)
+def test_office_open_xml_is_not_classified_as_engineering_archive(file_name: str, content_type: str) -> None:
+    detected, warnings = detect_archive_format(
+        file_name=file_name,
+        content_type=content_type,
+        content=b"PK\x03\x04data",
+    )
+
+    assert detected is None
+    assert warnings == []
+
+
+def test_archive_is_marked_as_non_blocking_engineering_reference_before_archival() -> None:
+    payload = EmailIngestRequest(
+        mailbox_account="test",
+        from_address="sender@example.com",
+        attachments=[{"file_name": "20260629_934", "content_type": "application/octet-stream"}],
+    )
+    blobs = [{"file_name": "20260629_934", "content_type": "application/octet-stream", "content": b"PK\x03\x04data"}]
+
+    kept, result = filter_decorative_attachments(payload, blobs)
+
+    assert result.kept_count == 1
+    assert kept[0]["content_type"] == "application/zip"
+    attachment = payload.attachments[0]
+    assert attachment["content_type"] == "application/zip"
+    assert attachment["parse_status"] == "skipped"
+    assert attachment["parse_error"] is None
+    assert attachment["extracted_text"] is None
+    metadata = attachment["extracted_json"]
+    assert metadata["file_type"] == "archive"
+    assert metadata["detected_format"] == "zip"
+    assert metadata["attachment_role"] == "engineering_reference"
+    assert metadata["business_required"] is False
+    assert metadata["ai_parse_required"] is False
+    assert metadata["blocks_ticket_flow"] is False
+    assert metadata["security_status"] == "unscanned_archive"
+    assert metadata["parse_skip_reason"] == "ENGINEERING_REFERENCE_NOT_REQUIRED"
+    assert metadata["detection_warnings"] == []
+    assert isinstance(metadata["classified_at"], str)
+
+
+def test_engineering_archive_ai_input_contains_only_classification_metadata() -> None:
+    email = Email(
+        id=1,
+        mailbox_account="test",
+        message_id="<archive@test>",
+        from_address="sender@example.com",
+        subject="Repair",
+        text_body="Device cannot start.",
+    )
+    attachment = EmailAttachment(
+        id=7,
+        email_id=1,
+        file_name="self-check.zip",
+        content_type="application/zip",
+        parse_status="skipped",
+        extracted_text="SN-MUST-NOT-REACH-AI",
+        parse_error="MUST_NOT_REACH_AI",
+        extracted_json={
+            **engineering_reference_metadata("zip"),
+            "extracted_fields": {"problem_description": "MUST_NOT_BE_USED"},
+            "extracted_items": [{"sn": "MUST_NOT_BE_USED"}],
+        },
+    )
+
+    payload = ai._email_input(email, [attachment], "classification_and_extract")
+    item = payload["attachments"][0]
+
+    assert item["file_name"] == "self-check.zip"
+    assert item["classification"]["detected_format"] == "zip"
+    assert "extracted_text" not in item
+    assert "parse_error" not in item
+    assert "extracted_fields" not in item["classification"]
+    assert "extracted_items" not in item["classification"]
+    assert ai._structured_attachment_business_data([attachment]) == ({}, [], [])
 
 
 def test_ai_detail_preserves_prompts_but_redacts_transport_secrets() -> None:
@@ -123,7 +273,7 @@ async def test_unsupported_attachment_is_download_only_without_binary_decode() -
     attachment = EmailAttachment(
         id=5,
         email_id=1,
-        file_name="firmware.prc",
+        file_name="firmware.dat",
         content_type="application/octet-stream",
         parse_status="unsupported",
         oss_object_id=9,
@@ -132,6 +282,29 @@ async def test_unsupported_attachment_is_download_only_without_binary_decode() -
 
     assert preview["mode"] == "download_only"
     assert preview["warnings"][0]["code"] == "ATTACHMENT_PREVIEW_UNSUPPORTED"
+
+
+@pytest.mark.anyio
+async def test_engineering_archive_preview_reports_unscanned_instead_of_unsupported() -> None:
+    attachment = EmailAttachment(
+        id=7,
+        email_id=1,
+        file_name="self-check.zip",
+        content_type="application/zip",
+        parse_status="skipped",
+        oss_object_id=11,
+        extracted_json={
+            "file_type": "archive",
+            "attachment_role": "engineering_reference",
+            "security_status": "unscanned_archive",
+        },
+    )
+
+    preview = await build_attachment_preview(PreviewSession(attachment), 7)
+
+    assert preview["mode"] == "download_only"
+    assert preview["warnings"][0]["code"] == "ARCHIVE_CONTENT_NOT_SCANNED"
+    assert "未经内容扫描" in preview["warnings"][0]["message"]
 
 
 @pytest.mark.anyio

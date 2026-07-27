@@ -32,7 +32,7 @@ from app.services.workflow import create_manual_task_if_missing, transition_tick
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CJK = re.compile(r"[\u3400-\u9fff]")
-_SN_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{3,99}$")
+_SN_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_+\-]{3,99}$")
 _FIELD_LIMITS = {
     "customer_code": 50,
     "customer_name": 255,
@@ -518,6 +518,7 @@ async def validate_and_mark_ready_for_export(
     ticket_id: int,
     user_id: int | None,
     reason: str | None = None,
+    resolving_task_id: int | None = None,
 ) -> dict[str, Any]:
     ticket = await session.get(RepairTicket, ticket_id, with_for_update=True)
     if ticket is None:
@@ -554,6 +555,15 @@ async def validate_and_mark_ready_for_export(
             )
         return {"ticket_id": ticket.id, "status": "safety_failed", "report": report, "jobs": []}
 
+    # A human "enter ready for export" decision is the explicit resolution of
+    # the parse-time missing/conflict markers.  The safety report above is the
+    # authoritative re-check; retaining those historical markers would let the
+    # ticket transition to ready_for_export and then make the RMA PDF worker
+    # reject the same ticket as unresolved.
+    if resolving_task_id is not None:
+        ticket.missing_fields = {}
+        ticket.conflict_fields = {}
+
     if ticket.current_status_code != "ready_for_export":
         await transition_ticket(
             session,
@@ -567,6 +577,7 @@ async def validate_and_mark_ready_for_export(
                 "sn_validation_hash": ticket.sn_validation_hash,
                 "sn_source": report["sn_source"],
             },
+            resolving_task_id=resolving_task_id,
         )
     report["snapshot"]["ticket_version"] = ticket.version
     report["snapshot_hash"] = _stable_hash(report["snapshot"])
