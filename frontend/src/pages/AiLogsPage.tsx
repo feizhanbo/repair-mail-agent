@@ -4,6 +4,7 @@ import { Alert, Button, DatePicker, Descriptions, Divider, Form, Input, Modal, S
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
+import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -149,6 +150,11 @@ export default function AiLogsPage() {
           columns={columns}
           dataSource={logsQuery.data?.items ?? []}
           loading={logsQuery.isFetching}
+          locale={{
+            emptyText: logsQuery.isError
+              ? <ErrorResult message={apiErrorMessage(logsQuery.error)} onRetry={() => logsQuery.refetch()} />
+              : '暂无 AI 日志'
+          }}
           pagination={{ current: page, pageSize: 20, total: logsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
           expandable={{
             expandedRowRender: (record) => (

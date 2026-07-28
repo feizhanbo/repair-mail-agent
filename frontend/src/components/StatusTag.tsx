@@ -2,7 +2,9 @@ import { Tag } from 'antd';
 import {
   parseStatusLabels,
   reviewStatusLabels,
+  sendStatusLabels,
   taskPriorityColors,
+  taskStatusColors,
   taskStatusLabels,
   ticketStatusColors,
   ticketStatusLabels,
@@ -10,7 +12,7 @@ import {
 
 type StatusTagProps = {
   value?: string | null;
-  kind?: 'ticket' | 'parse' | 'task' | 'review' | 'priority' | 'plain';
+  kind?: 'ticket' | 'parse' | 'task' | 'review' | 'priority' | 'send' | 'plain';
 };
 
 const defaultColors: Record<string, string> = {
@@ -28,6 +30,9 @@ const defaultColors: Record<string, string> = {
   sent: 'green',
   send_failed: 'red',
   send_disabled: 'default',
+  send_uncertain: 'orange',
+  assignment_failed: 'red',
+  skipped: 'default',
   rejected: 'red',
   auto_applied: 'green',
   manually_applied: 'green',
@@ -36,6 +41,13 @@ const defaultColors: Record<string, string> = {
   candidate_only: 'default',
   auto_skipped: 'default',
   engineering_reference_stored: 'default',
+  submitting: 'processing',
+  submitted: 'cyan',
+  accepted: 'cyan',
+  waiting_rma: 'blue',
+  rma_received: 'green',
+  timed_out: 'orange',
+  manual_review: 'orange',
 };
 
 const defaultLabels: Record<string, string> = {
@@ -56,6 +68,13 @@ const defaultLabels: Record<string, string> = {
   needs_manual_review: '需人工复核',
   candidate_only: '规则候选',
   auto_skipped: '已跳过',
+  submitting: '提交中',
+  submitted: '已提交',
+  accepted: '已受理',
+  waiting_rma: '等待 RMA',
+  rma_received: 'RMA 已回填',
+  timed_out: '回填超时',
+  manual_review: '人工复核',
 };
 
 function getLabel(value: string, kind: StatusTagProps['kind']) {
@@ -63,12 +82,15 @@ function getLabel(value: string, kind: StatusTagProps['kind']) {
   if (kind === 'parse') return parseStatusLabels[value] ?? value;
   if (kind === 'task') return taskStatusLabels[value] ?? value;
   if (kind === 'review') return reviewStatusLabels[value] ?? value;
+  if (kind === 'send') return sendStatusLabels[value] ?? value;
   return defaultLabels[value] ?? value;
 }
 
 function getColor(value: string, kind: StatusTagProps['kind']) {
   if (kind === 'ticket') return ticketStatusColors[value] ?? 'default';
+  if (kind === 'task') return taskStatusColors[value] ?? 'blue';
   if (kind === 'priority') return taskPriorityColors[value] ?? 'default';
+  if (kind === 'send') return defaultColors[value] ?? 'blue';
   return defaultColors[value] ?? 'blue';
 }
 

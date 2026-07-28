@@ -191,6 +191,48 @@ class BoardCardImportRequest(BaseModel):
     source_file_hash: str | None = Field(default=None, max_length=64)
 
 
+class CustomerServicePolicyCreateRequest(BaseModel):
+    policy_code: str = Field(min_length=1, max_length=100)
+    customer_code: str = Field(min_length=1, max_length=50)
+    customer_name: str | None = Field(default=None, max_length=255)
+    policy_type: Literal[
+        "default",
+        "permanent_free",
+        "annual_free",
+        "special_out_of_warranty",
+    ]
+    effective_from: date | None = None
+    effective_until: date | None = None
+    repair_price: float = Field(ge=0)
+    currency: str = Field(default="CNY", min_length=1, max_length=10)
+    tax_rate: float = Field(default=13, ge=0, le=100)
+    shipping_fee_text: str = Field(default="one-way charge/单次收费", min_length=1, max_length=100)
+    reply_salutation: str | None = Field(default=None, max_length=100)
+    hide_company_name: bool = False
+    force_manual_review: bool = False
+    enabled: bool = True
+
+
+class CustomerServicePolicyUpdateRequest(BaseModel):
+    customer_name: str | None = Field(default=None, max_length=255)
+    policy_type: Literal[
+        "default",
+        "permanent_free",
+        "annual_free",
+        "special_out_of_warranty",
+    ] | None = None
+    effective_from: date | None = None
+    effective_until: date | None = None
+    repair_price: float | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=1, max_length=10)
+    tax_rate: float | None = Field(default=None, ge=0, le=100)
+    shipping_fee_text: str | None = Field(default=None, min_length=1, max_length=100)
+    reply_salutation: str | None = Field(default=None, max_length=100)
+    hide_company_name: bool | None = None
+    force_manual_review: bool | None = None
+    enabled: bool | None = None
+
+
 class SystemConfigUpdateRequest(BaseModel):
     auto_send_enabled: bool | None = None
     auto_followup_enabled: bool | None = None

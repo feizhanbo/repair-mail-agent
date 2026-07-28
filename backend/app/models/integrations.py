@@ -54,12 +54,54 @@ class TicketRelayExport(TimestampMixin, Base):
 class ExportSap(TimestampMixin, Base):
     __tablename__ = "export_sap"
     __table_args__ = (
+        UniqueConstraint("submission_key", name="uk_export_sap_submission_key"),
+        UniqueConstraint("remote_call_id", name="uk_export_sap_remote_call_id"),
+        UniqueConstraint(
+            "ticket_item_id",
+            "ticket_version",
+            "payload_hash",
+            name="uk_export_sap_item_snapshot",
+        ),
         Index("idx_export_sap_sn", "sn"),
         Index("idx_export_sap_customer_code", "customer_code"),
         Index("idx_export_sap_material_code", "material_code"),
+        Index("idx_export_sap_ticket", "ticket_id", "created_at"),
+        Index("idx_export_sap_relay", "relay_export_id", "status"),
+        Index("idx_export_sap_status_retry", "status", "next_retry_at"),
+        Index("idx_export_sap_rma", "rma_no"),
     )
 
     id: Mapped[int] = pk_column()
+    ticket_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_tickets.id", name="fk_export_sap_ticket", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ticket_item_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_ticket_items.id", name="fk_export_sap_ticket_item", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relay_export_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("ticket_relay_exports.id", name="fk_export_sap_relay_export", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ticket_version: Mapped[int] = mapped_column(nullable=False)
+    submission_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(mysql.CHAR(64), nullable=False)
+    policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
+    attempt_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    remote_call_id: Mapped[str | None] = mapped_column(String(191))
+    rma_no: Mapped[str | None] = mapped_column(String(30))
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    next_retry_at: Mapped[datetime | None] = datetime_column()
+    submitted_at: Mapped[datetime | None] = datetime_column()
+    accepted_at: Mapped[datetime | None] = datetime_column()
+    last_polled_at: Mapped[datetime | None] = datetime_column()
+    rma_received_at: Mapped[datetime | None] = datetime_column()
     sn: Mapped[str] = mapped_column(String(100), nullable=False)
     customer_code: Mapped[str | None] = mapped_column(String(50))
     material_code: Mapped[str | None] = mapped_column(String(100))
@@ -72,6 +114,55 @@ class ExportSap(TimestampMixin, Base):
     repair_requested_at: Mapped[datetime | None] = datetime_column()
     mailing_address: Mapped[str | None] = mapped_column(String(500))
     currency: Mapped[str | None] = mapped_column(String(10))
-    shipping_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    shipping_fee: Mapped[str | None] = mapped_column(String(100))
     repair_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+
+
+class TicketRma(TimestampMixin, Base):
+    __tablename__ = "ticket_rmas"
+    __table_args__ = (
+        UniqueConstraint("rma_no", name="uk_ticket_rmas_no"),
+        Index("idx_ticket_rmas_ticket", "ticket_id", "created_at"),
+        Index("idx_ticket_rmas_status", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = pk_column()
+    ticket_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_tickets.id", name="fk_ticket_rmas_ticket", ondelete="CASCADE"),
+        nullable=False,
+    )
+    rma_no: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="received")
+    policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
+    pdf_oss_object_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("oss_objects.id", name="fk_ticket_rmas_pdf"),
+    )
+    reply_record_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("reply_records.id", name="fk_ticket_rmas_reply"),
+    )
+    received_at: Mapped[datetime | None] = datetime_column()
+    sent_at: Mapped[datetime | None] = datetime_column()
+
+
+class TicketRmaItem(TimestampMixin, Base):
+    __tablename__ = "ticket_rma_items"
+    __table_args__ = (
+        UniqueConstraint("ticket_item_id", name="uk_ticket_rma_items_ticket_item"),
+        Index("idx_ticket_rma_items_rma", "ticket_rma_id"),
+    )
+
+    id: Mapped[int] = pk_column()
+    ticket_rma_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("ticket_rmas.id", name="fk_ticket_rma_items_rma", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ticket_item_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_ticket_items.id", name="fk_ticket_rma_items_item", ondelete="CASCADE"),
+        nullable=False,
+    )

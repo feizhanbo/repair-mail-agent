@@ -5,6 +5,7 @@ export const ticketStatusLabels: Record<string, string> = {
   auto_replied: '已追问',
   manual_review: '人工复核',
   ready_for_export: '可导出',
+  rma_sent: 'RMA 已发送',
   error: '异常',
   closed: '已关闭',
 };
@@ -16,6 +17,7 @@ export const ticketStatusColors: Record<string, string> = {
   auto_replied: 'purple',
   manual_review: 'orange',
   ready_for_export: 'green',
+  rma_sent: 'cyan',
   error: 'red',
   closed: 'default',
 };
@@ -52,4 +54,22 @@ export const taskPriorityColors: Record<string, string> = {
   normal: 'blue',
   high: 'orange',
   urgent: 'red',
+};
+
+export const taskStatusColors: Record<string, string> = {
+  pending: 'blue',
+  assigned: 'cyan',
+  claimed: 'processing',
+  resolved: 'green',
+  closed: 'default',
+};
+
+export const sendStatusLabels: Record<string, string> = {
+  pending: '待发送',
+  sending: '发送中',
+  auto_sending: '自动发送中',
+  sent: '已发送',
+  send_failed: '发送失败',
+  send_uncertain: '发送结果不确定',
+  send_disabled: '未启用',
 };

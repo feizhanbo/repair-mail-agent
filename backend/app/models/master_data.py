@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -75,5 +76,42 @@ class BoardCard(TimestampMixin, Base):
     source_row_no: Mapped[int | None] = mapped_column()
     raw_data: Mapped[dict | None] = mapped_column(mysql.JSON)
     imported_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_board_cards_imported_by"))
+    imported_at: Mapped[datetime | None] = datetime_column()
+
+
+class CustomerServicePolicy(TimestampMixin, Base):
+    __tablename__ = "customer_service_policies"
+    __table_args__ = (
+        UniqueConstraint("policy_code", name="uk_customer_service_policies_code"),
+        Index("idx_customer_service_policies_customer", "customer_code", "enabled"),
+        Index("idx_customer_service_policies_type", "policy_type", "enabled"),
+        Index("idx_customer_service_policies_effective", "effective_from", "effective_until"),
+    )
+
+    id: Mapped[int] = pk_column()
+    policy_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    policy_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    effective_from: Mapped[date | None] = mapped_column(mysql.DATE)
+    effective_until: Mapped[date | None] = mapped_column(mysql.DATE)
+    repair_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default="0")
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNY")
+    tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, server_default="13")
+    shipping_fee_text: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        server_default="one-way charge/单次收费",
+    )
+    reply_salutation: Mapped[str | None] = mapped_column(String(100))
+    hide_company_name: Mapped[bool] = bool_column(False)
+    force_manual_review: Mapped[bool] = bool_column(False)
+    enabled: Mapped[bool] = bool_column(True)
+    source_file_name: Mapped[str | None] = mapped_column(String(255))
+    source_row_no: Mapped[int | None] = mapped_column()
+    imported_by_user_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("users.id", name="fk_customer_service_policies_imported_by"),
+    )
     imported_at: Mapped[datetime | None] = datetime_column()
 

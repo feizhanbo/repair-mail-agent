@@ -172,6 +172,15 @@ async def transition_ticket(
 
     ticket.current_status_code = to_status_code
     ticket.version += 1
+    if target_status.is_terminal:
+        if not trigger_event:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TERMINAL_REASON_REQUIRED",
+            )
+        ticket.terminal_reason_code = trigger_event
+        ticket.terminal_reason = reason or transition.condition_desc or trigger_event
+        ticket.closed_at = utcnow()
     session.add(
         TicketStatusLog(
             ticket_id=ticket.id,

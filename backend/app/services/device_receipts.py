@@ -72,7 +72,7 @@ async def confirm_device_received(
             "idempotent_reuse": True,
         }
 
-    if ticket.current_status_code != "ready_for_export" or ticket.rma_status != "sent":
+    if ticket.current_status_code != "rma_sent" or ticket.rma_status != "sent":
         ticket.device_receipt_ack_status = "pending_prerequisite"
         await create_manual_task_if_missing(
             session,

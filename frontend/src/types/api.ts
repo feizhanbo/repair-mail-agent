@@ -167,8 +167,13 @@ export type EmailItem = {
   sent_at?: string | null;
   received_at?: string | null;
   parse_status: string;
+  processing_stage?: string;
   intent_type?: string | null;
   duplicate_of_email_id?: number | null;
+  terminal_reason_code?: string | null;
+  last_error_code?: string | null;
+  retryable?: boolean;
+  next_retry_at?: string | null;
   error_message?: string | null;
   clean_body?: string | null;
   latest_reply_segment?: string | null;
@@ -346,6 +351,9 @@ export type Ticket = {
   device_received_note?: string | null;
   device_received_idempotency_key?: string | null;
   device_receipt_ack_status?: string;
+  terminal_reason_code?: string | null;
+  terminal_reason?: string | null;
+  closed_at?: string | null;
   manual_locked: boolean;
   version: number;
   created_at?: string;
@@ -454,6 +462,53 @@ export type TicketDetail = {
   email_timeline: EmailItem[];
   attachments: Attachment[];
   field_evidence: FieldEvidence;
+  sap_export_summary?: SapExportSummary;
+  sap_exports?: SapExportLine[];
+  rma_records?: TicketRmaRecord[];
+};
+
+export type SapExportSummary = {
+  batch_status: string;
+  line_count: number;
+  submitted_count: number;
+  accepted_count: number;
+  rma_received_count: number;
+  failed_count: number;
+};
+
+export type SapExportLine = {
+  id: number;
+  ticket_item_id: number;
+  relay_export_id: number;
+  submission_key: string;
+  status: string;
+  attempt_count: number;
+  remote_call_id?: string | null;
+  rma_no?: string | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
+  submitted_at?: string | null;
+  accepted_at?: string | null;
+  last_polled_at?: string | null;
+  rma_received_at?: string | null;
+  sn: string;
+  customer_code?: string | null;
+  material_code?: string | null;
+  currency?: string | null;
+  shipping_fee?: string | null;
+  repair_fee?: number | string | null;
+  tax_rate?: number | string | null;
+};
+
+export type TicketRmaRecord = {
+  id: number;
+  rma_no: string;
+  status: string;
+  policy_snapshot?: JsonRecord | null;
+  pdf_oss_object_id?: number | null;
+  reply_record_id?: number | null;
+  received_at?: string | null;
+  sent_at?: string | null;
 };
 
 export type ManualTask = {
@@ -685,6 +740,25 @@ export type SystemConfig = {
   mail_test_static_ready?: boolean;
   mail_test_static_reasons?: string[];
   integrations: JsonRecord;
+};
+
+export type CustomerServicePolicy = {
+  id: number;
+  policy_code: string;
+  customer_code: string;
+  customer_name?: string | null;
+  policy_type: 'default' | 'permanent_free' | 'annual_free' | 'special_out_of_warranty';
+  effective_from?: string | null;
+  effective_until?: string | null;
+  repair_price: number | string;
+  currency: string;
+  tax_rate: number | string;
+  shipping_fee_text: string;
+  reply_salutation?: string | null;
+  hide_company_name: boolean;
+  force_manual_review: boolean;
+  enabled: boolean;
+  source_file_name?: string | null;
 };
 
 export type MailTestPreflightResult = {

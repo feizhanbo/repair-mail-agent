@@ -4,6 +4,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
+import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -145,6 +146,11 @@ export default function NotificationsPage() {
           columns={columns}
           dataSource={query.data?.items ?? []}
           loading={query.isFetching}
+          locale={{
+            emptyText: query.isError
+              ? <ErrorResult message={apiErrorMessage(query.error)} onRetry={() => query.refetch()} />
+              : '暂无消息'
+          }}
           pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>

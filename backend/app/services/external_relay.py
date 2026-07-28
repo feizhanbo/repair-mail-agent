@@ -65,10 +65,22 @@ def relay_configuration_status() -> dict[str, Any]:
         missing.append("RELAY_SQLSERVER_RESULT_TARGET")
     if not settings.RELAY_SQLSERVER_RESULT_COLUMN_MAP:
         missing.append("RELAY_SQLSERVER_RESULT_COLUMN_MAP")
-    if settings.RELAY_SQLSERVER_RESULT_MODE == "table" and not settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN:
-        missing.append("RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN")
+    if not settings.RELAY_SQLSERVER_CALL_ID_COLUMN:
+        missing.append("RELAY_SQLSERVER_CALL_ID_COLUMN")
+    if not settings.RELAY_SQLSERVER_RMA_COLUMN:
+        missing.append("RELAY_SQLSERVER_RMA_COLUMN")
     if settings.RELAY_SQLSERVER_RESULT_MODE not in {"table", "stored_procedure"}:
         missing.append("RELAY_SQLSERVER_RESULT_MODE")
+    if settings.RELAY_SQLSERVER_RESULT_MODE == "table":
+        if not settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN:
+            missing.append("RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN")
+        elif (
+            (settings.RELAY_SQLSERVER_RESULT_COLUMN_MAP or {}).get(
+                settings.RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY
+            )
+            != settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN
+        ):
+            missing.append("RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN_MAP")
     return {
         "status": "misconfigured" if missing else "configured",
         "configured": not missing,
@@ -172,24 +184,57 @@ def _write_ticket_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         _identifier(column)
     values = [_payload_value(payload, path) for path in mapping]
     target = _qualified(settings.RELAY_SQLSERVER_RESULT_SCHEMA, settings.RELAY_SQLSERVER_RESULT_TARGET)
+    call_id_column = _identifier(settings.RELAY_SQLSERVER_CALL_ID_COLUMN)
     with _connect() as connection:
         cursor = connection.cursor()
         if settings.RELAY_SQLSERVER_RESULT_MODE == "stored_procedure":
             placeholders = ", ".join("?" for _ in values)
             cursor.execute(f"{{CALL {target} ({placeholders})}}", values)
-            remote_key = str(_payload_value(payload, settings.RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY) or "")
+            row = cursor.fetchone() if cursor.description else None
+            remote_key = str(row[0]) if row and row[0] is not None else ""
+            if not remote_key:
+                raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
         else:
-            unique_column = _identifier(settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN)
             unique_value = _payload_value(payload, settings.RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY)
-            existing = cursor.execute(f"SELECT TOP (1) {unique_column} FROM {target} WHERE {unique_column} = ?", unique_value).fetchone()
-            if existing is not None:
-                return {"status": "succeeded", "remote_record_key": str(existing[0]), "idempotent_reuse": True}
+            if settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN and unique_value is not None:
+                unique_column = _identifier(settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN)
+                existing = cursor.execute(
+                    f"SELECT TOP (1) {call_id_column} FROM {target} WHERE {unique_column} = ?",
+                    unique_value,
+                ).fetchone()
+                if existing is not None:
+                    return {
+                        "status": "succeeded",
+                        "remote_record_key": str(existing[0]),
+                        "idempotent_reuse": True,
+                    }
             columns = ", ".join(_identifier(column) for column in mapping.values())
             placeholders = ", ".join("?" for _ in values)
-            cursor.execute(f"INSERT INTO {target} ({columns}) VALUES ({placeholders})", values)
-            remote_key = str(unique_value)
+            row = cursor.execute(
+                f"INSERT INTO {target} ({columns}) OUTPUT INSERTED.{call_id_column} VALUES ({placeholders})",
+                values,
+            ).fetchone()
+            if row is None or row[0] is None:
+                raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
+            remote_key = str(row[0])
         connection.commit()
         return {"status": "succeeded", "remote_record_key": remote_key, "idempotent_reuse": False}
+
+
+def _fetch_rma_result(remote_call_id: str) -> dict[str, Any] | None:
+    target = _qualified(settings.RELAY_SQLSERVER_RESULT_SCHEMA, settings.RELAY_SQLSERVER_RESULT_TARGET)
+    call_id_column = _identifier(settings.RELAY_SQLSERVER_CALL_ID_COLUMN)
+    rma_column = _identifier(settings.RELAY_SQLSERVER_RMA_COLUMN)
+    with _connect() as connection:
+        cursor = connection.cursor()
+        row = cursor.execute(
+            f"SELECT TOP (1) {call_id_column}, {rma_column} "
+            f"FROM {target} WHERE {call_id_column} = ?",
+            remote_call_id,
+        ).fetchone()
+        if row is None:
+            return None
+        return {"remote_call_id": str(row[0]), "rma_no": str(row[1]).strip() if row[1] is not None else None}
 
 
 async def validate_sn_against_relay(sn: str) -> dict[str, Any]:
@@ -283,6 +328,28 @@ async def push_ticket_snapshot_to_relay(payload: dict[str, Any]) -> dict[str, An
         return await asyncio.to_thread(_write_ticket_snapshot, payload)
     except Exception as exc:
         raise RelayOperationError("RELAY_TICKET_EXPORT_FAILED") from exc
+
+
+async def poll_rma_from_relay(remote_call_id: str) -> dict[str, Any]:
+    if not settings.RELAY_SQLSERVER_ENABLED:
+        return {"status": "disabled", "remote_call_id": remote_call_id}
+    config = relay_configuration_status()
+    if not config["configured"]:
+        return {
+            "status": "misconfigured",
+            "remote_call_id": remote_call_id,
+            "missing": config["missing"],
+        }
+    try:
+        result = await asyncio.to_thread(_fetch_rma_result, remote_call_id)
+    except Exception as exc:
+        raise RelayOperationError("RELAY_RMA_POLL_FAILED") from exc
+    if result is None:
+        return {"status": "not_found", "remote_call_id": remote_call_id, "rma_no": None}
+    return {
+        "status": "rma_received" if result.get("rma_no") else "waiting_rma",
+        **result,
+    }
 
 
 async def push_ai_parse_result_to_relay(

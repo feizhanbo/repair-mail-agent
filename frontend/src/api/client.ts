@@ -5,6 +5,7 @@ import type {
   ApiResponse,
   AsyncIngestResult,
   BoardCard,
+  CustomerServicePolicy,
   CurrentUser,
   ContentPreview,
   DatabaseRowsResponse,
@@ -243,6 +244,10 @@ export const api = {
   transitionTicket: (id: number, body: Record<string, unknown>) => postData<TicketDetail>(`/tickets/${id}/transition`, body),
   validateTicketSn: (id: number) => postData<TicketDetail>(`/tickets/${id}/validate-sn`),
   validateTicketExport: (id: number) => postData(`/tickets/${id}/validate-export`),
+  retrySapExport: (id: number) => postData<JobRunLog>(`/tickets/${id}/sap-export/retry`),
+  pollSapExport: (id: number) => postData<Record<string, unknown>>(`/tickets/${id}/sap-export/poll`),
+  confirmLateSapResult: (id: number) => postData<Record<string, unknown>>(`/tickets/${id}/sap-export/confirm-late`),
+  retryRmaSend: (id: number) => postData<JobRunLog>(`/tickets/${id}/rma/retry-send`),
   confirmDeviceReceived: (id: number, body: { idempotency_key: string; note?: string }) =>
     postData<{ ticket_id: number; status: string; reply_id?: number | null; idempotent_reuse: boolean }>(`/tickets/${id}/confirm-device-received`, body),
   applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => {
@@ -276,6 +281,9 @@ export const api = {
     return postData<JobRunLog>('/master-data/sn-assets/import-file/jobs', body, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
   boardCards: (params: Record<string, unknown>) => getData<PageData<BoardCard>>('/master-data/board-cards', { params }),
+  customerPolicies: (params: Record<string, unknown>) => getData<PageData<CustomerServicePolicy>>('/master-data/customer-policies', { params }),
+  createCustomerPolicy: (body: Record<string, unknown>) => postData<CustomerServicePolicy>('/master-data/customer-policies', body),
+  updateCustomerPolicy: (id: number, body: Record<string, unknown>) => patchData<CustomerServicePolicy>(`/master-data/customer-policies/${id}`, body),
   importBoardCards: (body: Record<string, unknown>) => postData('/master-data/board-cards/import', body),
   boardCardsTemplate: () => apiClient.get<Blob, Blob>('/master-data/board-cards/template', { responseType: 'blob' }),
   exportBoardCards: (params: Record<string, unknown>) => apiClient.get<Blob, Blob>('/master-data/board-cards/export', { params, responseType: 'blob' }),

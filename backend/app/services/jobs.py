@@ -18,7 +18,8 @@ from app.services.logging_safety import safe_error_code, sanitize_log_payload
 
 JOB_TYPES = {
     "email_parse", "email_reparse", "imap_fetch", "smtp_send", "auto_followup",
-    "master_data_import", "export_generate", "relay_ticket_export", "rma_authorization",
+    "master_data_import", "export_generate", "relay_ticket_export", "sap_rma_poll",
+    "rma_authorization",
 }
 TERMINAL_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 NON_RETRYABLE_ERROR_PARTS = {
@@ -208,6 +209,12 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
         if job.resource_id is None:
             raise ValueError("JOB_RESOURCE_REQUIRED")
         return await execute_ticket_relay_export(session, export_id=job.resource_id)
+    if job.job_type == "sap_rma_poll":
+        from app.services.sap_rma import poll_export_batch
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await poll_export_batch(session, export_id=job.resource_id)
     if job.job_type == "rma_authorization":
         from app.services.replies import create_and_send_rma_authorization
 
@@ -221,6 +228,7 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
             expected_safety_hash=str(metadata.get("safety_check_hash") or ""),
             expected_sn_validation_hash=str(metadata.get("sn_validation_hash") or ""),
             expected_rma_template_version=str(metadata.get("rma_template_version") or ""),
+            expected_rma_no=str(metadata.get("rma_no") or ""),
         )
     if job.job_type == "auto_followup":
         from app.services.replies import create_reply_draft
@@ -312,7 +320,15 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
         # expired ORM instance cannot trigger implicit async IO.
         job = await session.get(JobRunLog, job_id, with_for_update=True) or job
         business_status = str(result.get("status") or "") if isinstance(result, dict) else ""
-        if business_status == "superseded":
+        if business_status == "waiting_rma":
+            job.status = "retry_wait"
+            job.result_json = sanitize_log_payload(result)
+            job.error_code = None
+            job.error_message = None
+            job.next_run_at = utcnow() + timedelta(
+                seconds=max(60, int(result.get("next_poll_seconds") or 300))
+            )
+        elif business_status == "superseded":
             job.status = "superseded"
             job.result_json = sanitize_log_payload(result)
             job.error_code = "TASK_SNAPSHOT_SUPERSEDED"

@@ -298,6 +298,7 @@ async def ingest_email(
         clean_body=normalize_email_body(payload.text_body or html_to_text(payload.html_body)),
         latest_reply_segment=extract_latest_reply_segment(payload.text_body or html_to_text(payload.html_body)),
         parse_status="pending",
+        processing_stage="classified",
         created_at=created_at,
         updated_at=created_at,
     )
@@ -305,6 +306,9 @@ async def ingest_email(
     email.intent_type = analysis.intent_type
     if analysis.intent_type == "irrelevant":
         email.parse_status = "skipped"
+        email.processing_stage = "completed"
+        email.terminal_reason_code = "IRRELEVANT_EMAIL"
+        email.retryable = False
     session.add(email)
     try:
         await session.flush()
@@ -594,6 +598,10 @@ async def reparse_email(
     else:
         email.intent_type = rule_parse.intent_type
     email.parse_status = "parsing"
+    email.processing_stage = "parsing"
+    email.terminal_reason_code = None
+    email.last_error_code = None
+
     await log_system_event(
         session,
         event_type="email_processing",
@@ -839,6 +847,21 @@ async def reparse_email(
             email_id=email.id,
             parse_result=rule_parse,
         )
+
+    if email.parse_status == "parsed":
+        email.processing_stage = "completed"
+        email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
+        email.retryable = False
+        email.next_retry_at = None
+    elif email.parse_status == "skipped":
+        email.processing_stage = "completed"
+        email.terminal_reason_code = email.terminal_reason_code or "EMAIL_PROCESSING_SKIPPED"
+        email.retryable = False
+        email.next_retry_at = None
+    elif email.parse_status == "needs_manual":
+        email.processing_stage = "manual_review"
+        email.terminal_reason_code = "EMAIL_REQUIRES_MANUAL_REVIEW"
+        email.retryable = True
 
     await log_system_event(
         session,

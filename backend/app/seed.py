@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -57,11 +57,18 @@ WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
         "sort_order": 60,
     },
     {
+        "status_code": "rma_sent",
+        "status_name": "RMA已发送",
+        "status_category": "rma",
+        "description": "全部SN已取得同一RMA编号，RMA模板回复已在原邮件链发送成功。",
+        "sort_order": 70,
+    },
+    {
         "status_code": "error",
         "status_name": "异常",
         "status_category": "error",
         "description": "系统处理失败，等待排查或重试。",
-        "sort_order": 70,
+        "sort_order": 80,
     },
     {
         "status_code": "closed",
@@ -69,7 +76,7 @@ WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
         "status_category": "terminal",
         "description": "工单完成或终止。",
         "is_terminal": True,
-        "sort_order": 80,
+        "sort_order": 90,
     },
 )
 
@@ -161,6 +168,12 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "from_status_code": "ready_for_export",
+        "to_status_code": "rma_sent",
+        "trigger_event": "rma_reply_sent",
+        "condition_desc": "SAP回填合法RMA编号且模板回复实际发送成功。",
+    },
+    {
+        "from_status_code": "rma_sent",
         "to_status_code": "closed",
         "trigger_event": "device_receipt_ack_sent",
         "condition_desc": "公司收到待修设备并成功向客户发送收货确认后关单。",
@@ -213,6 +226,24 @@ ROLES: tuple[dict[str, str], ...] = (
 
 
 REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "template_code": "all_replies_neutral_base_zh",
+        "template_name": "特殊客户中性基础模板（不含公司名称）",
+        "template_type": "neutral_base",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": None,
+        "body_template": (
+            "{{ content }}\n\n"
+            "Best Regards!\n\n"
+            "本邮件及其附件可能包含保密信息，仅供指定收件方使用。"
+            "如您并非指定收件方，请删除本邮件及全部附件，并通知发件方；"
+            "不得泄露、复制、散发本邮件或依赖本邮件采取任何行动。\n"
+            "The information contained in and accompanying this email may be confidential "
+            "and is intended solely for the intended recipient(s). If received in error, "
+            "please delete all copies and notify the sender."
+        ),
+    },
     {
         "template_code": "all_replies_domestic_company_base_zh",
         "template_name": "所有回复邮件基础模板（国内公司信息）",
@@ -553,6 +584,17 @@ async def _seed_workflow_transitions(session: AsyncSession) -> int:
             session.add(WorkflowTransition(**values))
         else:
             _apply_values(transition, payload, payload.keys())
+    await session.execute(
+        update(WorkflowTransition)
+        .where(
+            WorkflowTransition.to_status_code == "closed",
+            or_(
+                WorkflowTransition.from_status_code != "rma_sent",
+                WorkflowTransition.trigger_event != "device_receipt_ack_sent",
+            ),
+        )
+        .values(enabled=False)
+    )
     return len(WORKFLOW_TRANSITIONS)
 
 

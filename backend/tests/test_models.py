@@ -2,13 +2,14 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 31
+    assert len(Base.metadata.tables) == 34
 
 
 def test_phase_one_table_names() -> None:
     assert set(Base.metadata.tables) == {
         "ai_call_logs",
         "board_cards",
+        "customer_service_policies",
         "email_attachments",
         "email_threads",
         "email_ticket_links",
@@ -34,6 +35,8 @@ def test_phase_one_table_names() -> None:
         "system_event_logs",
         "ticket_status_logs",
         "ticket_relay_exports",
+        "ticket_rma_items",
+        "ticket_rmas",
         "user_roles",
         "users",
         "workflow_statuses",
@@ -97,4 +100,11 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "shipping_fee",
         "repair_fee",
         "tax_rate",
+        "ticket_id",
+        "ticket_item_id",
+        "relay_export_id",
+        "submission_key",
+        "payload_hash",
+        "remote_call_id",
+        "rma_no",
     } <= set(export_columns.keys())

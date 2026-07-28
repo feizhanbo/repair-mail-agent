@@ -26,7 +26,6 @@ from app.services.business_rules import required_missing_for_ticket
 from app.services.common import utcnow
 from app.services.external_relay import relay_configured, validate_sn_against_relay
 from app.services.jobs import enqueue_job
-from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 
@@ -586,11 +585,16 @@ async def validate_and_mark_ready_for_export(
     ticket.safety_check_snapshot = report["snapshot"]
     ticket.safety_check_hash = report["snapshot_hash"]
     ticket.safety_checked_at = utcnow()
-    ticket.relay_export_status = "pending" if relay_configured() else "not_required"
-    ticket.rma_status = "pending" if ticket.rma_required else "not_required"
+    relay_ready = relay_configured()
+    ticket.relay_export_status = "pending" if ticket.rma_required and relay_ready else "not_required"
+    ticket.rma_status = (
+        "waiting_sap"
+        if ticket.rma_required and relay_ready
+        else ("manual_review" if ticket.rma_required else "not_required")
+    )
 
     jobs: list[dict[str, Any]] = []
-    if relay_configured():
+    if ticket.rma_required and relay_ready:
         export = await session.scalar(
             select(TicketRelayExport).where(
                 TicketRelayExport.ticket_id == ticket.id,
@@ -618,21 +622,13 @@ async def validate_and_mark_ready_for_export(
             max_attempts=5,
         )
         jobs.append({"id": relay_job.id, "job_type": relay_job.job_type})
-    if ticket.rma_required:
-        rma_job = await enqueue_job(
+    if ticket.rma_required and not relay_ready:
+        await create_manual_task_if_missing(
             session,
-            job_type="rma_authorization",
-            resource_type="repair_ticket",
-            resource_id=ticket.id,
-            idempotency_key=f"rma_authorization:{ticket.id}:{ticket.version}:{report['snapshot_hash'][:16]}",
-            metadata={
-                "user_id": user_id,
-                "ticket_version": ticket.version,
-                "safety_check_hash": report["snapshot_hash"],
-                "sn_validation_hash": ticket.sn_validation_hash,
-                "rma_template_version": RMA_TEMPLATE_VERSION,
-            },
-            max_attempts=1,
+            ticket=ticket,
+            task_type="sap_relay_not_configured",
+            trigger_reason="SAP_RELAY_NOT_CONFIGURED",
+            priority="high",
+            assigned_user_id=ticket.assigned_user_id,
         )
-        jobs.append({"id": rma_job.id, "job_type": rma_job.job_type})
     return {"ticket_id": ticket.id, "status": ticket.current_status_code, "report": report, "jobs": jobs}

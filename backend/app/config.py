@@ -109,11 +109,30 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
     RELAY_SQLSERVER_RESULT_TARGET: str = ""
     RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN: str = ""
-    RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY: str = "ticket_no"
-    RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {}
+    RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY: str = "submission_key"
+    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "callID"
+    RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
+    RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {
+        "sn": "internalSN",
+        "customer_code": "customer",
+        "customer_name": "custmrName",
+        "material_code": "itemCode",
+        "material_name": "itemName",
+        "email_subject": "subject",
+        "contact_person": "BPContact",
+        "contact_phone": "Telephone",
+        "problem_description": "U_FailurePhenomena",
+        "repair_requested_at": "U_BXDate",
+        "mailing_address": "BPShipAddr",
+        "currency": "U_cur",
+        "shipping_fee": "U_DeliveryPaid",
+        "repair_fee": "U_WSPrice",
+    }
     RELAY_SQLSERVER_BATCH_SIZE: int = 500
     RELAY_SQLSERVER_SYNC_INTERVAL_MINUTES: int = 5
     RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
+    RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS: int = 300
+    RELAY_SQLSERVER_RMA_TIMEOUT_WORKING_HOURS: int = 8
 
     INTERNAL_EMAIL_DOMAINS: list[str] = ["accotest.com"]
     DEVICE_RECEIPT_TRUSTED_SENDERS: list[str] = []
@@ -149,6 +168,17 @@ class Settings(BaseSettings):
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
     RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
+    RMA_DEFAULT_BEIJING_ADDRESS: str = (
+        "北京市海淀区丰豪东路9号院5号楼，李连荣 电话：010-63725600-193；邮编：100094"
+    )
+    RMA_DEFAULT_BEIJING_CONTACT: str = "李连荣"
+    RMA_DEFAULT_BEIJING_PHONE: str = "010-63725600-193"
+    # The exact Tianjin recipient data has not been confirmed. Keep it
+    # configuration-only so an unmatched material cannot be exported using a
+    # guessed address.
+    RMA_DEFAULT_TIANJIN_ADDRESS: str = ""
+    RMA_DEFAULT_TIANJIN_CONTACT: str = ""
+    RMA_DEFAULT_TIANJIN_PHONE: str = ""
 
     DEFAULT_ADMIN_USERNAME: str = "admin"
     DEFAULT_ADMIN_PASSWORD: str = "change-me-admin"

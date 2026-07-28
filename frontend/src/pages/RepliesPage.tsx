@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import { waitForJob } from '../utils/jobs';
+import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
@@ -142,7 +143,11 @@ export default function RepliesPage() {
           columns={columns}
           dataSource={repliesQuery.data?.items ?? []}
           loading={repliesQuery.isFetching}
-          locale={{ emptyText: repliesQuery.isError ? '回复记录加载失败' : '暂无回复记录' }}
+          locale={{
+            emptyText: repliesQuery.isError
+              ? <ErrorResult message={apiErrorMessage(repliesQuery.error)} onRetry={() => repliesQuery.refetch()} />
+              : '暂无回复记录'
+          }}
           pagination={{ current: page, pageSize: 20, total: repliesQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>

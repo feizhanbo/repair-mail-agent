@@ -16,9 +16,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.request_context import get_correlation_id
-from app.models import Email, EmailAttachment, EmailTicketLink, OssObject, ReplyRecord, ReplyTemplate, RepairTicket
+from app.models import (
+    Email,
+    EmailAttachment,
+    EmailTicketLink,
+    OssObject,
+    ReplyRecord,
+    ReplyTemplate,
+    RepairTicket,
+    TicketRma,
+)
 from app.services.audit import log_operation, log_system_event
 from app.services.business_rules import is_followup_reply_type
+from app.services.business_notifications import notify_ticket_once
 from app.services.common import model_to_dict, utcnow
 from app.services.mail_safety import TEST_MAIL_RECIPIENT, TEST_MAIL_SENDER, test_envelope_allowed, test_only_subject
 from app.services.rma_pdf import (
@@ -392,10 +402,19 @@ def _send_reply_via_smtp(
     return True, message_id, None
 
 
-async def _select_base_template(session: AsyncSession, language: str) -> ReplyTemplate | None:
+async def _select_base_template(
+    session: AsyncSession,
+    language: str,
+    *,
+    hide_company_name: bool = False,
+) -> ReplyTemplate | None:
     if language != "zh-CN":
         return None
-    return await _select_template(session, "domestic_company_base", language)
+    return await _select_template(
+        session,
+        "neutral_base" if hide_company_name else "domestic_company_base",
+        language,
+    )
 
 
 async def _render_reply_templates(
@@ -405,6 +424,7 @@ async def _render_reply_templates(
     ticket: RepairTicket,
     missing_fields: dict[str, Any] | None,
     parent: Email,
+    customer_policy: dict[str, Any] | None = None,
 ) -> tuple[str, str, ReplyTemplate | None]:
     original_subject = (parent.subject or f"Repair request {ticket.ticket_no}").strip()
     content = _render_template(
@@ -413,7 +433,17 @@ async def _render_reply_templates(
         missing_fields=missing_fields,
         original_subject=original_subject,
     )
-    base_template = await _select_base_template(session, content_template.language)
+    salutation = str((customer_policy or {}).get("reply_salutation") or "").strip()
+    if salutation:
+        if content.startswith("您好"):
+            content = salutation + content[2:]
+        elif content.startswith("Dear Customer"):
+            content = salutation + content[len("Dear Customer"):]
+    base_template = await _select_base_template(
+        session,
+        content_template.language,
+        hide_company_name=bool((customer_policy or {}).get("hide_company_name")),
+    )
     if content_template.language == "zh-CN" and base_template is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_BASE_TEMPLATE_NOT_FOUND")
     body = (
@@ -470,7 +500,10 @@ async def _archive_outbound_email(
         clean_body=body,
         latest_reply_segment=body,
         parse_status="sent",
+        processing_stage="completed",
         intent_type="outbound_reply",
+        terminal_reason_code="OUTBOUND_REPLY_SENT",
+        retryable=False,
     )
     session.add(email)
     await session.flush()
@@ -601,7 +634,11 @@ async def _reply_send_guard_error(
         if reply.base_template_id is None:
             return "REPLY_BASE_TEMPLATE_REQUIRED"
         base_template = await session.get(ReplyTemplate, reply.base_template_id)
-        if base_template is None or not base_template.enabled or base_template.template_type != "domestic_company_base":
+        if (
+            base_template is None
+            or not base_template.enabled
+            or base_template.template_type not in {"domestic_company_base", "neutral_base"}
+        ):
             return "REPLY_BASE_TEMPLATE_NOT_AVAILABLE"
     if reply.related_email_id is None:
         return "REPLY_PARENT_EMAIL_REQUIRED"
@@ -767,6 +804,35 @@ async def _send_reply_record(
         )
         if reply.reply_type == "rma_authorization":
             ticket.rma_status = "sent"
+            if ticket.current_status_code == "ready_for_export":
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="rma_sent",
+                    trigger_event="rma_reply_sent",
+                    user_id=user_id,
+                    operator_type="system" if auto else "user",
+                    reason="SAP RMA编号已回填，RMA模板回复已在原邮件链发送成功。",
+                    metadata={"reply_id": reply.id, "smtp_message_id": sent_message_id},
+                )
+            rma_record = await session.scalar(
+                select(TicketRma).where(TicketRma.ticket_id == ticket.id)
+            )
+            if rma_record is not None:
+                rma_record.status = "sent"
+                rma_record.reply_record_id = reply.id
+                rma_record.sent_at = utcnow()
+            await notify_ticket_once(
+                session,
+                ticket=ticket,
+                event_type="rma_reply_sent",
+                title="RMA 已成功发送",
+                content=f"工单 {ticket.ticket_no} 的 RMA 模板回复已在原邮件链发送成功。",
+                metadata={
+                    "reply_id": reply.id,
+                    "rma_no": rma_record.rma_no if rma_record is not None else None,
+                },
+            )
             if ticket.device_received_at is not None and ticket.device_receipt_ack_status == "pending_prerequisite":
                 from app.services.device_receipts import confirm_device_received
 
@@ -781,7 +847,7 @@ async def _send_reply_record(
                 )
         if reply.reply_type == "device_received_ack":
             ticket.device_receipt_ack_status = "sent"
-            if ticket.current_status_code == "ready_for_export" and ticket.rma_status == "sent":
+            if ticket.current_status_code == "rma_sent" and ticket.rma_status == "sent":
                 await transition_ticket(
                     session,
                     ticket=ticket,
@@ -1159,9 +1225,27 @@ async def reconcile_uncertain_reply(
                 )
         elif reply.reply_type == "rma_authorization":
             ticket.rma_status = "sent"
+            if ticket.current_status_code == "ready_for_export":
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="rma_sent",
+                    trigger_event="rma_reply_sent",
+                    user_id=user_id,
+                    operator_type="user",
+                    reason="人工确认RMA回复实际发送成功。",
+                    metadata={"reply_id": reply.id, "reconciled": True},
+                )
+            rma_record = await session.scalar(
+                select(TicketRma).where(TicketRma.ticket_id == ticket.id)
+            )
+            if rma_record is not None:
+                rma_record.status = "sent"
+                rma_record.reply_record_id = reply.id
+                rma_record.sent_at = utcnow()
         elif reply.reply_type == "device_received_ack":
             ticket.device_receipt_ack_status = "sent"
-            if ticket.current_status_code == "ready_for_export" and ticket.rma_status == "sent":
+            if ticket.current_status_code == "rma_sent" and ticket.rma_status == "sent":
                 await transition_ticket(
                     session,
                     ticket=ticket,
@@ -1223,6 +1307,7 @@ async def create_and_send_rma_authorization(
     expected_safety_hash: str,
     expected_sn_validation_hash: str,
     expected_rma_template_version: str,
+    expected_rma_no: str = "",
 ) -> dict[str, Any]:
     ticket = await session.get(RepairTicket, ticket_id, with_for_update=True)
     if ticket is None:
@@ -1240,7 +1325,48 @@ async def create_and_send_rma_authorization(
         or normalize_rma_template_version(expected_rma_template_version) != RMA_TEMPLATE_VERSION
     ):
         return {"status": "superseded", "error_code": "TICKET_SNAPSHOT_SUPERSEDED", "ticket_id": ticket.id}
+    rma_records = list(
+        (
+            await session.execute(
+                select(TicketRma).where(TicketRma.ticket_id == ticket.id)
+            )
+        ).scalars().all()
+    )
+    if len(rma_records) != 1 or (
+        expected_rma_no and rma_records[0].rma_no != expected_rma_no
+    ):
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_number_not_unique",
+            reason="RMA_NUMBER_NOT_UNIQUE_FOR_TICKET",
+        )
+    rma_record = rma_records[0]
+    policy_lines = list((rma_record.policy_snapshot or {}).get("lines") or [])
+    branding_rules = {
+        (
+            str(line.get("reply_salutation") or "").strip(),
+            bool(line.get("hide_company_name")),
+        )
+        for line in policy_lines
+        if isinstance(line, dict)
+    }
+    if len(branding_rules) > 1:
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_branding_policy_conflict",
+            reason="RMA_BRANDING_POLICY_CONFLICT",
+        )
+    customer_policy = policy_lines[0] if policy_lines else {}
     attach_rma = bool(settings.RMA_AUTO_SEND_ENABLED)
+    if attach_rma and bool(customer_policy.get("hide_company_name")):
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_neutral_pdf_template_required",
+            reason="RMA_NEUTRAL_PDF_TEMPLATE_REQUIRED",
+        )
     reply_type = "rma_authorization" if attach_rma else "receipt"
     existing = await session.scalar(
         select(ReplyRecord)
@@ -1254,6 +1380,28 @@ async def create_and_send_rma_authorization(
     if existing is not None:
         if existing.send_status == "sent" and attach_rma:
             ticket.rma_status = "sent"
+            if ticket.current_status_code == "ready_for_export":
+                await transition_ticket(
+                    session,
+                    ticket=ticket,
+                    to_status_code="rma_sent",
+                    trigger_event="rma_reply_sent",
+                    user_id=user_id,
+                    operator_type="system",
+                    reason="复用已成功发送的 RMA 模板回复并恢复工单主状态。",
+                    metadata={"reply_id": existing.id, "idempotent_reuse": True},
+                )
+            rma_record.status = "sent"
+            rma_record.reply_record_id = existing.id
+            rma_record.sent_at = existing.sent_at or utcnow()
+            await notify_ticket_once(
+                session,
+                ticket=ticket,
+                event_type="rma_reply_sent",
+                title="RMA 已成功发送",
+                content=f"工单 {ticket.ticket_no} 的 RMA 模板回复已在原邮件链发送成功。",
+                metadata={"reply_id": existing.id, "rma_no": rma_record.rma_no},
+            )
         return {"status": existing.send_status, "ticket_id": ticket.id, "reply_id": existing.id, "idempotent_reuse": True}
 
     pdf_content: bytes | None = None
@@ -1299,6 +1447,7 @@ async def create_and_send_rma_authorization(
             ticket=ticket,
             missing_fields=None,
             parent=related_email,
+            customer_policy=customer_policy,
         )
     except HTTPException as exc:
         return await _rma_manual_review(
@@ -1314,6 +1463,7 @@ async def create_and_send_rma_authorization(
                 session,
                 ticket_id=ticket.id,
                 safety_snapshot=ticket.safety_check_snapshot,
+                rma_no=rma_record.rma_no,
             )
             pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=True)
             file_name = rma_pdf_file_name(data)
@@ -1325,6 +1475,7 @@ async def create_and_send_rma_authorization(
                 source_type="rma_authorization_pdf",
                 user_id=user_id,
             )
+            rma_record.pdf_oss_object_id = pdf_object.id
         except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
             return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
     reply = ReplyRecord(
@@ -1360,6 +1511,7 @@ async def create_and_send_rma_authorization(
     )
     session.add(reply)
     await session.flush()
+    rma_record.reply_record_id = reply.id
     if not settings.AUTO_SEND_ENABLED:
         ticket.rma_status = "manual_review"
         await create_manual_task_if_missing(

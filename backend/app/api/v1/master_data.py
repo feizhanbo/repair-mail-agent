@@ -10,12 +10,75 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.schemas.business import BoardCardImportRequest, IdsRequest, SnAssetImportRequest
+from app.schemas.business import (
+    BoardCardImportRequest,
+    CustomerServicePolicyCreateRequest,
+    CustomerServicePolicyUpdateRequest,
+    IdsRequest,
+    SnAssetImportRequest,
+)
+from app.services import customer_policies
 from app.services import master_data as master_data_service
 from app.services.jobs import enqueue_job, serialize_job
 from app.services.storage import StorageConfigurationError, StorageUploadError, upload_bytes_to_oss
 
 router = APIRouter()
+
+
+@router.get("/customer-policies")
+async def list_customer_policies(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    keyword: str | None = None,
+    customer_code: str | None = None,
+    policy_type: str | None = None,
+    enabled: bool | None = None,
+) -> dict:
+    del current_user
+    items, total = await customer_policies.list_policies(
+        session,
+        page=page_no,
+        page_size=page_size,
+        keyword=keyword,
+        customer_code=customer_code,
+        policy_type=policy_type,
+        enabled=enabled,
+    )
+    return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.post("/customer-policies")
+async def create_customer_policy(
+    payload: CustomerServicePolicyCreateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    result = await customer_policies.create_policy(
+        session,
+        values=payload.model_dump(),
+        user_id=current_user.id,
+    )
+    await session.commit()
+    return ok(result, "customer policy created")
+
+
+@router.patch("/customer-policies/{policy_id}")
+async def update_customer_policy(
+    policy_id: int,
+    payload: CustomerServicePolicyUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    del current_user
+    result = await customer_policies.update_policy(
+        session,
+        policy_id=policy_id,
+        values=payload.model_dump(exclude_unset=True),
+    )
+    await session.commit()
+    return ok(result, "customer policy updated")
 
 
 @router.get("/sn-assets")

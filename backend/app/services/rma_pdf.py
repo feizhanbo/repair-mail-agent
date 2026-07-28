@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import RepairTicket, RepairTicketItem
+from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 TEMPLATE_VERSION = "rma_authorization_auto_v3_1"
@@ -352,6 +352,7 @@ async def build_rma_pdf_data(
     *,
     ticket_id: int,
     safety_snapshot: dict[str, Any] | None = None,
+    rma_no: str | None = None,
 ) -> RmaPdfData:
     ticket = await session.get(RepairTicket, ticket_id)
     if ticket is None:
@@ -382,6 +383,32 @@ async def build_rma_pdf_data(
     if not 1 <= len(items) <= 300:
         raise RmaPdfError("RMA_ITEM_COUNT_OUT_OF_RANGE")
     _validate_snapshot(ticket, items, safety_snapshot)
+    rma_statement = select(TicketRma).where(TicketRma.ticket_id == ticket.id)
+    if rma_no:
+        rma_statement = rma_statement.where(TicketRma.rma_no == rma_no)
+    rma_rows = list((await session.execute(rma_statement)).scalars().all())
+    if len(rma_rows) != 1:
+        raise RmaPdfError("RMA_NUMBER_NOT_UNIQUE_FOR_TICKET")
+    rma_record = rma_rows[0]
+    export_rows = list(
+        (
+            await session.execute(
+                select(ExportSap).where(
+                    ExportSap.ticket_id == ticket.id,
+                    ExportSap.rma_no == rma_record.rma_no,
+                    ExportSap.status == "rma_received",
+                )
+            )
+        ).scalars().all()
+    )
+    export_by_item = {row.ticket_item_id: row for row in export_rows}
+    if len(export_by_item) != len(items):
+        raise RmaPdfError("RMA_EXPORT_ITEMS_INCOMPLETE")
+    currencies = {str(row.currency or "").upper() for row in export_rows}
+    if len(currencies) != 1:
+        raise RmaPdfError("RMA_CURRENCY_CONFLICT")
+    currency = next(iter(currencies))
+    total_cost = sum((row.repair_fee or Decimal("0")) for row in export_rows)
     normalized_sns = [(item.sn or "").strip().casefold() for item in items]
     if len(normalized_sns) != len(set(normalized_sns)):
         raise RmaPdfError("RMA_DUPLICATE_SN")
@@ -400,26 +427,30 @@ async def build_rma_pdf_data(
                 part_description=item.material_name,
                 quantity=1,
                 part_serial_no=item.sn,
-                maintenance_price=None,
+                maintenance_price=export_by_item[item.id].repair_fee,
                 failure_description=item.failure_description or "",
             )
         )
-    rma_no = _authorization_no(ticket.ticket_no)
-    if not CODE39_PATTERN.fullmatch(rma_no):
+    resolved_rma_no = rma_record.rma_no
+    if not re.fullmatch(r"\d{10}", resolved_rma_no) or not CODE39_PATTERN.fullmatch(resolved_rma_no):
         raise RmaPdfError("RMA_CODE39_VALUE_INVALID")
     try:
         return RmaPdfData(
-            rma_no=rma_no,
+            rma_no=resolved_rma_no,
             request_date=ticket.request_date,
-            currency=settings.RMA_PDF_DEFAULT_CURRENCY,
+            currency=currency,
             customer_code=ticket.customer_code,
             customer_name=ticket.customer_name,
             mailing_address=ticket.mailing_address,
             mailing_contact_person=ticket.contact_person,
             mailing_contact_phone=ticket.contact_phone,
-            delivery_fee_paid_by_customer=settings.RMA_PDF_DEFAULT_DELIVERY_FEE,
-            repair_fee_paid_by_customer=settings.RMA_PDF_DEFAULT_REPAIR_FEE,
-            total_cost=Decimal(settings.RMA_PDF_DEFAULT_TOTAL_COST),
+            delivery_fee_paid_by_customer="one-way charge/单次收费",
+            repair_fee_paid_by_customer=(
+                "free of charge/免费"
+                if total_cost == 0
+                else f"{total_cost:.2f} {currency}"
+            ),
+            total_cost=total_cost,
             items=result_items,
         )
     except ValueError as exc:

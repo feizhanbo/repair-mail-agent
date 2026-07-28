@@ -78,8 +78,13 @@ class Email(TimestampMixin, Base):
     clean_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
     latest_reply_segment: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
     parse_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
+    processing_stage: Mapped[str] = mapped_column(String(50), nullable=False, server_default="fetched")
     intent_type: Mapped[str | None] = mapped_column(String(50))
     duplicate_of_email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_emails_duplicate_of"))
+    terminal_reason_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    retryable: Mapped[bool] = bool_column(True)
+    next_retry_at: Mapped[datetime | None] = datetime_column()
     error_message: Mapped[str | None] = mapped_column(Text)
 
 

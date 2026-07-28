@@ -15,34 +15,39 @@ import {
   Empty,
   Form,
   Input,
-  InputNumber,
   Modal,
   Select,
   Space,
   Table,
   Tabs,
+  Tag,
   Timeline,
   Typography,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import ContentPreviewButton from '../components/ContentPreviewButton';
+import CopyableField from '../components/CopyableField';
+import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import ParseResultSelectionModal from '../components/ParseResultSelectionModal';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import TicketFieldEditor, { type TicketFieldForm } from '../components/TicketFieldEditor';
+import TicketItemEditor, { type TicketItemForm } from '../components/TicketItemEditor';
 import type {
   Attachment,
   EmailItem,
   FieldAuditLog,
+  JsonRecord,
   ManualTask,
   ManualTaskDetail,
+  PageData,
   ParseResult,
-  ReplyRecord,
   TicketLine,
 } from '../types/api';
 import { ARCHIVE_DOWNLOAD_WARNING, attachmentTypeLabel, isEngineeringReference } from '../utils/attachments';
@@ -62,32 +67,6 @@ type ResolveForm = {
   resolution_type?: string;
   next_action: string;
   result_payload_text?: string;
-};
-
-type TicketFieldForm = {
-  customer_code?: string;
-  customer_name?: string;
-  contact_person?: string;
-  contact_phone?: string;
-  contact_email?: string;
-  request_date?: string;
-  mailing_address?: string;
-  problem_description?: string;
-  accessories?: string;
-};
-
-type TicketItemForm = {
-  line_no?: number;
-  material_code?: string;
-  material_name?: string;
-  sn?: string;
-  quantity?: number;
-  failure_description?: string;
-  failure_information?: string;
-  data_info?: string;
-  remarks?: string;
-  accessories?: string;
-  manual_locked?: boolean;
 };
 
 const taskStatusOptions = [
@@ -126,13 +105,9 @@ const resolutionTypeOptions = [
   { value: 'other', label: '其他' },
 ];
 
-const lockOptions = [
-  { value: false, label: '未锁定' },
-  { value: true, label: '人工锁定' },
-];
-
 export default function ManualReviewPage() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<number | null>(() => {
@@ -202,6 +177,20 @@ export default function ManualReviewPage() {
       message.success('任务已解决');
       setResolveOpen(false);
       invalidateWorkbench();
+      // Auto-navigate to next pending task
+      setTimeout(() => {
+        const cached = queryClient.getQueryData<PageData<ManualTask>>(['manual-tasks', filters, page]);
+        const items = cached?.items ?? [];
+        const idx = items.findIndex((t) => t.id === selectedId);
+        if (idx >= 0 && idx < items.length - 1) {
+          setSelectedId(items[idx + 1].id);
+        } else if (items.length > 0 && idx >= 0) {
+          setPage((p) => p + 1);
+        } else {
+          message.success('所有任务已处理完毕');
+          setSelectedId(null);
+        }
+      }, 500);
     },
     onError: handleMutationError,
   });
@@ -291,18 +280,30 @@ export default function ManualReviewPage() {
   const taskColumns: ColumnsType<ManualTask> = [
     {
       title: '任务',
-      dataIndex: 'task_type',
-      render: (_, record) => (
-        <div className="queue-task-cell">
-          <Typography.Text strong>{record.task_type}</Typography.Text>
-          <Typography.Text type="secondary">{compactText(record.trigger_reason || record.description, '无触发说明')}</Typography.Text>
-          <Typography.Text type="secondary">{formatTime(record.created_at)}</Typography.Text>
+      ellipsis: true,
+      render: (_: unknown, record: ManualTask) => (
+        <div style={{ lineHeight: 1.5 }}>
+          <div>
+            <Button type="link" size="small" style={{ padding: 0 }}
+              onClick={(e) => { e.stopPropagation(); navigate(`/tickets?ticket_id=${record.ticket_id}`); }}>
+              #{record.ticket_id}
+            </Button>
+          </div>
+          <div>
+            <Typography.Text type="secondary" ellipsis={{ tooltip: record.trigger_reason }}
+              style={{ fontSize: 12 }}>{record.trigger_reason || record.description || '-'}</Typography.Text>
+          </div>
         </div>
       ),
     },
-    { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag value={value} kind="task" /> },
-    { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <StatusTag value={value} kind="priority" /> },
-    { title: '系统负责人', dataIndex: 'assigned_user_id', width: 100, render: (value?: number) => value || '-' },
+    {
+      title: '状态', dataIndex: 'status', width: 80,
+      render: (v: string) => <StatusTag value={v} kind="task" />,
+    },
+    {
+      title: '优先级', dataIndex: 'priority', width: 70,
+      render: (v: string) => <StatusTag value={v} kind="priority" />,
+    },
   ];
 
   return (
@@ -315,6 +316,7 @@ export default function ManualReviewPage() {
         <Button onClick={() => { setPage(1); setSelectedId(null); setFilters({ category: 'sql', scope: 'all', status: 'pending' }); }}>SQL 异常</Button>
       </Space>
       <div className="manual-workbench-grid">
+        {/* LEFT: Task queue + filters */}
         <SectionPanel className="task-queue-panel">
           <Form<TaskFilters>
             form={filterForm}
@@ -326,34 +328,23 @@ export default function ManualReviewPage() {
               setFilters(filtersWithDateRange(values, 'date_range', 'created_start', 'created_end'));
             }}
           >
-            <Form.Item name="status" label="任务状态">
-              <Select allowClear options={taskStatusOptions} />
-            </Form.Item>
-            <Form.Item name="scope" label="任务范围">
-              <Select allowClear options={visibleTaskScopeOptions} />
-            </Form.Item>
-            <Form.Item name="task_type" label="任务类型">
-              <Input allowClear prefix={<SearchOutlined />} />
-            </Form.Item>
-            <Form.Item name="priority" label="优先级">
-              <Select allowClear options={taskPriorityOptions} />
-            </Form.Item>
-            <Form.Item name="date_range" label="创建日期">
-              <DatePicker.RangePicker allowClear style={{ width: '100%' }} />
-            </Form.Item>
             <Space direction="vertical" style={{ width: '100%' }}>
+              <Form.Item name="scope" noStyle>
+                <Select allowClear placeholder="任务范围" options={visibleTaskScopeOptions} />
+              </Form.Item>
+              <Form.Item name="status" noStyle>
+                <Select allowClear placeholder="任务状态" options={taskStatusOptions} />
+              </Form.Item>
+              <Form.Item name="priority" noStyle>
+                <Select allowClear placeholder="优先级" options={taskPriorityOptions} />
+              </Form.Item>
+              <Form.Item name="date_range" noStyle>
+                <DatePicker.RangePicker allowClear style={{ width: '100%' }} />
+              </Form.Item>
+            </Space>
+            <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
               <Button htmlType="submit" type="primary" block>筛选</Button>
-              <Button
-                block
-                onClick={() => {
-                  filterForm.resetFields();
-                  setPage(1);
-                  setSelectedId(null);
-                  setFilters({});
-                }}
-              >
-                重置
-              </Button>
+              <Button block onClick={() => { filterForm.resetFields(); setPage(1); setSelectedId(null); setFilters({}); }}>重置</Button>
             </Space>
           </Form>
           <Table<ManualTask>
@@ -362,41 +353,48 @@ export default function ManualReviewPage() {
             columns={taskColumns}
             dataSource={tasksQuery.data?.items ?? []}
             loading={tasksQuery.isFetching}
-            locale={{ emptyText: tasksQuery.isError ? '复核任务加载失败' : '暂无复核任务' }}
+            locale={{
+              emptyText: tasksQuery.isError
+                ? <ErrorResult message={apiErrorMessage(tasksQuery.error)} onRetry={() => tasksQuery.refetch()} />
+                : '暂无复核任务'
+            }}
             rowClassName={(record) => (record.id === selectedId ? 'is-selected' : '')}
             onRow={(record) => ({ onClick: () => setSelectedId(record.id) })}
             pagination={{ current: page, pageSize: 20, total: tasksQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false, size: 'small' }}
           />
         </SectionPanel>
-        <SectionPanel className="evidence-panel">
-          <ManualEvidencePane
-            detail={detailQuery.data}
-            loading={detailQuery.isFetching}
-            onApplyParse={(id) => confirmAction('确认采纳该解析候选？', () => applyParseMutation.mutate({ id, action: 'apply' }))}
-            onPartialParse={setPartialParse}
-            onRejectParse={(id) => confirmAction('确认拒绝该解析候选？', () => applyParseMutation.mutate({ id, action: 'reject' }))}
-          />
-        </SectionPanel>
-        <SectionPanel className="action-panel">
-          <ManualActionPane
-            detail={detailQuery.data}
-            loading={detailQuery.isFetching}
-            onResolve={() => setResolveOpen(true)}
-            onReparse={() => confirmAction('确认重新解析关联邮件？', () => reparseMutation.mutate())}
-            onDraftReply={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
-            onValidateSn={() => confirmAction('确认执行 SN 校验？', () => validateSnMutation.mutate())}
-            onEditFields={() => setFieldOpen(true)}
-            onEditItem={openItemEditor}
-            reparseLoading={reparseMutation.isPending}
-            draftLoading={draftReplyMutation.isPending}
-            validateLoading={validateSnMutation.isPending}
-          />
-        </SectionPanel>
+
+        {/* RIGHT: Evidence + Actions combined */}
+        {detailQuery.data ? (
+          <div style={{ minWidth: 0, maxHeight: 'calc(100vh - 200px)', overflow: 'auto' }}>
+            <SectionPanel className="evidence-panel">
+            <ManualEvidencePane
+              detail={detailQuery.data}
+              loading={detailQuery.isFetching}
+              onApplyParse={(id) => confirmAction('确认采纳该解析候选？', () => applyParseMutation.mutate({ id, action: 'apply' }))}
+              onPartialParse={setPartialParse}
+              onRejectParse={(id) => confirmAction('确认拒绝该解析候选？', () => applyParseMutation.mutate({ id, action: 'reject' }))}
+              onEditFields={() => setFieldOpen(true)}
+              onEditItem={openItemEditor}
+              onResolve={() => setResolveOpen(true)}
+              onReparse={() => confirmAction('确认重新解析关联邮件？', () => reparseMutation.mutate())}
+              onDraftReply={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
+              onValidateSn={() => confirmAction('确认执行 SN 校验？', () => validateSnMutation.mutate())}
+              reparseLoading={reparseMutation.isPending}
+              draftLoading={draftReplyMutation.isPending}
+              validateLoading={validateSnMutation.isPending}
+            />
+            </SectionPanel>
+          </div>
+        ) : detailQuery.isFetching ? (
+          <SectionPanel><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载中" /></SectionPanel>
+        ) : tasksQuery.data?.items.length ? (
+          <SectionPanel><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择左侧任务" /></SectionPanel>
+        ) : null}
       </div>
       <Modal title="编辑工单字段" open={fieldOpen} onCancel={() => setFieldOpen(false)} footer={null} destroyOnClose>
         {detailQuery.data ? (
-          <Form<TicketFieldForm>
-            layout="vertical"
+          <TicketFieldEditor
             initialValues={{
               customer_code: detailQuery.data.ticket_context.ticket.customer_code ?? undefined,
               customer_name: detailQuery.data.ticket_context.ticket.customer_name ?? undefined,
@@ -408,19 +406,13 @@ export default function ManualReviewPage() {
               problem_description: detailQuery.data.ticket_context.ticket.problem_description ?? undefined,
               accessories: detailQuery.data.ticket_context.ticket.accessories ?? undefined,
             }}
-            onFinish={(values) => patchFieldsMutation.mutate(values)}
-          >
-            <Form.Item label="客户代码" name="customer_code"><Input /></Form.Item>
-            <Form.Item label="客户名称" name="customer_name"><Input /></Form.Item>
-            <Form.Item label="联系人" name="contact_person"><Input /></Form.Item>
-            <Form.Item label="联系电话" name="contact_phone"><Input /></Form.Item>
-            <Form.Item label="联系邮箱" name="contact_email"><Input /></Form.Item>
-            <Form.Item label="报修日期" name="request_date"><Input placeholder="YYYY-MM-DD" /></Form.Item>
-            <Form.Item label="寄送地址" name="mailing_address"><Input /></Form.Item>
-            <Form.Item label="问题描述" name="problem_description"><Input.TextArea rows={4} /></Form.Item>
-            <Form.Item label="附件/配件" name="accessories"><Input /></Form.Item>
-            <Button type="primary" htmlType="submit" loading={patchFieldsMutation.isPending}>保存</Button>
-          </Form>
+            onSubmit={async (values) => {
+              await patchFieldsMutation.mutateAsync(values);
+              setFieldOpen(false);
+            }}
+            loading={patchFieldsMutation.isPending}
+            onCancel={() => setFieldOpen(false)}
+          />
         ) : null}
       </Modal>
       <Modal
@@ -433,38 +425,19 @@ export default function ManualReviewPage() {
         footer={null}
         destroyOnClose
       >
-        <Form<TicketItemForm>
-          layout="vertical"
-          initialValues={{
-            line_no: editingItem?.line_no,
-            material_code: editingItem?.material_code ?? undefined,
-            material_name: editingItem?.material_name ?? undefined,
-            sn: editingItem?.sn ?? undefined,
-            quantity: editingItem?.quantity ?? 1,
-            failure_description: editingItem?.failure_description ?? undefined,
-            failure_information: editingItem?.failure_information ?? undefined,
-            data_info: editingItem?.data_info ?? undefined,
-            remarks: editingItem?.remarks ?? undefined,
-            accessories: editingItem?.accessories ?? undefined,
-            manual_locked: editingItem?.manual_locked ?? false,
+        <TicketItemEditor
+          editingItem={editingItem}
+          onSubmit={async (values) => {
+            await patchItemsMutation.mutateAsync(values);
+            setItemOpen(false);
+            setEditingItem(null);
           }}
-          onFinish={(values) => patchItemsMutation.mutate(values)}
-        >
-          <div className="two-column-grid">
-            <Form.Item label="行号" name="line_no"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item>
-            <Form.Item label="数量" name="quantity"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item>
-          </div>
-          <Form.Item label="SN" name="sn"><Input /></Form.Item>
-          <Form.Item label="物料编码" name="material_code"><Input /></Form.Item>
-          <Form.Item label="物料名称" name="material_name"><Input /></Form.Item>
-          <Form.Item label="故障描述" name="failure_description"><Input.TextArea rows={3} /></Form.Item>
-          <Form.Item label="故障信息" name="failure_information"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item label="数据信息" name="data_info"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item label="配件" name="accessories"><Input /></Form.Item>
-          <Form.Item label="备注" name="remarks"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item label="人工锁定" name="manual_locked"><Select options={lockOptions} /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={patchItemsMutation.isPending}>保存</Button>
-        </Form>
+          loading={patchItemsMutation.isPending}
+          onCancel={() => {
+            setItemOpen(false);
+            setEditingItem(null);
+          }}
+        />
       </Modal>
       <Modal title="完成复核任务" open={resolveOpen} onCancel={() => setResolveOpen(false)} footer={null} destroyOnClose>
         <Form<ResolveForm> layout="vertical" onFinish={(values) => confirmAction('确认完成复核任务？', () => resolveMutation.mutate(values))}>
@@ -502,12 +475,30 @@ function ManualEvidencePane({
   onApplyParse,
   onPartialParse,
   onRejectParse,
+  onEditFields,
+  onEditItem,
+  onResolve,
+  onReparse,
+  onDraftReply,
+  onValidateSn,
+  reparseLoading,
+  draftLoading,
+  validateLoading,
 }: {
   detail?: ManualTaskDetail;
   loading: boolean;
   onApplyParse: (id: number) => void;
   onPartialParse: (record: ParseResult) => void;
   onRejectParse: (id: number) => void;
+  onEditFields: () => void;
+  onEditItem: (item?: TicketLine) => void;
+  onResolve: () => void;
+  onReparse: () => void;
+  onDraftReply: () => void;
+  onValidateSn: () => void;
+  reparseLoading: boolean;
+  draftLoading: boolean;
+  validateLoading: boolean;
 }) {
   const attachmentDownloadMutation = useMutation({
     mutationFn: (attachmentId: number) => api.attachmentDownloadUrl(attachmentId),
@@ -544,7 +535,7 @@ function ManualEvidencePane({
   return (
     <div className="drawer-stack">
       <Descriptions column={2} size="small" bordered>
-        <Descriptions.Item label="工单号">{context.ticket.ticket_no}</Descriptions.Item>
+        <Descriptions.Item label="工单号"><CopyableField value={context.ticket.ticket_no} /></Descriptions.Item>
         <Descriptions.Item label="工单状态"><StatusTag value={context.ticket.current_status_code} kind="ticket" /></Descriptions.Item>
         <Descriptions.Item label="任务类型">{detail.task.task_type}</Descriptions.Item>
         <Descriptions.Item label="任务状态"><StatusTag value={detail.task.status} kind="task" /></Descriptions.Item>
@@ -554,291 +545,162 @@ function ManualEvidencePane({
         items={[
           {
             key: 'mail',
-            label: `邮件证据(${timelineEmails.length})`,
-            children: timelineEmails.length ? (
-              <Timeline items={timelineEmails.map((email) => ({ children: <EmailTimelineItem email={email} /> }))} />
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            ),
-          },
-          {
-            key: 'attachments',
-            label: `附件(${context.attachments.length})`,
+            label: '邮件证据',
             children: (
-              <Table<Attachment>
-                size="small"
-                rowKey="id"
-                dataSource={context.attachments}
-                pagination={false}
-                columns={[
-                  { title: '文件名', dataIndex: 'file_name', ellipsis: true },
-                  { title: '类型', dataIndex: 'content_type', width: 140, render: (value?: string) => value || '-' },
-                  { title: '附件类型', width: 170, render: (_, record) => attachmentTypeLabel(record) },
-                  { title: '发送时间', dataIndex: 'sent_at', width: 150, render: formatTime },
-                  { title: '大小', dataIndex: 'file_size_kb', width: 90, render: (_value, record) => formatFileSizeKb(record.file_size_kb, record.file_size) },
-                  { title: '解析', dataIndex: 'parse_status', width: 150, render: (value: string, record) => <StatusTag value={isEngineeringReference(record) ? 'engineering_reference_stored' : value} kind="parse" /> },
-                  { title: '安全提示', width: 140, render: (_, record) => isEngineeringReference(record) ? <Typography.Text type="warning">未经内容扫描</Typography.Text> : '-' },
-                  {
-                    title: '操作',
-                    width: 120,
-                    render: (_, record) => (
+              <div className="drawer-stack">
+                {timelineEmails.length ? (
+                  <Timeline items={timelineEmails.map((email) => ({ children: <EmailTimelineItem email={email} /> }))} />
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )}
+                <Typography.Title level={5}>附件</Typography.Title>
+                <Table<Attachment>
+                  size="small" rowKey="id" dataSource={context.attachments} pagination={false}
+                  columns={[
+                    { title: '文件名', dataIndex: 'file_name', ellipsis: true },
+                    { title: '类型', dataIndex: 'content_type', width: 140, render: (v?: string) => v || '-' },
+                    { title: '附件类型', width: 170, render: (_: unknown, r: Attachment) => attachmentTypeLabel(r) },
+                    { title: '发送时间', dataIndex: 'sent_at', width: 150, render: formatTime },
+                    { title: '大小', dataIndex: 'file_size_kb', width: 90, render: (_v: unknown, r: Attachment) => formatFileSizeKb(r.file_size_kb, r.file_size) },
+                    { title: '解析', dataIndex: 'parse_status', width: 150, render: (v: string, r: Attachment) => <StatusTag value={isEngineeringReference(r) ? 'engineering_reference_stored' : v} kind="parse" /> },
+                    { title: '安全提示', width: 140, render: (_: unknown, r: Attachment) => isEngineeringReference(r) ? <Typography.Text type="warning">未经内容扫描</Typography.Text> : '-' },
+                    { title: '操作', width: 120, render: (_: unknown, r: Attachment) => (
                       <Space size={0}>
-                        <ContentPreviewButton kind="attachment" id={record.id} disabled={!record.oss_object_id} />
-                        <Button
-                          type="link"
-                          size="small"
-                          icon={<DownloadOutlined />}
-                          disabled={!record.oss_object_id}
-                          loading={attachmentDownloadMutation.isPending}
-                          onClick={() => downloadAttachment(record)}
-                          title="下载"
-                        />
+                        <ContentPreviewButton kind="attachment" id={r.id} disabled={!r.oss_object_id} />
+                        <Button type="link" size="small" icon={<DownloadOutlined />} disabled={!r.oss_object_id} loading={attachmentDownloadMutation.isPending} onClick={() => downloadAttachment(r)} title="下载" />
                       </Space>
+                    )},
+                  ]}
+                  expandable={{
+                    expandedRowRender: (r: Attachment) => (
+                      <div className="evidence-grid">
+                        <div><Typography.Text strong>提取文本</Typography.Text><pre className="json-block">{r.extracted_text || '-'}</pre></div>
+                        <div><Typography.Text strong>提取 JSON</Typography.Text><JsonBlock value={r.extracted_json} /></div>
+                      </div>
                     ),
-                  },
-                ]}
-                expandable={{
-                  expandedRowRender: (record) => (
-                    <div className="evidence-grid">
-                      <div>
-                        <Typography.Text strong>提取文本</Typography.Text>
-                        <pre className="json-block">{record.extracted_text || '-'}</pre>
-                      </div>
-                      <div>
-                        <Typography.Text strong>提取 JSON</Typography.Text>
-                        <JsonBlock value={record.extracted_json} />
-                      </div>
-                    </div>
-                  ),
-                }}
-              />
+                  }}
+                />
+              </div>
             ),
           },
           {
             key: 'parse',
-            label: `解析候选(${context.parse_results.length})`,
-            children: (
-              <Table<ParseResult>
-                size="small"
-                rowKey="id"
-                dataSource={context.parse_results}
-                pagination={false}
-                columns={[
-                  { title: 'ID', dataIndex: 'id', width: 70 },
-                  { title: '解析器', dataIndex: 'parser_type', width: 100 },
-                  { title: '意图', dataIndex: 'intent_type', width: 120, render: (value?: string) => value || '-' },
-                  { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
-                  { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
-                  { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },
-                  {
-                    title: '操作',
-                    width: 190,
-                    render: (_, record) => {
-                      const handled = Boolean(record.apply_status && record.apply_status !== 'pending');
-                      return (
-                        <Space size={0}>
-                          <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onApplyParse(record.id)}>采纳</Button>
-                          <Button type="link" size="small" disabled={handled || record.accepted} onClick={() => onPartialParse(record)}>部分采纳</Button>
-                          <Button type="link" size="small" danger disabled={handled} onClick={() => onRejectParse(record.id)}>拒绝</Button>
-                        </Space>
-                      );
-                    },
-                  },
-                ]}
-                expandable={{
-                  expandedRowRender: (record) => (
-                    <div className="evidence-grid">
-                      <div>
-                        <Typography.Text strong>提取字段</Typography.Text>
-                        <JsonBlock value={record.extracted_fields} />
-                      </div>
-                      <div>
-                        <Typography.Text strong>提取明细</Typography.Text>
-                        <JsonBlock value={record.extracted_items} />
-                      </div>
-                      <div>
-                        <Typography.Text strong>证据</Typography.Text>
-                        <JsonBlock value={record.evidence} />
-                      </div>
-                    </div>
-                  ),
-                }}
-              />
-            ),
-          },
-          {
-            key: 'replies',
-            label: `回复链(${context.reply_records.length})`,
-            children: (
-              <Table<ReplyRecord>
-                size="small"
-                rowKey="id"
-                dataSource={context.reply_records}
-                pagination={false}
-                columns={[
-                  { title: '类型', dataIndex: 'reply_type', width: 100 },
-                  { title: '轮次', dataIndex: 'followup_round', width: 70 },
-                  { title: '收件人', dataIndex: 'to_addresses', ellipsis: true },
-                  { title: '审核', dataIndex: 'review_status', width: 100, render: (value: string) => <StatusTag value={value} kind="review" /> },
-                  { title: '发送', dataIndex: 'send_status', width: 100, render: (value: string) => <StatusTag value={value} /> },
-                ]}
-                expandable={{
-                  expandedRowRender: (record) => (
-                    <div className="evidence-grid">
-                      <div>
-                        <Typography.Text strong>草稿内容</Typography.Text>
-                        <pre className="json-block">{record.draft_body || '-'}</pre>
-                      </div>
-                      <div>
-                        <Typography.Text strong>最终内容</Typography.Text>
-                        <pre className="json-block">{record.final_body || '-'}</pre>
-                      </div>
-                      <div>
-                        <Typography.Text strong>模板与失败信息</Typography.Text>
-                        <JsonBlock value={{
-                          reply_template_version: record.reply_template_version,
-                          rma_template_version: record.rma_template_version,
-                          rma_pdf_oss_object_id: record.rma_pdf_oss_object_id,
-                          error_message: record.error_message,
-                        }} />
-                      </div>
-                    </div>
-                  ),
-                }}
-              />
-            ),
-          },
-          {
-            key: 'audit',
-            label: `字段证据(${fieldAudits.length})`,
+            label: 'AI 解析对比',
             children: (
               <div className="drawer-stack">
-                <div className="two-column-grid">
-                  <div>
-                    <Typography.Title level={5}>缺失字段</Typography.Title>
-                    <JsonBlock value={context.ticket.missing_fields} />
-                  </div>
-                  <div>
-                    <Typography.Title level={5}>冲突字段</Typography.Title>
-                    <JsonBlock value={context.ticket.conflict_fields} />
-                  </div>
-                </div>
-                <Table<FieldAuditLog>
-                  size="small"
-                  rowKey="id"
-                  dataSource={fieldAudits}
-                  pagination={false}
+                <Table<ParseResult>
+                  size="small" rowKey="id" dataSource={context.parse_results} pagination={false}
                   columns={[
-                    { title: '字段', dataIndex: 'field_name', width: 140 },
-                    { title: '旧值', dataIndex: 'old_value', ellipsis: true, render: (value?: string) => value || '-' },
-                    { title: '新值', dataIndex: 'new_value', ellipsis: true, render: (value?: string) => value || '-' },
-                    { title: '来源', dataIndex: 'source_type', width: 90 },
-                    { title: '时间', dataIndex: 'created_at', width: 150, render: formatTime },
+                    { title: 'ID', dataIndex: 'id', width: 70 },
+                    { title: '解析器', dataIndex: 'parser_type', width: 100 },
+                    { title: '意图', dataIndex: 'intent_type', width: 120, render: (v?: string) => v || '-' },
+                    { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
+                    { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (v: string) => <StatusTag value={v} /> },
+                    { title: '缺失字段', dataIndex: 'missing_fields', render: (v: unknown) => <JsonBlock value={v as JsonRecord} /> },
+                    {
+                      title: '操作', width: 190,
+                      render: (_: unknown, r: ParseResult) => {
+                        const handled = Boolean(r.apply_status && r.apply_status !== 'pending');
+                        return (
+                          <Space size={0}>
+                            <Button type="link" size="small" disabled={handled || r.accepted} onClick={() => onApplyParse(r.id)}>采纳</Button>
+                            <Button type="link" size="small" disabled={handled || r.accepted} onClick={() => onPartialParse(r)}>部分采纳</Button>
+                            <Button type="link" size="small" danger disabled={handled} onClick={() => onRejectParse(r.id)}>拒绝</Button>
+                          </Space>
+                        );
+                      },
+                    },
+                  ]}
+                  expandable={{
+                    expandedRowRender: (r: ParseResult) => (
+                      <div className="evidence-grid">
+                        <div><Typography.Text strong>提取字段</Typography.Text><JsonBlock value={r.extracted_fields} /></div>
+                        <div><Typography.Text strong>提取明细</Typography.Text><JsonBlock value={r.extracted_items} /></div>
+                        <div><Typography.Text strong>证据</Typography.Text><JsonBlock value={r.evidence} /></div>
+                      </div>
+                    ),
+                  }}
+                />
+                <div style={{ marginTop: 12 }}>
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <div>
+                      <Typography.Text strong>缺失字段：</Typography.Text>
+                      <Space wrap size={[4, 4]}>
+                        {Object.keys(context.ticket.missing_fields || {}).length > 0
+                          ? Object.keys(context.ticket.missing_fields!).map((f) => <Tag color="orange" key={f}>{f}</Tag>)
+                          : <Typography.Text type="secondary">-</Typography.Text>}
+                      </Space>
+                    </div>
+                    <div>
+                      <Typography.Text strong>冲突字段：</Typography.Text>
+                      <Space wrap size={[4, 4]}>
+                        {Object.keys(context.ticket.conflict_fields || {}).length > 0
+                          ? Object.keys(context.ticket.conflict_fields!).map((f) => <Tag color="red" key={f}>{f}</Tag>)
+                          : <Typography.Text type="secondary">-</Typography.Text>}
+                      </Space>
+                    </div>
+                  </Space>
+                </div>
+                {fieldAudits.length > 0 && (
+                  <>
+                    <Typography.Title level={5}>字段变更记录</Typography.Title>
+                    <Table<FieldAuditLog>
+                      size="small" rowKey="id" dataSource={fieldAudits} pagination={false}
+                      columns={[
+                        { title: '字段', dataIndex: 'field_name', width: 140 },
+                        { title: '旧值', dataIndex: 'old_value', ellipsis: true, render: (v?: string) => v || '-' },
+                        { title: '新值', dataIndex: 'new_value', ellipsis: true, render: (v?: string) => v || '-' },
+                        { title: '来源', dataIndex: 'source_type', width: 90 },
+                        { title: '时间', dataIndex: 'created_at', width: 150, render: formatTime },
+                      ]}
+                    />
+                  </>
+                )}
+              </div>
+            ),
+          },
+          {
+            key: 'ticket',
+            label: '工单详情',
+            children: (
+              <div className="drawer-stack">
+                <Descriptions column={2} size="small" bordered>
+                  <Descriptions.Item label="客户代码">{context.ticket.customer_code || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户名称">{context.ticket.customer_name || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="联系电话">{context.ticket.contact_phone || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="联系邮箱">{context.ticket.contact_email || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="寄送地址" span={2}>{context.ticket.mailing_address || '-'}</Descriptions.Item>
+                </Descriptions>
+                <Typography.Title level={5}>维修明细</Typography.Title>
+                <Table<TicketLine>
+                  size="small" rowKey="id" dataSource={context.items} pagination={false}
+                  columns={[
+                    { title: '行', dataIndex: 'line_no', width: 48 },
+                    { title: 'SN', dataIndex: 'sn', width: 140, render: (v?: string) => v || '-' },
+                    { title: '物料编码', dataIndex: 'material_code', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '物料名称', dataIndex: 'material_name', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '数量', dataIndex: 'quantity', width: 60 },
+                    { title: '故障描述', dataIndex: 'failure_description', ellipsis: true, render: (v?: string) => compactText(v) },
+                    { title: '操作', width: 70, render: (_: unknown, r: TicketLine) => <Button type="link" size="small" onClick={() => onEditItem(r)}>编辑</Button> },
                   ]}
                 />
+                <Typography.Text type="secondary">
+                  {buildSuggestions(detail).map((item) => <span key={item}>• {item} </span>)}
+                </Typography.Text>
               </div>
             ),
           },
         ]}
       />
-    </div>
-  );
-}
-
-function ManualActionPane({
-  detail,
-  loading,
-  onResolve,
-  onReparse,
-  onDraftReply,
-  onValidateSn,
-  onEditFields,
-  onEditItem,
-  reparseLoading,
-  draftLoading,
-  validateLoading,
-}: {
-  detail?: ManualTaskDetail;
-  loading: boolean;
-  onResolve: () => void;
-  onReparse: () => void;
-  onDraftReply: () => void;
-  onValidateSn: () => void;
-  onEditFields: () => void;
-  onEditItem: (item?: TicketLine) => void;
-  reparseLoading: boolean;
-  draftLoading: boolean;
-  validateLoading: boolean;
-}) {
-  if (!detail && !loading) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务后处理" />;
-  }
-  if (!detail) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载中" />;
-  }
-
-  const { task, ticket_context: context } = detail;
-  const suggestions = buildSuggestions(detail);
-  const canResolve = task.status !== 'resolved' && task.status !== 'closed';
-
-  return (
-    <div className="drawer-stack">
-      <Descriptions column={1} size="small" bordered>
-        <Descriptions.Item label="任务状态"><StatusTag value={task.status} kind="task" /></Descriptions.Item>
-        <Descriptions.Item label="优先级"><StatusTag value={task.priority} kind="priority" /></Descriptions.Item>
-        <Descriptions.Item label="工单状态"><StatusTag value={context.ticket.current_status_code} kind="ticket" /></Descriptions.Item>
-        <Descriptions.Item label="客户">{context.ticket.customer_name || '-'}</Descriptions.Item>
-        <Descriptions.Item label="联系人">{context.ticket.contact_person || context.ticket.contact_email || '-'}</Descriptions.Item>
-        <Descriptions.Item label="问题描述">{compactText(context.ticket.problem_description, '-')}</Descriptions.Item>
-      </Descriptions>
-      <div className="suggestion-list">
-        <Typography.Title level={5}>建议动作</Typography.Title>
-        {suggestions.map((item) => <Typography.Text key={item}>• {item}</Typography.Text>)}
-      </div>
-      <div className="action-button-grid">
+      {/* Action buttons */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, paddingTop: 8, borderTop: '1px solid #f0f0f0' }}>
         <Button icon={<EditOutlined />} onClick={onEditFields}>字段修正</Button>
         <Button icon={<FileAddOutlined />} onClick={() => onEditItem()}>新增明细</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateLoading} onClick={onValidateSn}>SN 校验</Button>
         <Button icon={<SyncOutlined />} loading={reparseLoading} onClick={onReparse}>重新解析</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
-        <Button type="primary" disabled={!canResolve} onClick={onResolve}>完成任务</Button>
+        <Button type="primary" disabled={detail.task.status === 'resolved' || detail.task.status === 'closed'} onClick={onResolve}>完成任务</Button>
       </div>
-      <Tabs
-        size="small"
-        items={[
-          {
-            key: 'fields',
-            label: '工单字段',
-            children: (
-              <Descriptions column={1} size="small" bordered>
-                <Descriptions.Item label="客户代码">{context.ticket.customer_code || '-'}</Descriptions.Item>
-                <Descriptions.Item label="客户名称">{context.ticket.customer_name || '-'}</Descriptions.Item>
-                <Descriptions.Item label="联系电话">{context.ticket.contact_phone || '-'}</Descriptions.Item>
-                <Descriptions.Item label="联系邮箱">{context.ticket.contact_email || '-'}</Descriptions.Item>
-                <Descriptions.Item label="寄送地址">{context.ticket.mailing_address || '-'}</Descriptions.Item>
-              </Descriptions>
-            ),
-          },
-          {
-            key: 'items',
-            label: `明细(${context.items.length})`,
-            children: (
-              <Table<TicketLine>
-                size="small"
-                rowKey="id"
-                dataSource={context.items}
-                pagination={false}
-                columns={[
-                  { title: '行', dataIndex: 'line_no', width: 48 },
-                  { title: 'SN', dataIndex: 'sn', width: 120, render: (value?: string) => value || '-' },
-                  { title: '物料', dataIndex: 'material_code', ellipsis: true, render: (value?: string) => value || '-' },
-                  { title: '操作', width: 70, render: (_, record) => <Button type="link" size="small" onClick={() => onEditItem(record)}>编辑</Button> },
-                ]}
-              />
-            ),
-          },
-        ]}
-      />
     </div>
   );
 }

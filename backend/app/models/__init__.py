@@ -1,10 +1,10 @@
 from app.models.base import Base
 from app.models.identity import Role, User, UserRole
-from app.models.integrations import ExportSap, ExternalSyncCheckpoint, TicketRelayExport
+from app.models.integrations import ExportSap, ExternalSyncCheckpoint, TicketRelayExport, TicketRma, TicketRmaItem
 from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog
 from app.models.mail import Email, EmailAttachment, EmailThread, EmailTicketLink
 from app.models.mail_fetch import MailFetchRecord
-from app.models.master_data import BoardCard, SnAsset
+from app.models.master_data import BoardCard, CustomerServicePolicy, SnAsset
 from app.models.parsing import ParseResult, SnValidationResult
 from app.models.replies import ReplyRecord, ReplyTemplate
 from app.models.review import ManualReviewTask, NotificationEvent, NotificationUserState
@@ -33,6 +33,7 @@ __all__ = [
     "SnValidationResult",
     "SnAsset",
     "BoardCard",
+    "CustomerServicePolicy",
     "ReplyTemplate",
     "ReplyRecord",
     "ManualReviewTask",
@@ -41,6 +42,8 @@ __all__ = [
     "ExternalSyncCheckpoint",
     "TicketRelayExport",
     "ExportSap",
+    "TicketRma",
+    "TicketRmaItem",
     "AiCallLog",
     "OperationLog",
     "SystemEventLog",

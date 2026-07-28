@@ -15,6 +15,7 @@ from app.models import (
     EmailAttachment,
     EmailThread,
     EmailTicketLink,
+    ExportSap,
     FieldAuditLog,
     ManualReviewTask,
     ParseResult,
@@ -23,6 +24,8 @@ from app.models import (
     ReplyRecord,
     SnValidationResult,
     TicketStatusLog,
+    TicketRelayExport,
+    TicketRma,
     WorkflowStatus,
 )
 from app.services.audit import log_operation
@@ -69,6 +72,9 @@ TICKET_FIELDS = (
     "device_received_note",
     "device_received_idempotency_key",
     "device_receipt_ack_status",
+    "terminal_reason_code",
+    "terminal_reason",
+    "closed_at",
     "manual_locked",
     "version",
     "created_at",
@@ -146,8 +152,13 @@ EMAIL_FIELDS = (
     "sent_at",
     "received_at",
     "parse_status",
+    "processing_stage",
     "intent_type",
     "duplicate_of_email_id",
+    "terminal_reason_code",
+    "last_error_code",
+    "retryable",
+    "next_retry_at",
     "error_message",
     "created_at",
     "updated_at",
@@ -475,6 +486,27 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
     status_logs = (
         await session.execute(select(TicketStatusLog).where(TicketStatusLog.ticket_id == ticket.id).order_by(TicketStatusLog.created_at.desc()))
     ).scalars().all()
+    relay_batches = (
+        await session.execute(
+            select(TicketRelayExport)
+            .where(TicketRelayExport.ticket_id == ticket.id)
+            .order_by(TicketRelayExport.created_at.desc())
+        )
+    ).scalars().all()
+    sap_exports = (
+        await session.execute(
+            select(ExportSap)
+            .where(ExportSap.ticket_id == ticket.id)
+            .order_by(ExportSap.ticket_item_id, ExportSap.created_at.desc())
+        )
+    ).scalars().all()
+    rma_rows = (
+        await session.execute(
+            select(TicketRma)
+            .where(TicketRma.ticket_id == ticket.id)
+            .order_by(TicketRma.created_at)
+        )
+    ).scalars().all()
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     thread = await session.get(EmailThread, ticket.thread_id) if ticket.thread_id else None
     detail = {
@@ -603,6 +635,71 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                 ),
             )
             for row in status_logs
+        ],
+        "sap_export_summary": {
+            "batch_status": relay_batches[0].status if relay_batches else "not_started",
+            "line_count": len(sap_exports),
+            "submitted_count": sum(
+                1 for row in sap_exports if row.status in {"accepted", "waiting_rma", "rma_received"}
+            ),
+            "accepted_count": sum(
+                1 for row in sap_exports if row.remote_call_id
+            ),
+            "rma_received_count": sum(
+                1 for row in sap_exports if row.status == "rma_received" and row.rma_no
+            ),
+            "failed_count": sum(
+                1 for row in sap_exports if row.status in {"failed", "timed_out", "manual_review"}
+            ),
+        },
+        "sap_exports": [
+            model_to_dict(
+                row,
+                (
+                    "id",
+                    "ticket_item_id",
+                    "relay_export_id",
+                    "submission_key",
+                    "status",
+                    "attempt_count",
+                    "remote_call_id",
+                    "rma_no",
+                    "last_error_code",
+                    "last_error_message",
+                    "submitted_at",
+                    "accepted_at",
+                    "last_polled_at",
+                    "rma_received_at",
+                    "sn",
+                    "customer_code",
+                    "material_code",
+                    "customer_name",
+                    "material_name",
+                    "currency",
+                    "shipping_fee",
+                    "repair_fee",
+                    "tax_rate",
+                ),
+            )
+            for row in sap_exports
+        ],
+        "rma_records": [
+            model_to_dict(
+                row,
+                (
+                    "id",
+                    "rma_no",
+                    "status",
+                    "policy_snapshot",
+                    "pdf_oss_object_id",
+                    "reply_record_id",
+                    "received_at",
+                    "sent_at",
+                    "created_at",
+                    "updated_at",
+                ),
+            )
+            for row in rma_rows
         ],
     }
     detail["email_timeline"] = await get_ticket_email_timeline(session, ticket.id)
@@ -1307,6 +1404,11 @@ async def apply_parse_result(
     parse_result.accepted_at = now
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
+    email.processing_stage = "completed"
+    email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
+    email.last_error_code = None
+    email.retryable = False
+    email.next_retry_at = None
     ticket.version += 1
     await log_operation(
         session,

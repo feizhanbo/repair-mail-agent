@@ -4,8 +4,10 @@ import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, S
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
+import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
 import ContentPreviewButton from '../components/ContentPreviewButton';
+import CopyableField from '../components/CopyableField';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
@@ -354,7 +356,11 @@ export default function EmailsPage() {
           columns={columns}
           dataSource={emailsQuery.data?.items ?? []}
           loading={emailsQuery.isFetching}
-          locale={{ emptyText: emailsQuery.isError ? '邮件加载失败' : '暂无邮件' }}
+          locale={{
+            emptyText: emailsQuery.isError
+              ? <ErrorResult message={apiErrorMessage(emailsQuery.error)} onRetry={() => emailsQuery.refetch()} />
+              : '暂无邮件'
+          }}
           pagination={{ current: page, pageSize: 20, total: emailsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>
@@ -363,9 +369,9 @@ export default function EmailsPage() {
           <div className="drawer-stack">
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="主题">{detailQuery.data.email.subject || '-'}</Descriptions.Item>
-              <Descriptions.Item label="发件人">{detailQuery.data.email.from_address}</Descriptions.Item>
+              <Descriptions.Item label="发件人"><CopyableField value={detailQuery.data.email.from_address} /></Descriptions.Item>
               <Descriptions.Item label="收件人">{detailQuery.data.email.to_addresses || '-'}</Descriptions.Item>
-              <Descriptions.Item label="Message-ID">{detailQuery.data.email.message_id}</Descriptions.Item>
+              <Descriptions.Item label="Message-ID"><CopyableField value={detailQuery.data.email.message_id || ''} displayText={detailQuery.data.email.message_id || '-'} /></Descriptions.Item>
               <Descriptions.Item label="原始EML">
                 {detailQuery.data.email.raw_eml_oss_object_id ? (
                   <Button

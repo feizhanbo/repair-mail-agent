@@ -68,6 +68,9 @@ class RepairTicket(TimestampMixin, Base):
     device_received_note: Mapped[str | None] = mapped_column(Text)
     device_received_idempotency_key: Mapped[str | None] = mapped_column(String(100))
     device_receipt_ack_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="not_received")
+    terminal_reason_code: Mapped[str | None] = mapped_column(String(100))
+    terminal_reason: Mapped[str | None] = mapped_column(String(500))
+    closed_at: Mapped[Any | None] = datetime_column()
     manual_locked: Mapped[bool] = bool_column(False)
     version: Mapped[int] = mapped_column(nullable=False, server_default="1")
 

@@ -95,3 +95,161 @@ def test_sqlserver_query_uses_validated_identifiers_and_bound_values(monkeypatch
     assert seen["params"][1:] == ["2026-07-16T00:00:00", "2026-07-16T00:00:00", 99]
     with pytest.raises(external_relay.RelayConfigurationError):
         external_relay._identifier("sn_source; DROP TABLE users")
+
+
+def test_sqlserver_one_sn_insert_returns_call_id_and_uses_submission_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Cursor:
+        def execute(self, sql, params):
+            calls.append((sql, params))
+            if sql.startswith("SELECT TOP"):
+                return Result(None)
+            return Result(("CALL-1001",))
+
+    class Connection:
+        committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            self.committed = True
+
+    mapping = {
+        "submission_key": "submission_key",
+        "sn": "internalSN",
+        "customer_code": "customer",
+        "material_code": "itemCode",
+        "repair_fee": "U_WSPrice",
+    }
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_MODE", "table")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_COLUMN_MAP", mapping)
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN", "submission_key")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY", "submission_key")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
+    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
+
+    result = external_relay._write_ticket_snapshot(
+        {
+            "submission_key": "stable-key",
+            "sn": "SN-1",
+            "customer_code": "CM001",
+            "material_code": "MAT001",
+            "repair_fee": "1200.00",
+            "tax_rate": "13.0000",
+        }
+    )
+
+    assert result == {
+        "status": "succeeded",
+        "remote_record_key": "CALL-1001",
+        "idempotent_reuse": False,
+    }
+    assert "WHERE [submission_key] = ?" in calls[0][0]
+    assert calls[0][1] == "stable-key"
+    assert "OUTPUT INSERTED.[callID]" in calls[1][0]
+    assert "[internalSN]" in calls[1][0]
+    assert "tax_rate" not in calls[1][0]
+
+
+def test_sqlserver_rma_poll_uses_call_id_and_reads_customer_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class Result:
+        def fetchone(self):
+            return ("CALL-1001", "2026072801")
+
+    class Cursor:
+        def execute(self, sql, value):
+            seen["sql"] = sql
+            seen["value"] = value
+            return Result()
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RMA_COLUMN", "U_CustomerNum")
+    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
+
+    result = external_relay._fetch_rma_result("CALL-1001")
+
+    assert result == {"remote_call_id": "CALL-1001", "rma_no": "2026072801"}
+    assert "[callID], [U_CustomerNum]" in str(seen["sql"])
+    assert seen["value"] == "CALL-1001"
+
+
+def test_sqlserver_retry_reuses_existing_submission_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Result:
+        def fetchone(self):
+            return ("CALL-EXISTING",)
+
+    class Cursor:
+        def execute(self, sql, _params):
+            statements.append(sql)
+            return Result()
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_MODE", "table")
+    monkeypatch.setattr(
+        settings,
+        "RELAY_SQLSERVER_RESULT_COLUMN_MAP",
+        {"submission_key": "submission_key", "sn": "internalSN"},
+    )
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN", "submission_key")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY", "submission_key")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
+    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
+
+    result = external_relay._write_ticket_snapshot(
+        {"submission_key": "stable-key", "sn": "SN-1"}
+    )
+
+    assert result["remote_record_key"] == "CALL-EXISTING"
+    assert result["idempotent_reuse"] is True
+    assert len(statements) == 1
+    assert statements[0].startswith("SELECT TOP")

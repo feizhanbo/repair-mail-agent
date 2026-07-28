@@ -12,7 +12,8 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../api/client';
+import { api, apiErrorMessage } from '../api/client';
+import ErrorResult from '../components/ErrorResult';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import type { StatisticsTrendItem, UserProcessingStat } from '../types/api';
@@ -128,6 +129,11 @@ export default function StatisticsPage() {
           loading={query.isFetching}
           columns={trendColumns}
           dataSource={data?.trend ?? []}
+          locale={{
+            emptyText: query.isError
+              ? <ErrorResult message={apiErrorMessage(query.error)} onRetry={() => query.refetch()} />
+              : '暂无数据'
+          }}
           pagination={false}
         />
       </SectionPanel>
@@ -140,6 +146,11 @@ export default function StatisticsPage() {
           loading={query.isFetching}
           columns={userColumns}
           dataSource={data?.user_processing ?? []}
+          locale={{
+            emptyText: query.isError
+              ? <ErrorResult message={apiErrorMessage(query.error)} onRetry={() => query.refetch()} />
+              : '暂无数据'
+          }}
           pagination={false}
         />
       </SectionPanel>

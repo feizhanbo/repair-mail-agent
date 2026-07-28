@@ -130,12 +130,24 @@ def test_all_three_switch_combinations_keep_ordinary_and_followup_independent(
     assert replies._reply_can_auto_send(followup) is followup_enabled
 
 
-def test_seed_allows_only_device_receipt_ack_to_close_ready_ticket() -> None:
-    close_rules = [
+def test_seed_requires_rma_send_before_device_receipt_can_close_ticket() -> None:
+    direct_close_rules = [
         transition
         for transition in seed_data.WORKFLOW_TRANSITIONS
         if transition["from_status_code"] == "ready_for_export" and transition["to_status_code"] == "closed"
     ]
+    rma_send_rules = [
+        transition
+        for transition in seed_data.WORKFLOW_TRANSITIONS
+        if transition["from_status_code"] == "ready_for_export" and transition["to_status_code"] == "rma_sent"
+    ]
+    close_rules = [
+        transition
+        for transition in seed_data.WORKFLOW_TRANSITIONS
+        if transition["from_status_code"] == "rma_sent" and transition["to_status_code"] == "closed"
+    ]
+    assert direct_close_rules == []
+    assert [transition["trigger_event"] for transition in rma_send_rules] == ["rma_reply_sent"]
     assert [transition["trigger_event"] for transition in close_rules] == ["device_receipt_ack_sent"]
 
 
@@ -221,7 +233,7 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
     ticket = RepairTicket(
         id=1,
         ticket_no="RMA2026072001",
-        current_status_code="ready_for_export",
+        current_status_code="rma_sent",
         source_email_id=10,
         thread_id=20,
         contact_person="测试联系人",
@@ -284,7 +296,7 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
     )
 
     assert result["status"] == "pending_review"
-    assert ticket.current_status_code == "ready_for_export"
+    assert ticket.current_status_code == "rma_sent"
     assert ticket.device_received_at is not None
     assert ticket.device_receipt_ack_status == "pending_review"
     created_reply = session.add.call_args.args[0]

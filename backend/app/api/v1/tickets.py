@@ -6,13 +6,22 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
-from app.models import ManualReviewTask, ParseResult, Role, User, UserRole
+from app.models import (
+    ManualReviewTask,
+    ParseResult,
+    ReplyRecord,
+    Role,
+    TicketRelayExport,
+    TicketRma,
+    User,
+    UserRole,
+)
 from app.schemas.business import DeviceReceivedConfirmRequest, IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
 from app.services.device_receipts import confirm_device_received
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
@@ -20,6 +29,9 @@ from app.services import tickets as ticket_service
 from app.services.email_flow_trace import build_ticket_timeline
 from app.services.workflow import transition_ticket
 from app.services.ticket_safety import build_safety_report, validate_and_mark_ready_for_export
+from app.services.jobs import enqueue_job, serialize_job
+from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
+from app.services.sap_rma import poll_export_batch
 
 router = APIRouter()
 
@@ -233,6 +245,132 @@ async def validate_sn(
     result = await ticket_service.validate_ticket_sn(session, ticket_id=ticket_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "ticket sn validated")
+
+
+@router.post("/{ticket_id}/sap-export/retry")
+async def retry_sap_export(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    export = await session.scalar(
+        select(TicketRelayExport)
+        .where(TicketRelayExport.ticket_id == ticket.id)
+        .order_by(TicketRelayExport.created_at.desc())
+    )
+    if export is None:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    job = await enqueue_job(
+        session,
+        job_type="relay_ticket_export",
+        resource_type="ticket_relay_export",
+        resource_id=export.id,
+        idempotency_key=f"relay_ticket_export_retry:{export.id}:{export.attempt_count + 1}",
+        metadata={"user_id": current_user.id, "ticket_id": ticket.id, "retry": True},
+        max_attempts=5,
+    )
+    await session.commit()
+    return ok(serialize_job(job), "SAP export retry queued")
+
+
+@router.post("/{ticket_id}/sap-export/poll")
+async def poll_sap_export(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    del current_user
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    export = await session.scalar(
+        select(TicketRelayExport)
+        .where(TicketRelayExport.ticket_id == ticket.id)
+        .order_by(TicketRelayExport.created_at.desc())
+    )
+    if export is None:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    result = await poll_export_batch(session, export_id=export.id)
+    await session.commit()
+    return ok(result, "SAP RMA status polled")
+
+
+@router.post("/{ticket_id}/sap-export/confirm-late")
+async def confirm_late_sap_result(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    export = await session.scalar(
+        select(TicketRelayExport)
+        .where(TicketRelayExport.ticket_id == ticket.id)
+        .order_by(TicketRelayExport.created_at.desc())
+    )
+    if export is None:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    result = await poll_export_batch(
+        session,
+        export_id=export.id,
+        allow_late_result=True,
+        confirmed_by_user_id=current_user.id,
+    )
+    await session.commit()
+    return ok(result, "late SAP result confirmed")
+
+
+@router.post("/{ticket_id}/rma/retry-send")
+async def retry_rma_send(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    rma_rows = list(
+        (
+            await session.execute(select(TicketRma).where(TicketRma.ticket_id == ticket.id))
+        ).scalars().all()
+    )
+    if len(rma_rows) != 1:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_NUMBER_NOT_UNIQUE_FOR_TICKET")
+    reply_count = int(
+        (
+            await session.scalar(
+                select(func.count())
+                .select_from(ReplyRecord)
+                .where(
+                    ReplyRecord.ticket_id == ticket.id,
+                    ReplyRecord.reply_type == "rma_authorization",
+                )
+            )
+        )
+        or 0
+    )
+    job = await enqueue_job(
+        session,
+        job_type="rma_authorization",
+        resource_type="repair_ticket",
+        resource_id=ticket.id,
+        idempotency_key=f"rma_authorization_retry:{ticket.id}:{ticket.version}:{rma_rows[0].rma_no}:{reply_count}",
+        metadata={
+            "user_id": current_user.id,
+            "ticket_version": ticket.version,
+            "safety_check_hash": ticket.safety_check_hash,
+            "sn_validation_hash": ticket.sn_validation_hash,
+            "rma_no": rma_rows[0].rma_no,
+            "rma_template_version": RMA_TEMPLATE_VERSION,
+        },
+        max_attempts=1,
+    )
+    await session.commit()
+    return ok(serialize_job(job), "RMA send retry queued")
 
 
 @router.post("/{ticket_id}/confirm-device-received")
