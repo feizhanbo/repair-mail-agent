@@ -1,6 +1,6 @@
 from app.models.base import Base
 from app.models.identity import Role, User, UserRole
-from app.models.integrations import ExternalSyncCheckpoint, TicketRelayExport
+from app.models.integrations import ExportSap, ExternalSyncCheckpoint, TicketRelayExport
 from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog
 from app.models.mail import Email, EmailAttachment, EmailThread, EmailTicketLink
 from app.models.mail_fetch import MailFetchRecord
@@ -40,6 +40,7 @@ __all__ = [
     "NotificationUserState",
     "ExternalSyncCheckpoint",
     "TicketRelayExport",
+    "ExportSap",
     "AiCallLog",
     "OperationLog",
     "SystemEventLog",

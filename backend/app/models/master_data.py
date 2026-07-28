@@ -17,6 +17,9 @@ class SnAsset(TimestampMixin, Base):
         Index("idx_sn_assets_customer_name", "customer_name"),
         Index("idx_sn_assets_material_code", "material_code"),
         Index("idx_sn_assets_material_name", "material_name"),
+        Index("idx_sn_assets_service_tracking_card", "service_tracking_card_no"),
+        Index("idx_sn_assets_parent_sn", "parent_sn"),
+        Index("idx_sn_assets_top_sn", "top_sn"),
         Index("idx_sn_assets_status", "asset_status"),
         Index("idx_sn_assets_source", "source_file_hash", "source_row_no"),
         Index("idx_sn_assets_external", "source_system", "external_id"),
@@ -29,6 +32,11 @@ class SnAsset(TimestampMixin, Base):
     material_code: Mapped[str] = mapped_column(String(100), nullable=False)
     material_name: Mapped[str | None] = mapped_column(String(255))
     sn: Mapped[str] = mapped_column(String(100), nullable=False)
+    service_tracking_card_no: Mapped[str | None] = mapped_column(String(100))
+    parent_sn: Mapped[str | None] = mapped_column(String(100))
+    top_sn: Mapped[str | None] = mapped_column(String(100))
+    parent_material_code: Mapped[str | None] = mapped_column(String(100))
+    top_material_code: Mapped[str | None] = mapped_column(String(100))
     asset_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="valid")
     warranty_start_date: Mapped[date | None] = mapped_column(mysql.DATE)
     warranty_end_date: Mapped[date | None] = mapped_column(mysql.DATE)

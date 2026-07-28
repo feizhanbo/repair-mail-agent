@@ -28,6 +28,11 @@ SN_ASSET_FIELDS = (
     "material_code",
     "material_name",
     "sn",
+    "service_tracking_card_no",
+    "parent_sn",
+    "top_sn",
+    "parent_material_code",
+    "top_material_code",
     "asset_status",
     "warranty_start_date",
     "warranty_end_date",
@@ -103,7 +108,17 @@ def _sn_asset_statement(
     if keyword:
         like = f"%{keyword}%"
         statement = statement.where(
-            or_(SnAsset.sn.like(like), SnAsset.customer_code.like(like), SnAsset.customer_name.like(like), SnAsset.material_code.like(like))
+            or_(
+                SnAsset.sn.like(like),
+                SnAsset.service_tracking_card_no.like(like),
+                SnAsset.parent_sn.like(like),
+                SnAsset.top_sn.like(like),
+                SnAsset.customer_code.like(like),
+                SnAsset.customer_name.like(like),
+                SnAsset.material_code.like(like),
+                SnAsset.parent_material_code.like(like),
+                SnAsset.top_material_code.like(like),
+            )
         )
     return statement
 
@@ -127,6 +142,9 @@ async def import_sn_assets(
     for item in items:
         data = item.model_dump()
         sn = data["sn"].strip().upper()
+        for hierarchy_sn_field in ("parent_sn", "top_sn"):
+            if data.get(hierarchy_sn_field):
+                data[hierarchy_sn_field] = data[hierarchy_sn_field].strip().upper()
         row = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
         payload = {
             **data,
@@ -562,6 +580,11 @@ def parse_sn_assets_xlsx(content: bytes) -> tuple[list[SnAssetImportItem], str]:
                     customer_name=_string_value(row.get("customer_name")).strip(),
                     material_code=_string_value(row.get("material_code")).strip(),
                     material_name=_string_value(row.get("material_name")).strip() or None,
+                    service_tracking_card_no=_string_value(row.get("service_tracking_card_no")).strip() or None,
+                    parent_sn=_string_value(row.get("parent_sn")).strip().upper() or None,
+                    top_sn=_string_value(row.get("top_sn")).strip().upper() or None,
+                    parent_material_code=_string_value(row.get("parent_material_code")).strip() or None,
+                    top_material_code=_string_value(row.get("top_material_code")).strip() or None,
                     sn=_string_value(row.get("sn")).strip(),
                     asset_status=_string_value(row.get("asset_status") or "valid").strip(),
                     warranty_start_date=row.get("warranty_start_date")
@@ -628,6 +651,11 @@ def parse_sn_assets_csv(content: bytes) -> tuple[list[SnAssetImportItem], str]:
                     customer_name=(row.get("customer_name") or "").strip(),
                     material_code=(row.get("material_code") or "").strip(),
                     material_name=(row.get("material_name") or "").strip() or None,
+                    service_tracking_card_no=(row.get("service_tracking_card_no") or "").strip() or None,
+                    parent_sn=(row.get("parent_sn") or "").strip().upper() or None,
+                    top_sn=(row.get("top_sn") or "").strip().upper() or None,
+                    parent_material_code=(row.get("parent_material_code") or "").strip() or None,
+                    top_material_code=(row.get("top_material_code") or "").strip() or None,
                     sn=(row.get("sn") or "").strip(),
                     asset_status=(row.get("asset_status") or "valid").strip(),
                     warranty_start_date=_date_or_none(row.get("warranty_start_date")),
@@ -688,12 +716,21 @@ def sn_assets_template_csv() -> bytes:
                 "customer_name": "示例客户",
                 "material_code": "MAT001",
                 "material_name": "示例物料",
+                "service_tracking_card_no": "STC202607070001",
+                "parent_sn": "SN-PARENT-001",
+                "top_sn": "SN-TOP-001",
+                "parent_material_code": "MAT-PARENT-001",
+                "top_material_code": "MAT-TOP-001",
                 "asset_status": "valid",
                 "warranty_start_date": "2026-01-01",
                 "warranty_end_date": "2027-01-01",
             }
         ],
-        ["sn", "customer_code", "customer_name", "material_code", "material_name", "asset_status", "warranty_start_date", "warranty_end_date"],
+        [
+            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
+            "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
+        ],
     )
 
 
@@ -724,12 +761,21 @@ def sn_assets_template_xlsx() -> bytes:
                 "customer_name": "示例客户",
                 "material_code": "MAT001",
                 "material_name": "示例物料",
+                "service_tracking_card_no": "STC202607070001",
+                "parent_sn": "SN-PARENT-001",
+                "top_sn": "SN-TOP-001",
+                "parent_material_code": "MAT-PARENT-001",
+                "top_material_code": "MAT-TOP-001",
                 "asset_status": "valid",
                 "warranty_start_date": "2026-01-01",
                 "warranty_end_date": "2027-01-01",
             }
         ],
-        ["sn", "customer_code", "customer_name", "material_code", "material_name", "asset_status", "warranty_start_date", "warranty_end_date"],
+        [
+            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
+            "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
+        ],
     )
 
 

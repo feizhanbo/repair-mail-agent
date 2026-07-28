@@ -8,7 +8,6 @@ import smtplib
 from datetime import date
 from email.message import EmailMessage
 from email.utils import getaddresses, make_msgid, parseaddr
-from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -18,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.request_context import get_correlation_id
 from app.models import Email, EmailAttachment, EmailTicketLink, OssObject, ReplyRecord, ReplyTemplate, RepairTicket
-from app.services.ai import generate_ai_reply_draft
 from app.services.audit import log_operation, log_system_event
 from app.services.business_rules import is_followup_reply_type
 from app.services.common import model_to_dict, utcnow
@@ -45,6 +43,7 @@ REPLY_FIELDS = (
     "related_email_id",
     "outgoing_email_id",
     "template_id",
+    "base_template_id",
     "reply_type",
     "followup_round",
     "missing_fields",
@@ -102,68 +101,63 @@ async def _latest_customer_email(session: AsyncSession, ticket: RepairTicket) ->
         .limit(1)
     )
 
-RMA_ZH_SUBJECT = "RMA维修授权：{{ ticket_no }} {{ customer_name }}"
+
+async def _reply_parent_error(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    candidate: Email | None,
+) -> str | None:
+    if candidate is None:
+        return "REPLY_PARENT_EMAIL_REQUIRED"
+    if candidate.mail_direction != "inbound":
+        return "REPLY_PARENT_MUST_BE_INBOUND"
+    if not _message_id_chain(candidate.message_id):
+        return "REPLY_PARENT_MESSAGE_ID_REQUIRED"
+    if ticket.thread_id is None or candidate.thread_id != ticket.thread_id:
+        return "REPLY_PARENT_THREAD_MISMATCH"
+    if candidate.id == ticket.source_email_id:
+        return None
+    linked = await session.scalar(
+        select(EmailTicketLink.id).where(
+            EmailTicketLink.email_id == candidate.id,
+            EmailTicketLink.ticket_id == ticket.id,
+        )
+    )
+    return None if linked is not None else "REPLY_PARENT_NOT_LINKED_TO_TICKET"
+
+
+async def _require_reply_parent(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    related_email_id: int | None = None,
+) -> Email:
+    if related_email_id is not None:
+        candidate = await session.get(Email, related_email_id)
+        error = await _reply_parent_error(session, ticket=ticket, candidate=candidate)
+        if error is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error)
+        return candidate
+
+    candidates = [
+        await _latest_customer_email(session, ticket),
+        await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None,
+    ]
+    errors: list[str] = []
+    for candidate in candidates:
+        error = await _reply_parent_error(session, ticket=ticket, candidate=candidate)
+        if error is None:
+            return candidate
+        errors.append(error)
+    detail = "REPLY_PARENT_EMAIL_REQUIRED" if all(item == "REPLY_PARENT_EMAIL_REQUIRED" for item in errors) else errors[0]
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
 RMA_REPLY_ZH_VERSION = "rma_reply_zh_v1"
-RMA_ZH_BODY = """您好：
-
-RMA维修授权表见附件。
-为了不耽误贵司维修进度，请注意以下事项：
-1. 请务必打印 RMA 表，并与报修板一同寄出。
-2. 请妥善包装设备，并核对 RMA 表中的返回地址；如需变更地址请提前告知。
-3. 维修工期预计为 10 个工作日，实际进度以维修检测结果为准。
-
-谢谢。"""
-
-OVERSEAS_WARRANTY_IN_VERSION = "overseas_warranty_in_warranty_v1"
-OVERSEAS_WARRANTY_OUT_VERSION = "overseas_warranty_out_of_warranty_v1"
-OVERSEAS_WARRANTY_ST_VERSION = "overseas_warranty_st_pickup_v1"
-OVERSEAS_SUBJECT = "RMA Authorization: {{ ticket_no }} {{ customer_name }}"
-OVERSEAS_COMMON_NOTES = """Please note:
-1. Please attach the fault data to the email.
-2. Before shipment, please provide photos of the physical goods and outer packaging by email. The nameplate information must be clear for import customs clearance.
-3. On your shipping invoice, please state \"No commercial value as sample\".
-4. Invoices and packing lists should avoid the following words: old, repaired, returned, used, and national.
-5. The recommended declared value is between USD 50 and USD 100.
-6. If DHL is used and the value of the goods is less than CNY 5,000, please state \"NO KJ3\" in the commodity name.
-7. Please pack the boards separately. Place one or two boards in each box.
-
-Thank you for your cooperation!"""
-OVERSEAS_SHIPPING = """Please ship the faulty board to:
-Beijing Huafeng Test & Control Technology Co., Ltd.
-Attention: Li Lian Rong
-Address: Building 5, IC PARK, No. 9 Fenghao East Road, Haidian District (100094), Beijing
-Phone: +86-15811322137"""
-OVERSEAS_IN_BODY = f"""Dear Customer,
-
-The RMA authorization form is attached for your review. Please print it and include it in the package sent to AccoTEST.
-Please ensure that the board is securely packed and that the return address on the RMA form is correct.
-
-{OVERSEAS_SHIPPING}
-
-{OVERSEAS_COMMON_NOTES}"""
-OVERSEAS_OUT_BODY = f"""Dear Customer,
-
-The board is out of warranty.
-The RMA authorization form is attached for your review. Please print it and include it in the package sent to AccoTEST.
-Please ensure that the board is securely packed and that the return address on the RMA form is correct.
-
-{OVERSEAS_SHIPPING}
-
-{OVERSEAS_COMMON_NOTES}"""
-OVERSEAS_ST_BODY = """Dear Customer,
-
-The RMA authorization form is attached for your review. Please print it and include it in the package sent to AccoTEST.
-Please ensure that the board is securely packed and that the return address on the RMA form is correct.
-
-The following information is required to arrange reverse pick-up:
-1. The specific pick-up date and time window. After confirmation, we will arrange for SF Express to collect the package.
-2. The detailed pick-up address, contact name, and contact phone number.
-3. Package details: total number of boxes, gross weight of each box with units, number of boards in each box, and the SN of every board.
-4. Please print the RMA authorization form and place it inside the package.
-
-Before shipment, please provide photos of the physical goods and outer packaging by email. The nameplate information must be clear for import customs clearance.
-
-Thank you for your cooperation!"""
+OVERSEAS_WARRANTY_IN_VERSION = "overseas_in_warranty_v1"
+OVERSEAS_WARRANTY_OUT_VERSION = "overseas_out_warranty_v1"
+OVERSEAS_WARRANTY_ST_VERSION = "overseas_st_pickup_v1"
 
 
 class RmaReplyRuleError(ValueError):
@@ -184,9 +178,9 @@ def _parse_template_date(value: Any) -> date | None:
     return None
 
 
-def _rma_reply_content(ticket: RepairTicket) -> tuple[str, str, str]:
+def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
     if ticket.language_code != "en-US":
-        return RMA_ZH_SUBJECT, RMA_ZH_BODY, RMA_REPLY_ZH_VERSION
+        return "rma_authorization_domestic", RMA_REPLY_ZH_VERSION
 
     email = (ticket.contact_email or "").strip().lower()
     customer = " ".join((ticket.customer_name or "").lower().split())
@@ -194,7 +188,7 @@ def _rma_reply_content(ticket: RepairTicket) -> tuple[str, str, str]:
         raise RmaReplyRuleError("rma_amkor_manual", "RMA_AMKOR_MANUAL_HANDLING_REQUIRED")
     if "stmicroelectronics pte ltd" in customer:
         if ticket.request_date and ticket.request_date <= date(2026, 12, 31):
-            return OVERSEAS_SUBJECT, OVERSEAS_ST_BODY, OVERSEAS_WARRANTY_ST_VERSION
+            return "rma_authorization_overseas_st_pickup", OVERSEAS_WARRANTY_ST_VERSION
         raise RmaReplyRuleError("st_policy_expired", "RMA_ST_POLICY_EXPIRED")
 
     checks = list((ticket.sn_validation_snapshot or {}).get("checks") or [])
@@ -206,10 +200,10 @@ def _rma_reply_content(ticket: RepairTicket) -> tuple[str, str, str]:
     if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
         raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
     if request_date <= warranty_end:
-        return OVERSEAS_SUBJECT, OVERSEAS_IN_BODY, OVERSEAS_WARRANTY_IN_VERSION
+        return "rma_authorization_overseas_in_warranty", OVERSEAS_WARRANTY_IN_VERSION
     if email == "daniel@leitik.com":
         raise RmaReplyRuleError("rma_price_required", "RMA_OUT_OF_WARRANTY_PRICE_REQUIRED")
-    return OVERSEAS_SUBJECT, OVERSEAS_OUT_BODY, OVERSEAS_WARRANTY_OUT_VERSION
+    return "rma_authorization_overseas_out_of_warranty", OVERSEAS_WARRANTY_OUT_VERSION
 
 
 def serialize_reply(reply: ReplyRecord) -> dict[str, Any]:
@@ -224,12 +218,21 @@ def _missing_fields_text(missing_fields: dict[str, Any] | None) -> str:
     return "\n".join(f"- {key}: {value}" for key, value in missing_fields.items())
 
 
-def _render_template(template: str, *, ticket: RepairTicket, missing_fields: dict[str, Any] | None) -> str:
+def _render_template(
+    template: str,
+    *,
+    ticket: RepairTicket,
+    missing_fields: dict[str, Any] | None,
+    content: str = "",
+    original_subject: str = "",
+) -> str:
     return (
         template.replace("{{ ticket_no }}", ticket.ticket_no)
         .replace("{{ missing_fields }}", _missing_fields_text(missing_fields))
         .replace("{{ customer_name }}", ticket.customer_name or "")
         .replace("{{ contact_person }}", ticket.contact_person or "Customer")
+        .replace("{{ content }}", content)
+        .replace("{{ original_subject }}", original_subject)
     )
 
 
@@ -252,21 +255,6 @@ def _infer_reply_type(ticket: RepairTicket, requested: str | None) -> str:
     if ticket.missing_fields:
         return "missing_fields"
     return "receipt"
-
-
-def _fallback_reply_content(reply_type: str, *, ticket: RepairTicket, missing_fields: dict[str, Any] | None) -> tuple[str, str]:
-    if reply_type == "receipt":
-        return (
-            f"报修已受理：{ticket.ticket_no}",
-            (
-                f"您好，\n\n我们已收到您的报修邮件并生成工单 {ticket.ticket_no}。"
-                "系统已完成初步信息核对，后续处理进展会继续通过邮件同步。\n\n谢谢。"
-            ),
-        )
-    return (
-        f"请补充报修信息：{ticket.ticket_no}",
-        f"您好，\n\n我们已收到您的报修邮件，但还需要补充以下信息后才能继续处理：\n{_missing_fields_text(missing_fields)}\n\n请直接回复本邮件补充。谢谢。",
-    )
 
 
 def _recipient_addresses(*values: str | None) -> set[str]:
@@ -402,6 +390,44 @@ def _send_reply_via_smtp(
     except Exception:
         return False, None, "SMTP_SEND_FAILED_UNCERTAIN"
     return True, message_id, None
+
+
+async def _select_base_template(session: AsyncSession, language: str) -> ReplyTemplate | None:
+    if language != "zh-CN":
+        return None
+    return await _select_template(session, "domestic_company_base", language)
+
+
+async def _render_reply_templates(
+    session: AsyncSession,
+    *,
+    content_template: ReplyTemplate,
+    ticket: RepairTicket,
+    missing_fields: dict[str, Any] | None,
+    parent: Email,
+) -> tuple[str, str, ReplyTemplate | None]:
+    original_subject = (parent.subject or f"Repair request {ticket.ticket_no}").strip()
+    content = _render_template(
+        content_template.body_template,
+        ticket=ticket,
+        missing_fields=missing_fields,
+        original_subject=original_subject,
+    )
+    base_template = await _select_base_template(session, content_template.language)
+    if content_template.language == "zh-CN" and base_template is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_BASE_TEMPLATE_NOT_FOUND")
+    body = (
+        _render_template(
+            base_template.body_template,
+            ticket=ticket,
+            missing_fields=missing_fields,
+            content=content,
+            original_subject=original_subject,
+        )
+        if base_template is not None
+        else content
+    )
+    return _reply_subject(parent.subject, ticket.ticket_no), body, base_template
 
 
 async def _archive_outbound_email(
@@ -560,6 +586,41 @@ async def _ensure_reply_manual_task(
     )
 
 
+async def _reply_send_guard_error(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    reply: ReplyRecord,
+) -> str | None:
+    if reply.template_id is None:
+        return "REPLY_TEMPLATE_REQUIRED"
+    template = await session.get(ReplyTemplate, reply.template_id)
+    if template is None or not template.enabled:
+        return "REPLY_TEMPLATE_NOT_AVAILABLE"
+    if template.language == "zh-CN":
+        if reply.base_template_id is None:
+            return "REPLY_BASE_TEMPLATE_REQUIRED"
+        base_template = await session.get(ReplyTemplate, reply.base_template_id)
+        if base_template is None or not base_template.enabled or base_template.template_type != "domestic_company_base":
+            return "REPLY_BASE_TEMPLATE_NOT_AVAILABLE"
+    if reply.related_email_id is None:
+        return "REPLY_PARENT_EMAIL_REQUIRED"
+    parent = await session.get(Email, reply.related_email_id)
+    parent_error = await _reply_parent_error(session, ticket=ticket, candidate=parent)
+    if parent_error is not None:
+        return parent_error
+    parent_message_id = _message_id_chain(parent.message_id)
+    if _message_id_chain(reply.in_reply_to) != parent_message_id:
+        return "REPLY_IN_REPLY_TO_INVALID"
+    if parent_message_id not in (_message_id_chain(reply.references_header) or ""):
+        return "REPLY_REFERENCES_INVALID"
+    if reply.subject != _reply_subject(parent.subject, ticket.ticket_no):
+        return "REPLY_SUBJECT_NOT_ORIGINAL_THREAD"
+    if reply.final_body not in {None, reply.draft_body}:
+        return "REPLY_TEMPLATE_BODY_MODIFIED"
+    return None
+
+
 async def _send_reply_record(
     session: AsyncSession,
     *,
@@ -570,7 +631,6 @@ async def _send_reply_record(
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
-    reply.subject = test_only_subject(reply.subject)
 
     def sync_ticket_delivery_status() -> None:
         if reply.reply_type == "device_received_ack":
@@ -579,6 +639,20 @@ async def _send_reply_record(
             ticket.rma_status = "manual_review"
 
     if reply.send_status == "sent" and reply.smtp_message_id:
+        return
+    guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
+    if guard_error is not None:
+        reply.send_status = "send_failed"
+        reply.error_message = guard_error
+        sync_ticket_delivery_status()
+        await _ensure_reply_manual_task(
+            session,
+            ticket=ticket,
+            task_type="reply_send_blocked",
+            reason=guard_error,
+            email_id=reply.related_email_id,
+            user_id=user_id,
+        )
         return
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
         reply.send_status = "send_uncertain"
@@ -793,14 +867,26 @@ async def create_reply_draft(
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
+    language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
     if is_followup_reply_type(reply_kind) and ticket.current_status_code != "need_customer_info":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="FOLLOWUP_TICKET_NOT_WAITING_CUSTOMER_INFO")
-    related_email = await session.get(Email, related_email_id) if related_email_id else None
-    if related_email is None and is_followup_reply_type(reply_kind):
-        related_email = await _latest_customer_email(session, ticket)
-    if related_email is None and ticket.source_email_id:
-        related_email = await session.get(Email, ticket.source_email_id)
-    effective_related_email_id = related_email.id if related_email else None
+    try:
+        related_email = await _require_reply_parent(
+            session,
+            ticket=ticket,
+            related_email_id=related_email_id,
+        )
+    except HTTPException as exc:
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="reply_parent_required",
+            trigger_reason=str(exc.detail),
+            email_id=related_email_id,
+            priority="high",
+        )
+        raise
+    effective_related_email_id = related_email.id
     existing_draft = await session.scalar(
         select(ReplyRecord)
         .where(
@@ -840,53 +926,42 @@ async def create_reply_draft(
 
     effective_missing_fields = missing_fields if missing_fields is not None else ticket.missing_fields
     if template is None:
-        fallback_subject, fallback_body = _fallback_reply_content(reply_kind, ticket=ticket, missing_fields=effective_missing_fields)
-        template = SimpleNamespace(id=None, subject_template=fallback_subject, body_template=fallback_body)
-        await log_system_event(
+        await create_manual_task_if_missing(
             session,
-            event_type="reply_template_fallback",
-            module_name="replies",
-            correlation_id=get_correlation_id(),
-            email_id=related_email.id if related_email else None,
-            ticket_id=ticket.id,
-            event_stage="reply_draft",
-            event_status="fallback",
-            target_type="ticket",
-            target_id=ticket.id,
-            message="Reply draft used built-in fallback template",
-            details={"reply_type": reply_kind, "language": language},
+            ticket=ticket,
+            task_type="reply_template_missing",
+            trigger_reason=f"REPLY_TEMPLATE_NOT_FOUND:{reply_kind}:{language}",
+            email_id=related_email.id,
+            priority="high",
         )
-    subject = _render_template(template.subject_template or f"请补充报修信息：{ticket.ticket_no}", ticket=ticket, missing_fields=effective_missing_fields)
-    body = _render_template(template.body_template, ticket=ticket, missing_fields=effective_missing_fields)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_NOT_FOUND")
+    try:
+        subject, body, base_template = await _render_reply_templates(
+            session,
+            content_template=template,
+            ticket=ticket,
+            missing_fields=effective_missing_fields,
+            parent=related_email,
+        )
+    except HTTPException as exc:
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="reply_base_template_missing",
+            trigger_reason=str(exc.detail),
+            email_id=related_email.id,
+            priority="high",
+        )
+        raise
     generate_source = "template"
     ai_call_log_id: int | None = None
     reply_confidence_score: float | None = None
     reply_risk_level: str | None = None
-    ai_draft = await generate_ai_reply_draft(
-        session,
-        ticket=ticket,
-        related_email=related_email,
-        reply_type=reply_kind,
-        language=language,
-        missing_fields=effective_missing_fields,
-        template_subject=subject,
-        template_body=body,
-    )
-    if ai_draft:
-        subject = ai_draft["subject"]
-        body = ai_draft["body"]
-        effective_missing_fields = ai_draft.get("missing_fields") or effective_missing_fields
-        reply_confidence_score = ai_draft.get("confidence_score")
-        reply_risk_level = ai_draft.get("risk_level")
-        ai_call_log_id = ai_draft["ai_call_log"].id
-        generate_source = "ai"
-    if is_followup_reply_type(reply_kind):
-        source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
-        subject = _reply_subject(source_email.subject if source_email else related_email.subject if related_email else None, ticket.ticket_no)
     reply = ReplyRecord(
         ticket_id=ticket.id,
         related_email_id=related_email.id if related_email else None,
         template_id=template.id,
+        base_template_id=base_template.id if base_template else None,
         reply_type=reply_kind,
         followup_round=(ticket.followup_count + 1) if is_followup_reply_type(reply_kind) else ticket.followup_count,
         missing_fields=effective_missing_fields,
@@ -899,11 +974,11 @@ async def create_reply_draft(
         ai_call_log_id=ai_call_log_id,
         review_status="pending",
         send_status="pending_review",
-        in_reply_to=related_email.message_id if related_email else None,
-        references_header=(
-            _message_id_chain(related_email.references_header, related_email.message_id)
-            if related_email
-            else None
+        in_reply_to=_message_id_chain(related_email.message_id),
+        references_header=_message_id_chain(
+            related_email.references_header,
+            related_email.in_reply_to,
+            related_email.message_id,
         ),
     )
     session.add(reply)
@@ -948,7 +1023,7 @@ async def update_reply(session: AsyncSession, *, reply_id: int, user_id: int, va
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_ALREADY_SENT_IMMUTABLE")
     if reply.review_status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="REPLY_ALREADY_APPROVED")
-    allowed = {"subject", "final_body", "to_addresses", "cc_addresses"}
+    allowed = {"to_addresses", "cc_addresses"}
     changed: dict[str, Any] = {}
     for field, value in values.items():
         if value is None:
@@ -1184,12 +1259,55 @@ async def create_and_send_rma_authorization(
     pdf_content: bytes | None = None
     pdf_object: OssObject | None = None
     data = None
+    reply_language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
+    try:
+        related_email = await _require_reply_parent(session, ticket=ticket)
+    except HTTPException as exc:
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_reply_parent_required",
+            reason=str(exc.detail),
+        )
     if attach_rma:
         try:
-            subject_template, body_template, reply_template_version = _rma_reply_content(ticket)
+            template_type, reply_template_version = _rma_reply_template_type(ticket)
         except RmaReplyRuleError as exc:
             return await _rma_manual_review(session, ticket=ticket, task_type=exc.task_type, reason=exc.reason)
-
+        template = await _select_template(session, template_type, reply_language)
+        if template is None:
+            return await _rma_manual_review(
+                session,
+                ticket=ticket,
+                task_type="rma_reply_template_missing",
+                reason=f"REPLY_TEMPLATE_NOT_FOUND:{template_type}:{reply_language}",
+            )
+    else:
+        template = await _select_template(session, "rma_attachment_disabled_receipt", reply_language)
+        if template is None:
+            return await _rma_manual_review(
+                session,
+                ticket=ticket,
+                task_type="rma_reply_template_missing",
+                reason=f"REPLY_TEMPLATE_NOT_FOUND:rma_attachment_disabled_receipt:{reply_language}",
+            )
+        reply_template_version = template.version
+    try:
+        subject, body, base_template = await _render_reply_templates(
+            session,
+            content_template=template,
+            ticket=ticket,
+            missing_fields=None,
+            parent=related_email,
+        )
+    except HTTPException as exc:
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_reply_base_template_missing",
+            reason=str(exc.detail),
+        )
+    if attach_rma:
         ticket.rma_status = "generating"
         try:
             data = await build_rma_pdf_data(
@@ -1209,21 +1327,11 @@ async def create_and_send_rma_authorization(
             )
         except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
             return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
-    else:
-        subject_template = "报修申请已受理：{{ ticket_no }} {{ customer_name }}"
-        body_template = (
-            "您好，{{ contact_person }}：\n\n"
-            "我们已收到并确认您的报修申请。RMA 维修授权单附件当前未启用自动发送，"
-            "后续将由工作人员单独处理。\n\n谢谢。"
-        )
-        reply_template_version = "new_repair_receipt_without_rma_v1"
-
-    related_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
-    subject = _render_template(subject_template, ticket=ticket, missing_fields=None)
-    body = _render_template(body_template, ticket=ticket, missing_fields=None)
     reply = ReplyRecord(
         ticket_id=ticket.id,
         related_email_id=related_email.id if related_email else None,
+        template_id=template.id,
+        base_template_id=base_template.id if base_template else None,
         reply_type=reply_type,
         followup_round=ticket.followup_count,
         to_addresses=TEST_MAIL_RECIPIENT,
@@ -1231,7 +1339,7 @@ async def create_and_send_rma_authorization(
         subject=subject,
         draft_body=body,
         final_body=body,
-        generate_source="rma_template" if attach_rma else "new_repair_receipt",
+        generate_source="template",
         rma_pdf_oss_object_id=pdf_object.id if pdf_object else None,
         reply_template_version=reply_template_version,
         rma_template_version=RMA_TEMPLATE_VERSION if attach_rma else None,
@@ -1243,11 +1351,11 @@ async def create_and_send_rma_authorization(
         review_status="auto_approved" if settings.AUTO_SEND_ENABLED else "pending",
         reviewed_at=utcnow() if settings.AUTO_SEND_ENABLED else None,
         send_status="approved_pending_send" if settings.AUTO_SEND_ENABLED else "pending_review",
-        in_reply_to=related_email.message_id if related_email else None,
-        references_header=(
-            _message_id_chain(related_email.references_header, related_email.message_id)
-            if related_email
-            else None
+        in_reply_to=_message_id_chain(related_email.message_id),
+        references_header=_message_id_chain(
+            related_email.references_header,
+            related_email.in_reply_to,
+            related_email.message_id,
         ),
     )
     session.add(reply)

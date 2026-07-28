@@ -521,6 +521,7 @@ export type ReplyRecord = {
   related_email_id?: number | null;
   outgoing_email_id?: number | null;
   template_id?: number | null;
+  base_template_id?: number | null;
   reply_type: string;
   followup_round: number;
   missing_fields?: JsonRecord | null;
@@ -552,6 +553,11 @@ export type SnAsset = {
   material_code: string;
   material_name?: string | null;
   sn: string;
+  service_tracking_card_no?: string | null;
+  parent_sn?: string | null;
+  top_sn?: string | null;
+  parent_material_code?: string | null;
+  top_material_code?: string | null;
   asset_status: string;
   warranty_start_date?: string | null;
   warranty_end_date?: string | null;

@@ -9,7 +9,7 @@ import pytest
 
 from app import seed as seed_data
 from app.config import settings
-from app.models import Email, EmailThread, ParseResult, RepairTicket, ReplyRecord
+from app.models import Email, EmailThread, ParseResult, RepairTicket, ReplyRecord, ReplyTemplate
 from app.services import device_receipts, emails, mail_test_preflight, replies
 from app.services.mail_safety import test_envelope_allowed as envelope_allowed
 from app.services.mail_safety import test_mail_configuration_reasons as configuration_reasons
@@ -223,12 +223,15 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
         ticket_no="RMA2026072001",
         current_status_code="ready_for_export",
         source_email_id=10,
+        thread_id=20,
         contact_person="测试联系人",
         contact_email="outside@example.com",
         rma_status="sent",
     )
     source_email = Email(
         id=10,
+        thread_id=20,
+        mail_direction="inbound",
         mailbox_account="rmatest1@accotest.com",
         message_id="<customer-source@accotest.com>",
         from_address="outside@example.com",
@@ -245,6 +248,31 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
     monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", False)
     monkeypatch.setattr(device_receipts, "create_manual_task_if_missing", AsyncMock())
     monkeypatch.setattr(device_receipts, "log_operation", AsyncMock())
+    content_template = ReplyTemplate(
+        id=30,
+        template_code="device_received_ack_zh",
+        template_name="设备收货确认",
+        template_type="device_received_ack",
+        language="zh-CN",
+        version="v1",
+        body_template="已收到 {{ ticket_no }}",
+    )
+    base_template = ReplyTemplate(
+        id=31,
+        template_code="all_replies_domestic_company_base_zh",
+        template_name="国内基础模板",
+        template_type="domestic_company_base",
+        language="zh-CN",
+        version="v1",
+        body_template="{{ content }}",
+    )
+    monkeypatch.setattr(device_receipts, "_require_reply_parent", AsyncMock(return_value=source_email))
+    monkeypatch.setattr(device_receipts, "_select_template", AsyncMock(return_value=content_template))
+    monkeypatch.setattr(
+        device_receipts,
+        "_render_reply_templates",
+        AsyncMock(return_value=("Re: 原邮件", "已收到 RMA2026072001", base_template)),
+    )
 
     result = await device_receipts.confirm_device_received(
         session,
@@ -263,6 +291,9 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
     assert isinstance(created_reply, ReplyRecord)
     assert created_reply.to_addresses == "rmatest2@accotest.com"
     assert created_reply.cc_addresses is None
+    assert created_reply.template_id == 30
+    assert created_reply.base_template_id == 31
+    assert created_reply.in_reply_to == "<customer-source@accotest.com>"
 
 
 @run_async

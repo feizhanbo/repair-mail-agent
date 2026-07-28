@@ -22,6 +22,7 @@ _ALLOWED_TABLES = {
     "email_threads",
     "email_ticket_links",
     "emails",
+    "export_sap",
     "field_audit_logs",
     "job_run_logs",
     "manual_review_tasks",

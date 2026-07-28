@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 30
+    assert len(Base.metadata.tables) == 31
 
 
 def test_phase_one_table_names() -> None:
@@ -13,6 +13,7 @@ def test_phase_one_table_names() -> None:
         "email_threads",
         "email_ticket_links",
         "emails",
+        "export_sap",
         "external_sync_checkpoints",
         "field_audit_logs",
         "job_run_logs",
@@ -68,3 +69,32 @@ def test_email_oss_link_columns_exist_for_archival_consistency() -> None:
     attachment_columns = Base.metadata.tables["email_attachments"].columns
     assert "raw_eml_oss_object_id" in email_columns
     assert "oss_object_id" in attachment_columns
+
+
+def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
+    sn_columns = Base.metadata.tables["sn_assets"].columns
+    assert {
+        "service_tracking_card_no",
+        "parent_sn",
+        "top_sn",
+        "parent_material_code",
+        "top_material_code",
+    } <= set(sn_columns.keys())
+    export_columns = Base.metadata.tables["export_sap"].columns
+    assert {
+        "sn",
+        "customer_code",
+        "material_code",
+        "customer_name",
+        "material_name",
+        "contact_person",
+        "contact_phone",
+        "email_subject",
+        "problem_description",
+        "repair_requested_at",
+        "mailing_address",
+        "currency",
+        "shipping_fee",
+        "repair_fee",
+        "tax_rate",
+    } <= set(export_columns.keys())

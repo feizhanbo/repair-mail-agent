@@ -154,6 +154,11 @@ class SnAssetImportItem(BaseModel):
     material_code: str = Field(max_length=100)
     material_name: str | None = Field(default=None, max_length=255)
     sn: str = Field(max_length=100)
+    service_tracking_card_no: str | None = Field(default=None, max_length=100)
+    parent_sn: str | None = Field(default=None, max_length=100)
+    top_sn: str | None = Field(default=None, max_length=100)
+    parent_material_code: str | None = Field(default=None, max_length=100)
+    top_material_code: str | None = Field(default=None, max_length=100)
     asset_status: str = Field(default="valid", max_length=30)
     warranty_start_date: date | None = None
     warranty_end_date: date | None = None

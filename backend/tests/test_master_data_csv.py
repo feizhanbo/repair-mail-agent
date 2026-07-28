@@ -8,14 +8,17 @@ from app.services import master_data as master_data_service
 
 def test_parse_sn_assets_csv_accepts_utf8_bom() -> None:
     content = (
-        "\ufeffsn,customer_code,customer_name,material_code,material_name,asset_status,warranty_start_date,warranty_end_date\n"
-        "SN001,C001,Acme,MAT001,Main board,valid,2026-01-01,2027-01-01\n"
+        "\ufeffsn,customer_code,customer_name,material_code,material_name,service_tracking_card_no,parent_sn,top_sn,parent_material_code,top_material_code,asset_status,warranty_start_date,warranty_end_date\n"
+        "SN001,C001,Acme,MAT001,Main board,STC001,parent01,top01,PMAT01,TMAT01,valid,2026-01-01,2027-01-01\n"
     ).encode("utf-8")
 
     items, file_hash = master_data_service.parse_sn_assets_csv(content)
 
     assert len(items) == 1
     assert items[0].sn == "SN001"
+    assert items[0].service_tracking_card_no == "STC001"
+    assert items[0].parent_sn == "PARENT01"
+    assert items[0].top_sn == "TOP01"
     assert items[0].customer_name == "Acme"
     assert items[0].warranty_start_date.isoformat() == "2026-01-01"
     assert len(file_hash) == 64

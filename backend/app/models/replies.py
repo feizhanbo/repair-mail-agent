@@ -45,6 +45,10 @@ class ReplyRecord(TimestampMixin, Base):
     related_email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_reply_records_related_email"))
     outgoing_email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_reply_records_outgoing_email"))
     template_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("reply_templates.id", name="fk_reply_records_template"))
+    base_template_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("reply_templates.id", name="fk_reply_records_base_template"),
+    )
     reply_type: Mapped[str] = mapped_column(String(50), nullable=False)
     followup_round: Mapped[int] = mapped_column(nullable=False, server_default="1")
     missing_fields: Mapped[dict | None] = mapped_column(mysql.JSON)

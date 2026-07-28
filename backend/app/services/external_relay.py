@@ -17,6 +17,7 @@ from app.services.common import utcnow
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
 _SN_LOCAL_FIELDS = {
     "sn", "customer_code", "customer_name", "material_code", "material_name",
+    "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code", "top_material_code",
     "asset_status", "warranty_start_date", "warranty_end_date",
 }
 

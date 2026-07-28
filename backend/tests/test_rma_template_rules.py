@@ -9,6 +9,7 @@ import pytest
 from app.config import settings
 from app.models import RepairTicket, ReplyRecord
 from app.services import replies
+from app.seed import REPLY_TEMPLATES
 from app.services.rma_pdf import TEMPLATE_VERSION, normalize_rma_template_version
 from app.services.rma_test_preflight import build_rma_test_preflight
 
@@ -37,34 +38,38 @@ def test_rma_pdf_template_has_one_canonical_version_with_legacy_read_compatibili
 
 
 def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> None:
-    _, zh_body, zh_version = replies._rma_reply_content(_ticket(language_code="zh-CN"))
-    _, en_body, en_version = replies._rma_reply_content(_ticket())
+    zh_type, zh_version = replies._rma_reply_template_type(_ticket(language_code="zh-CN"))
+    en_type, en_version = replies._rma_reply_template_type(_ticket())
 
     assert zh_version == "rma_reply_zh_v1"
-    assert en_version == "overseas_warranty_in_warranty_v1"
-    assert "RMA维修授权表见附件" in zh_body
-    assert "RMA authorization form is attached" in en_body
+    assert en_version == "overseas_in_warranty_v1"
+    assert zh_type == "rma_authorization_domestic"
+    assert en_type == "rma_authorization_overseas_in_warranty"
+    templates = {item["template_type"]: item for item in REPLY_TEMPLATES}
+    assert "RMA维修授权表见附件" in templates[zh_type]["body_template"]
+    assert "RMA authorization form is attached" in templates[en_type]["body_template"]
     assert TEMPLATE_VERSION not in {zh_version, en_version}
 
 
 def test_overseas_out_of_warranty_and_special_rules() -> None:
-    _, body, version = replies._rma_reply_content(
+    template_type, version = replies._rma_reply_template_type(
         _ticket(request_date=date(2027, 1, 1))
     )
-    assert version == "overseas_warranty_out_of_warranty_v1"
-    assert "out of warranty" in body
+    assert version == "overseas_out_warranty_v1"
+    assert template_type == "rma_authorization_overseas_out_of_warranty"
 
-    _, _, st_version = replies._rma_reply_content(
+    st_type, st_version = replies._rma_reply_template_type(
         _ticket(customer_name="STMicroelectronics Pte Ltd", request_date=date(2026, 12, 31))
     )
-    assert st_version == "overseas_warranty_st_pickup_v1"
+    assert st_version == "overseas_st_pickup_v1"
+    assert st_type == "rma_authorization_overseas_st_pickup"
 
     with pytest.raises(replies.RmaReplyRuleError) as amkor:
-        replies._rma_reply_content(_ticket(contact_email="person@amkor.com"))
+        replies._rma_reply_template_type(_ticket(contact_email="person@amkor.com"))
     assert amkor.value.task_type == "rma_amkor_manual"
 
     with pytest.raises(replies.RmaReplyRuleError) as daniel:
-        replies._rma_reply_content(_ticket(contact_email="daniel@leitik.com", request_date=date(2027, 1, 1)))
+        replies._rma_reply_template_type(_ticket(contact_email="daniel@leitik.com", request_date=date(2027, 1, 1)))
     assert daniel.value.task_type == "rma_price_required"
 
 

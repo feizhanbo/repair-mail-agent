@@ -214,6 +214,27 @@ ROLES: tuple[dict[str, str], ...] = (
 
 REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
+        "template_code": "all_replies_domestic_company_base_zh",
+        "template_name": "所有回复邮件基础模板（国内公司信息）",
+        "template_type": "domestic_company_base",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": None,
+        "body_template": (
+            "{{ content }}\n\n"
+            "Best Regards!\n"
+            "------------------------------------------------------------\n"
+            "AccoTEST Business Unit of Beijing Huafeng Test & Control Technology Co., Ltd.\n"
+            "Web: www.accotest.com\n\n"
+            "本邮件及其附件可能包含保密信息，仅供指定收件方使用。"
+            "如您并非指定收件方，请删除本邮件及全部附件，并通知发件方；"
+            "不得泄露、复制、散发本邮件或依赖本邮件采取任何行动。\n"
+            "The information contained in and accompanying this email may be confidential "
+            "and is intended solely for the intended recipient(s). If received in error, "
+            "please delete all copies and notify the sender."
+        ),
+    },
+    {
         "template_code": "missing_info_zh",
         "template_name": "补充报修信息",
         "template_type": "missing_fields",
@@ -250,6 +271,237 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         "body_template": (
             "您好，\n\n"
             "您的报修邮件已进入人工确认流程。我们会尽快核对信息，并在需要时联系您补充材料。"
+        ),
+    },
+    {
+        "template_code": "repair_receipt_zh",
+        "template_name": "报修受理确认",
+        "template_type": "receipt",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "您好，{{ contact_person }}：\n\n"
+            "我们已收到您的报修邮件并生成工单 {{ ticket_no }}。"
+            "系统已完成初步信息核对，后续处理进展会继续通过本邮件回复链同步。\n\n谢谢。"
+        ),
+    },
+    {
+        "template_code": "followup_zh",
+        "template_name": "通用报修信息追问",
+        "template_type": "followup",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "您好，{{ contact_person }}：\n\n"
+            "为继续处理工单 {{ ticket_no }}，请补充以下信息：\n"
+            "{{ missing_fields }}\n\n请直接回复本邮件补充。谢谢。"
+        ),
+    },
+    {
+        "template_code": "rma_authorization_domestic_zh",
+        "template_name": "国内 RMA 维修授权回复",
+        "template_type": "rma_authorization_domestic",
+        "language": "zh-CN",
+        "version": "rma_reply_zh_v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "您好：\n\nRMA维修授权表见附件。\n"
+            "为了不耽误贵司维修进度，请注意以下事项：\n"
+            "1. 请务必打印 RMA 表，并与报修板一同寄出。\n"
+            "2. 请妥善包装设备，并核对 RMA 表中的返回地址；如需变更地址请提前告知。\n"
+            "3. 维修工期预计为 10 个工作日，实际进度以维修检测结果为准。\n\n谢谢。"
+        ),
+    },
+    {
+        "template_code": "rma_attachment_disabled_receipt_zh",
+        "template_name": "RMA 附件未启用受理回复",
+        "template_type": "rma_attachment_disabled_receipt",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "您好，{{ contact_person }}：\n\n"
+            "我们已收到并确认您的报修申请。RMA 维修授权单附件当前未启用自动发送，"
+            "后续将由工作人员继续处理。\n\n谢谢。"
+        ),
+    },
+    {
+        "template_code": "device_received_ack_zh",
+        "template_name": "设备收货确认",
+        "template_type": "device_received_ack",
+        "language": "zh-CN",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "您好，{{ contact_person }}：\n\n"
+            "我们已收到您寄送的待修设备及随附的 RMA 维修授权单（工单 {{ ticket_no }}）。"
+            "设备已进入后续维修处理流程。\n\n谢谢。"
+        ),
+    },
+    {
+        "template_code": "rma_overseas_in_warranty_en",
+        "template_name": "Overseas RMA - In Warranty",
+        "template_type": "rma_authorization_overseas_in_warranty",
+        "language": "en-US",
+        "version": "overseas_in_warranty_v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear Customer,\n\n"
+            "The RMA authorization form is attached for your review. Please print it and include it "
+            "in the package sent to AccoTEST.\n"
+            "Please ensure that the board is securely packed and that the return address on the RMA form is correct.\n\n"
+            "Please ship the faulty board to:\n"
+            "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
+            "Attention: Li Lian Rong\n"
+            "Address: Building 5, IC PARK, No. 9 Fenghao East Road, Haidian District (100094), Beijing\n"
+            "Phone: +86-15811322137\n\n"
+            "Please note:\n"
+            "1. Please attach the fault data to the email.\n"
+            "2. Before shipment, please provide photos of the physical goods and outer packaging by email. "
+            "The nameplate information must be clear for import customs clearance.\n"
+            "3. On your shipping invoice, please state \"No commercial value as sample\".\n"
+            "4. Invoices and packing lists should avoid the following words: old, repaired, returned, used, and national.\n"
+            "5. The recommended declared value is between USD 50 and USD 100.\n"
+            "6. If DHL is used and the value of the goods is less than CNY 5,000, please state \"NO KJ3\" in the commodity name.\n"
+            "7. Please pack the boards separately. Place one or two boards in each box.\n\n"
+            "Thank you for your cooperation!"
+        ),
+    },
+    {
+        "template_code": "rma_overseas_out_of_warranty_en",
+        "template_name": "Overseas RMA - Out of Warranty",
+        "template_type": "rma_authorization_overseas_out_of_warranty",
+        "language": "en-US",
+        "version": "overseas_out_warranty_v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear Customer,\n\nThe board is out of warranty.\n"
+            "The RMA authorization form is attached for your review. Please print it and include it "
+            "in the package sent to AccoTEST.\n"
+            "Please ensure that the board is securely packed and that the return address on the RMA form is correct.\n\n"
+            "Please ship the faulty board to:\n"
+            "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
+            "Attention: Li Lian Rong\n"
+            "Address: Building 5, IC PARK, No. 9 Fenghao East Road, Haidian District (100094), Beijing\n"
+            "Phone: +86-15811322137\n\n"
+            "Please note:\n"
+            "1. Please attach the fault data to the email.\n"
+            "2. Before shipment, please provide photos of the physical goods and outer packaging by email. "
+            "The nameplate information must be clear for import customs clearance.\n"
+            "3. On your shipping invoice, please state \"No commercial value as sample\".\n"
+            "4. Invoices and packing lists should avoid the following words: old, repaired, returned, used, and national.\n"
+            "5. The recommended declared value is between USD 50 and USD 100.\n"
+            "6. If DHL is used and the value of the goods is less than CNY 5,000, please state \"NO KJ3\" in the commodity name.\n"
+            "7. Please pack the boards separately. Place one or two boards in each box.\n\n"
+            "Thank you for your cooperation!"
+        ),
+    },
+    {
+        "template_code": "rma_overseas_st_pickup_en",
+        "template_name": "Overseas RMA - ST Reverse Pick-up",
+        "template_type": "rma_authorization_overseas_st_pickup",
+        "language": "en-US",
+        "version": "overseas_st_pickup_v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear Customer,\n\n"
+            "The RMA authorization form is attached for your review. Please print it and include it "
+            "in the package sent to AccoTEST.\n"
+            "Please ensure that the board is securely packed and that the return address on the RMA form is correct.\n\n"
+            "The following information is required to arrange reverse pick-up:\n"
+            "1. The specific pick-up date and time window. After confirmation, we will arrange for SF Express to collect the package.\n"
+            "2. The detailed pick-up address, contact name, and contact phone number.\n"
+            "3. Package details: total number of boxes, gross weight of each box with units, number of boards in each box, and the SN of every board.\n"
+            "4. Please print the RMA authorization form and place it inside the package.\n\n"
+            "Before shipment, please provide photos of the physical goods and outer packaging by email. "
+            "The nameplate information must be clear for import customs clearance.\n\n"
+            "Thank you for your cooperation!"
+        ),
+    },
+    {
+        "template_code": "repair_receipt_en",
+        "template_name": "Repair Request Receipt",
+        "template_type": "receipt",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nWe have received your repair request and created ticket {{ ticket_no }}. "
+            "Further updates will be sent in this email thread.\n\nThank you."
+        ),
+    },
+    {
+        "template_code": "missing_info_en",
+        "template_name": "Missing Repair Information",
+        "template_type": "missing_fields",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nPlease provide the following information for ticket {{ ticket_no }}:\n"
+            "{{ missing_fields }}\n\nPlease reply directly to this email. Thank you."
+        ),
+    },
+    {
+        "template_code": "followup_en",
+        "template_name": "Repair Follow-up",
+        "template_type": "followup",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nPlease provide the following information for ticket {{ ticket_no }}:\n"
+            "{{ missing_fields }}\n\nPlease reply directly to this email. Thank you."
+        ),
+    },
+    {
+        "template_code": "sn_invalid_en",
+        "template_name": "SN Confirmation Required",
+        "template_type": "sn_invalid",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nThe supplied device SN did not pass validation. "
+            "Please reply with the complete and correct SN so we can continue ticket {{ ticket_no }}."
+        ),
+    },
+    {
+        "template_code": "manual_review_notice_en",
+        "template_name": "Manual Review Notice",
+        "template_type": "manual_review",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nYour repair request {{ ticket_no }} is under manual review. "
+            "We will contact you in this email thread if additional information is required."
+        ),
+    },
+    {
+        "template_code": "rma_attachment_disabled_receipt_en",
+        "template_name": "RMA Attachment Disabled Receipt",
+        "template_type": "rma_attachment_disabled_receipt",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nWe have received your repair request. Automatic delivery of the "
+            "RMA authorization attachment is currently disabled and our team will continue handling it."
+        ),
+    },
+    {
+        "template_code": "device_received_ack_en",
+        "template_name": "Device Receipt Confirmation",
+        "template_type": "device_received_ack",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": "Re: {{ original_subject }}",
+        "body_template": (
+            "Dear {{ contact_person }},\n\nWe have received the device and accompanying RMA authorization "
+            "for ticket {{ ticket_no }}. The device has entered the repair process.\n\nThank you."
         ),
     },
 )

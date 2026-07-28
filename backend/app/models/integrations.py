@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
+from decimal import Decimal
+
+from sqlalchemy import ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,3 +49,29 @@ class TicketRelayExport(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     next_retry_at: Mapped[datetime | None] = datetime_column()
     exported_at: Mapped[datetime | None] = datetime_column()
+
+
+class ExportSap(TimestampMixin, Base):
+    __tablename__ = "export_sap"
+    __table_args__ = (
+        Index("idx_export_sap_sn", "sn"),
+        Index("idx_export_sap_customer_code", "customer_code"),
+        Index("idx_export_sap_material_code", "material_code"),
+    )
+
+    id: Mapped[int] = pk_column()
+    sn: Mapped[str] = mapped_column(String(100), nullable=False)
+    customer_code: Mapped[str | None] = mapped_column(String(50))
+    material_code: Mapped[str | None] = mapped_column(String(100))
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    material_name: Mapped[str | None] = mapped_column(String(255))
+    contact_person: Mapped[str | None] = mapped_column(String(100))
+    contact_phone: Mapped[str | None] = mapped_column(String(100))
+    email_subject: Mapped[str | None] = mapped_column(String(500))
+    problem_description: Mapped[str | None] = mapped_column(Text)
+    repair_requested_at: Mapped[datetime | None] = datetime_column()
+    mailing_address: Mapped[str | None] = mapped_column(String(500))
+    currency: Mapped[str | None] = mapped_column(String(10))
+    shipping_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    repair_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))

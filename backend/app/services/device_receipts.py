@@ -11,7 +11,13 @@ from app.models import Email, RepairTicket, ReplyRecord
 from app.services.audit import log_operation
 from app.services.common import utcnow
 from app.services.mail_safety import TEST_MAIL_RECIPIENT
-from app.services.replies import _send_reply_record
+from app.services.replies import (
+    _message_id_chain,
+    _render_reply_templates,
+    _require_reply_parent,
+    _select_template,
+    _send_reply_record,
+)
 from app.services.workflow import create_manual_task_if_missing
 
 
@@ -88,31 +94,95 @@ async def confirm_device_received(
         )
         return {"ticket_id": ticket.id, "status": "pending_prerequisite", "reply_id": None, "idempotent_reuse": False}
 
-    related_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
+    try:
+        related_email = await _require_reply_parent(
+            session,
+            ticket=ticket,
+            related_email_id=source_email_id,
+        )
+    except HTTPException as exc:
+        ticket.device_receipt_ack_status = "pending_review"
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="device_received_reply_parent_required",
+            trigger_reason=str(exc.detail),
+            priority="high",
+            email_id=source_email_id,
+        )
+        return {
+            "ticket_id": ticket.id,
+            "status": "pending_review",
+            "reply_id": None,
+            "idempotent_reuse": False,
+            "error_code": str(exc.detail),
+        }
+    language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
+    template = await _select_template(session, "device_received_ack", language)
+    if template is None:
+        ticket.device_receipt_ack_status = "pending_review"
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="device_received_reply_template_missing",
+            trigger_reason=f"REPLY_TEMPLATE_NOT_FOUND:device_received_ack:{language}",
+            priority="high",
+            email_id=related_email.id,
+        )
+        return {
+            "ticket_id": ticket.id,
+            "status": "pending_review",
+            "reply_id": None,
+            "idempotent_reuse": False,
+            "error_code": "REPLY_TEMPLATE_NOT_FOUND",
+        }
+    try:
+        subject, body, base_template = await _render_reply_templates(
+            session,
+            content_template=template,
+            ticket=ticket,
+            missing_fields=None,
+            parent=related_email,
+        )
+    except HTTPException as exc:
+        ticket.device_receipt_ack_status = "pending_review"
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="device_received_reply_base_template_missing",
+            trigger_reason=str(exc.detail),
+            priority="high",
+            email_id=related_email.id,
+        )
+        return {
+            "ticket_id": ticket.id,
+            "status": "pending_review",
+            "reply_id": None,
+            "idempotent_reuse": False,
+            "error_code": str(exc.detail),
+        }
     reply = ReplyRecord(
         ticket_id=ticket.id,
-        related_email_id=related_email.id if related_email else None,
+        related_email_id=related_email.id,
+        template_id=template.id,
+        base_template_id=base_template.id if base_template else None,
         reply_type="device_received_ack",
         followup_round=ticket.followup_count or 0,
         to_addresses=TEST_MAIL_RECIPIENT,
         cc_addresses=None,
-        subject=f"设备收货确认：{ticket.ticket_no}",
-        draft_body=(
-            f"您好，{ticket.contact_person or '客户'}：\n\n"
-            f"我们已收到您寄送的待修设备及随附的 RMA 维修授权单（工单 {ticket.ticket_no}）。"
-            "设备已进入后续维修处理流程。\n\n谢谢。"
-        ),
-        final_body=(
-            f"您好，{ticket.contact_person or '客户'}：\n\n"
-            f"我们已收到您寄送的待修设备及随附的 RMA 维修授权单（工单 {ticket.ticket_no}）。"
-            "设备已进入后续维修处理流程。\n\n谢谢。"
-        ),
-        generate_source="device_receipt",
+        subject=subject,
+        draft_body=body,
+        final_body=body,
+        generate_source="template",
         review_status="auto_approved" if settings.AUTO_SEND_ENABLED else "pending",
         reviewed_at=utcnow() if settings.AUTO_SEND_ENABLED else None,
         send_status="approved_pending_send" if settings.AUTO_SEND_ENABLED else "pending_review",
-        in_reply_to=related_email.message_id if related_email else None,
-        references_header=related_email.references_header if related_email else None,
+        in_reply_to=_message_id_chain(related_email.message_id),
+        references_header=_message_id_chain(
+            related_email.references_header,
+            related_email.in_reply_to,
+            related_email.message_id,
+        ),
     )
     session.add(reply)
     await session.flush()
