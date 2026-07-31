@@ -131,3 +131,18 @@ async def reconcile_send(
     )
     await session.commit()
     return ok(result, "uncertain reply send result reconciled")
+
+
+@router.post("/{reply_id}/retry-archive")
+async def retry_archive(
+    reply_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+) -> dict:
+    result = await reply_service.retry_rma_archive(
+        session,
+        reply_id=reply_id,
+        user_id=current_user.id,
+    )
+    await session.commit()
+    return ok(result, "RMA archive retry completed")

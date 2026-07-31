@@ -169,10 +169,12 @@ export type EmailItem = {
   parse_status: string;
   processing_stage?: string;
   intent_type?: string | null;
+  intent_subtype?: string | null;
   duplicate_of_email_id?: number | null;
   terminal_reason_code?: string | null;
   last_error_code?: string | null;
   retryable?: boolean;
+  recovery_stage?: string | null;
   next_retry_at?: string | null;
   error_message?: string | null;
   clean_body?: string | null;
@@ -208,6 +210,7 @@ export type ParseResult = {
   parser_type: string;
   parser_version?: string | null;
   intent_type?: string | null;
+  intent_subtype?: string | null;
   extracted_fields?: JsonRecord | null;
   extracted_items?: JsonRecord | null;
   missing_fields?: JsonRecord | null;
@@ -401,6 +404,9 @@ export type EmailThreadContext = {
   root_message_id?: string | null;
   latest_email_id?: number | null;
   ticket_id?: number | null;
+  predecessor_thread_id?: number | null;
+  predecessor_ticket_id?: number | null;
+  thread_version?: number;
   email_count?: number | null;
   merge_confidence?: number | string | null;
   merge_reason?: string | null;
@@ -465,6 +471,19 @@ export type TicketDetail = {
   sap_export_summary?: SapExportSummary;
   sap_exports?: SapExportLine[];
   rma_records?: TicketRmaRecord[];
+  rma_issue_summary?: RmaIssueSummary;
+  external_operations?: ExternalOperationRecord[];
+};
+
+export type RmaIssueSummary = {
+  rma_received: boolean;
+  pdf_validated: boolean;
+  smtp_sent: boolean;
+  message_id_saved: boolean;
+  pdf_archived: boolean;
+  outbound_archived: boolean;
+  closed: boolean;
+  terminal_reason_code?: string | null;
 };
 
 export type SapExportSummary = {
@@ -506,9 +525,31 @@ export type TicketRmaRecord = {
   status: string;
   policy_snapshot?: JsonRecord | null;
   pdf_oss_object_id?: number | null;
+  pdf_sha256?: string | null;
+  pdf_validation_status?: string;
+  pdf_archive_status?: string;
   reply_record_id?: number | null;
   received_at?: string | null;
   sent_at?: string | null;
+  pdf_archived_at?: string | null;
+  issued_at?: string | null;
+};
+
+export type ExternalOperationRecord = {
+  id: number;
+  operation_type: string;
+  operation_key: string;
+  status: string;
+  attempt_count: number;
+  remote_reference?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  retryable: boolean;
+  recovery_stage?: string | null;
+  next_retry_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  details_json?: JsonRecord | null;
 };
 
 export type ManualTask = {
@@ -520,6 +561,8 @@ export type ManualTask = {
   status: string;
   description?: string | null;
   trigger_reason?: string | null;
+  recovery_stage?: string | null;
+  recovery_action?: string | null;
   assigned_user_id?: number | null;
   claimed_by_user_id?: number | null;
   claimed_at?: string | null;
@@ -594,8 +637,16 @@ export type ReplyRecord = {
   reviewed_by_user_id?: number | null;
   reviewed_at?: string | null;
   send_status: string;
+  archive_status?: string;
+  send_attempt_count?: number;
+  archive_attempt_count?: number;
   smtp_message_id?: string | null;
+  smtp_response?: string | null;
+  thread_version?: number | null;
   sent_at?: string | null;
+  archive_verified_at?: string | null;
+  next_retry_at?: string | null;
+  last_error_code?: string | null;
   error_message?: string | null;
   created_at?: string;
   updated_at?: string;

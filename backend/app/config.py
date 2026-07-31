@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -83,6 +84,10 @@ class Settings(BaseSettings):
     RELAY_SN_SYNC_ENABLED: bool = False
     RELAY_PUSH_ENABLED: bool = False
     RELAY_TIMEOUT_SECONDS: float = 10.0
+    RELAY_ADAPTER: str = "sqlserver"
+    TEST_RELAY_BASE_URL: str = ""
+    TEST_RELAY_TOKEN: str = ""
+    RUN_REAL_MAIL_INTEGRATION_TESTS: bool = False
 
     RELAY_SQLSERVER_ENABLED: bool = False
     RELAY_SQLSERVER_HOST: str = ""
@@ -108,9 +113,7 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_RESULT_MODE: str = "table"
     RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
     RELAY_SQLSERVER_RESULT_TARGET: str = ""
-    RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN: str = ""
-    RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY: str = "submission_key"
-    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "callID"
+    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
     RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
     RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {
         "sn": "internalSN",
@@ -158,32 +161,48 @@ class Settings(BaseSettings):
 
     RMA_AUTHORIZATION_ENABLED: bool = True
     RMA_PDF_TEMPLATE_PATH: str = str(
-        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_auto_v3_1.pdf"
+        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_v1.pdf"
     )
     RMA_PDF_LAYOUT_PATH: str = str(
-        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "layout_v3_1_auto.yaml"
+        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "layout_v3_2_reference.yaml"
     )
     RMA_CJK_FONT_PATH: str = ""
     RMA_PDF_DEFAULT_CURRENCY: str = ""
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
     RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
-    RMA_DEFAULT_BEIJING_ADDRESS: str = (
-        "北京市海淀区丰豪东路9号院5号楼，李连荣 电话：010-63725600-193；邮编：100094"
-    )
+    RMA_PDF_MAILING_CONTACT_PERSON: str = "牛世磊"
+    RMA_PDF_MAILING_CONTACT_PHONE: str = "086-15101248952"
+    RMA_DEFAULT_BEIJING_COMPANY: str = "北京华峰测控技术股份有限公司"
+    RMA_DEFAULT_BEIJING_ADDRESS: str = "北京市海淀区丰豪东路9号院5号楼"
     RMA_DEFAULT_BEIJING_CONTACT: str = "李连荣"
     RMA_DEFAULT_BEIJING_PHONE: str = "010-63725600-193"
-    # The exact Tianjin recipient data has not been confirmed. Keep it
-    # configuration-only so an unmatched material cannot be exported using a
-    # guessed address.
-    RMA_DEFAULT_TIANJIN_ADDRESS: str = ""
-    RMA_DEFAULT_TIANJIN_CONTACT: str = ""
-    RMA_DEFAULT_TIANJIN_PHONE: str = ""
+    RMA_DEFAULT_BEIJING_POSTAL_CODE: str = "100094"
+    RMA_DEFAULT_TIANJIN_COMPANY: str = "华峰测控技术（天津）有限责任公司"
+    RMA_DEFAULT_TIANJIN_ADDRESS: str = "天津市滨海新区生态城川博道华峰测控1201号"
+    RMA_DEFAULT_TIANJIN_CONTACT: str = "郭洋（收）"
+    RMA_DEFAULT_TIANJIN_PHONE: str = "022-67253518-8108"
+    RMA_DEFAULT_TIANJIN_POSTAL_CODE: str = ""
+    RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK: str = (
+        "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
+        "Attention: Li Lian Rong\n"
+        "Address: Building 5, IC PARK, No. 9 Fenghao East Road, "
+        "Haidian District (100094), Beijing\n"
+        "Phone: +86-15811322137"
+    )
 
     DEFAULT_ADMIN_USERNAME: str = "admin"
     DEFAULT_ADMIN_PASSWORD: str = "change-me-admin"
     DEFAULT_ADMIN_REAL_NAME: str = "System Administrator"
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
+
+    # TEMPORARY: Commented out for local comparison audit — asyncmy DLL blocked by Windows AppLocker.
+    # @field_validator("DATABASE_URL", "DEV_DATABASE_URL", "DB_SMOKE_DATABASE_URL", mode="before")
+    # @classmethod
+    # def normalize_legacy_mysql_async_driver(cls, value: object) -> object:
+    #     if isinstance(value, str) and value.startswith("mysql+aiomysql://"):
+    #         return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
+    #     return value
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 

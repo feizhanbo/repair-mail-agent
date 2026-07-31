@@ -26,6 +26,7 @@ type EmailFilters = {
   message_id?: string;
   parse_status?: string;
   intent_type?: string;
+  intent_subtype?: string;
   date_range?: unknown;
 };
 
@@ -195,6 +196,7 @@ export default function EmailsPage() {
     { title: '主题', dataIndex: 'subject', ellipsis: true, render: (value?: string) => value || '-' },
     { title: '发件人', dataIndex: 'from_address', ellipsis: true, width: 220 },
     { title: '意图', dataIndex: 'intent_type', width: 130, render: (value?: string) => <StatusTag value={value} /> },
+    { title: '子类型', dataIndex: 'intent_subtype', width: 150, render: (value?: string) => value || '-' },
     { title: '解析', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
     { title: '线程', dataIndex: 'thread_id', width: 90, render: numberText },
     { title: '收信时间', dataIndex: 'received_at', width: 160, render: formatTime },
@@ -322,6 +324,17 @@ export default function EmailsPage() {
               ]}
             />
           </Form.Item>
+          <Form.Item name="intent_subtype">
+            <Select
+              allowClear
+              placeholder="意图子类型"
+              style={{ width: 180 }}
+              options={[
+                { value: 'general_irrelevant', label: '普通无关' },
+                { value: 'out_of_scope_repair', label: '超出负责范围的报修' },
+              ]}
+            />
+          </Form.Item>
           <Form.Item name="parse_status">
             <Select
               allowClear
@@ -372,6 +385,8 @@ export default function EmailsPage() {
               <Descriptions.Item label="发件人"><CopyableField value={detailQuery.data.email.from_address} /></Descriptions.Item>
               <Descriptions.Item label="收件人">{detailQuery.data.email.to_addresses || '-'}</Descriptions.Item>
               <Descriptions.Item label="Message-ID"><CopyableField value={detailQuery.data.email.message_id || ''} displayText={detailQuery.data.email.message_id || '-'} /></Descriptions.Item>
+              <Descriptions.Item label="意图">{detailQuery.data.email.intent_type || '-'}</Descriptions.Item>
+              <Descriptions.Item label="意图子类型">{detailQuery.data.email.intent_subtype || '-'}</Descriptions.Item>
               <Descriptions.Item label="原始EML">
                 {detailQuery.data.email.raw_eml_oss_object_id ? (
                   <Button
@@ -447,6 +462,7 @@ export default function EmailsPage() {
                 columns={[
                   { title: '解析器', dataIndex: 'parser_type', width: 90 },
                   { title: '意图', dataIndex: 'intent_type', width: 120 },
+                  { title: '子类型', dataIndex: 'intent_subtype', width: 150 },
                   { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
                   { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
                   { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },

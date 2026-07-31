@@ -19,7 +19,7 @@ from app.services.logging_safety import safe_error_code, sanitize_log_payload
 JOB_TYPES = {
     "email_parse", "email_reparse", "imap_fetch", "smtp_send", "auto_followup",
     "master_data_import", "export_generate", "relay_ticket_export", "sap_rma_poll",
-    "rma_authorization",
+    "rma_authorization", "rma_archive",
 }
 TERMINAL_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 NON_RETRYABLE_ERROR_PARTS = {
@@ -230,6 +230,16 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
             expected_rma_template_version=str(metadata.get("rma_template_version") or ""),
             expected_rma_no=str(metadata.get("rma_no") or ""),
         )
+    if job.job_type == "rma_archive":
+        from app.services.replies import retry_rma_archive
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await retry_rma_archive(
+            session,
+            reply_id=job.resource_id,
+            user_id=user_id,
+        )
     if job.job_type == "auto_followup":
         from app.services.replies import create_reply_draft
 
@@ -334,9 +344,12 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             job.error_code = "TASK_SNAPSHOT_SUPERSEDED"
             job.error_message = None
             job.finished_at = utcnow()
-        elif business_status in {"failed", "manual_review", "send_uncertain", "misconfigured"}:
+        elif business_status in {"failed", "send_failed", "manual_review", "send_uncertain", "misconfigured", "archive_failed"}:
             error_code = str(result.get("error_code") or business_status).upper()
-            retryable = job.job_type == "relay_ticket_export" and _job_error_is_retryable(error_code)
+            retryable = (
+                job.job_type in {"relay_ticket_export", "smtp_send", "rma_archive"}
+                and _job_error_is_retryable(error_code)
+            )
             job.result_json = sanitize_log_payload(result)
             job.error_code = error_code
             job.error_message = str(result.get("error_message") or error_code)[:2000]
@@ -346,7 +359,7 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
                 delay_minutes = (5, 15, 60)[min(job.attempt_count - 1, 2)]
                 job.next_run_at = utcnow() + timedelta(minutes=delay_minutes)
             else:
-                job.status = "needs_manual_review" if business_status in {"manual_review", "send_uncertain", "misconfigured"} else "failed"
+                job.status = "needs_manual_review" if business_status in {"manual_review", "send_uncertain", "misconfigured", "archive_failed"} else "failed"
                 job.finished_at = utcnow()
         else:
             job.status = "success"

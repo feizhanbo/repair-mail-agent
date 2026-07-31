@@ -35,6 +35,18 @@ field_confidences, evidence, confidence_reasons, manual_review_direction, origin
 联系电话或手机号可以抽取为 contact_phone，但它是选填字段，缺失时不得放入 missing_fields。
 """.strip()
 
+AI_EXTRACT_SYSTEM_PROMPT += """
+
+业务范围规则：
+- 本系统只处理客户将板卡寄回本公司维修并申请 RMA 的业务。
+- 只有邮件明确说明属于其他维修或服务业务时，才分类为
+  intent_type=irrelevant、intent_subtype=out_of_scope_repair，并在
+  evidence.scope_decision 中提供原文范围证据。
+- 广告、系统通知等普通无关邮件使用 intent_subtype=general_irrelevant。
+- SN 未知、SN 不存在、资料缺失或描述不完整都不能作为超范围依据。
+- intent_type 不是 irrelevant 时，intent_subtype 必须为 null。
+""".strip()
+
 AI_REPLY_SYSTEM_PROMPT = """
 你是邮件报修自动化系统的中文客服助理。你只能输出 JSON 对象。
 根据工单缺失字段和模板草稿生成更自然的追问草稿。草稿只能用于人工审核，不代表已发送。
@@ -1037,7 +1049,7 @@ async def create_ai_parse_candidate(
             "role": "user",
             "content": (
                 "请输出 JSON，字段为 intent_type, extracted_fields, extracted_items, missing_fields, "
-                "conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
+                "intent_subtype, conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
                 "manual_review_direction, original_evidence。\n"
                 f"{_safe_json(input_payload)}"
             ),
@@ -1063,6 +1075,7 @@ async def create_ai_parse_candidate(
         parser_type="ai",
         parser_version=settings.AI_PROMPT_VERSION,
         intent_type=parsed.intent_type,
+        intent_subtype=parsed.intent_subtype,
         extracted_fields=parsed.extracted_fields,
         extracted_items={"items": parsed.extracted_items},
         missing_fields=parsed.missing_fields,

@@ -140,12 +140,21 @@ class TicketRma(TimestampMixin, Base):
         mysql.BIGINT(unsigned=True),
         ForeignKey("oss_objects.id", name="fk_ticket_rmas_pdf"),
     )
+    pdf_sha256: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    pdf_validation_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
+    pdf_archive_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
     reply_record_id: Mapped[int | None] = mapped_column(
         mysql.BIGINT(unsigned=True),
         ForeignKey("reply_records.id", name="fk_ticket_rmas_reply"),
     )
     received_at: Mapped[datetime | None] = datetime_column()
     sent_at: Mapped[datetime | None] = datetime_column()
+    pdf_archived_at: Mapped[datetime | None] = datetime_column()
+    issued_at: Mapped[datetime | None] = datetime_column()
 
 
 class TicketRmaItem(TimestampMixin, Base):
@@ -166,3 +175,50 @@ class TicketRmaItem(TimestampMixin, Base):
         ForeignKey("repair_ticket_items.id", name="fk_ticket_rma_items_item", ondelete="CASCADE"),
         nullable=False,
     )
+
+
+class ExternalOperationRecord(TimestampMixin, Base):
+    __tablename__ = "external_operation_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_type",
+            "operation_key",
+            name="uk_external_operation_type_key",
+        ),
+        Index("idx_external_operation_status_retry", "status", "next_retry_at"),
+        Index("idx_external_operation_ticket", "ticket_id", "created_at"),
+        Index("idx_external_operation_email", "email_id", "created_at"),
+    )
+
+    id: Mapped[int] = pk_column()
+    operation_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="planned")
+    ticket_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_tickets.id", name="fk_external_operations_ticket", ondelete="CASCADE"),
+    )
+    email_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("emails.id", name="fk_external_operations_email", ondelete="SET NULL"),
+    )
+    reply_record_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("reply_records.id", name="fk_external_operations_reply", ondelete="CASCADE"),
+    )
+    export_sap_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("export_sap.id", name="fk_external_operations_export_sap", ondelete="CASCADE"),
+    )
+    attempt_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    remote_reference: Mapped[str | None] = mapped_column(String(500))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    retryable: Mapped[bool] = mapped_column(
+        mysql.TINYINT(display_width=1), nullable=False, server_default="1"
+    )
+    recovery_stage: Mapped[str | None] = mapped_column(String(100))
+    next_retry_at: Mapped[datetime | None] = datetime_column()
+    started_at: Mapped[datetime | None] = datetime_column()
+    completed_at: Mapped[datetime | None] = datetime_column()
+    details_json: Mapped[dict | None] = mapped_column(mysql.JSON)

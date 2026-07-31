@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.api.v1 import notifications as notification_api
-from app.models import ManualReviewTask, User
+from app.models import (
+    Email,
+    EmailAttachment,
+    ManualReviewTask,
+    OssObject,
+    RepairTicket,
+    ReplyRecord,
+    TicketRma,
+    User,
+)
+from app.schemas.business import ManualTaskResolveRequest
 from app.services import notifications, workflow
 
 
@@ -129,3 +141,118 @@ async def test_manual_review_cannot_leave_while_another_task_is_open() -> None:
         )
     assert exc_info.value.detail == "MANUAL_TASKS_UNRESOLVED"
     assert ticket.current_status_code == "manual_review"
+
+
+@pytest.mark.anyio
+async def test_rma_sent_and_closed_cannot_bypass_evidence_gates() -> None:
+    unused_session = SimpleNamespace()
+    ready = SimpleNamespace(
+        id=1,
+        current_status_code="ready_for_export",
+    )
+    with pytest.raises(HTTPException) as sent_error:
+        await workflow.transition_ticket(
+            unused_session,
+            ticket=ready,
+            to_status_code="rma_sent",
+            trigger_event="rma_reply_sent",
+            metadata={"reply_id": 2},
+        )
+    assert sent_error.value.detail == "RMA_SMTP_EVIDENCE_REQUIRED"
+
+    sent = SimpleNamespace(
+        id=1,
+        current_status_code="rma_sent",
+    )
+    with pytest.raises(HTTPException) as close_error:
+        await workflow.transition_ticket(
+            unused_session,
+            ticket=sent,
+            to_status_code="closed",
+            trigger_event="rma_issued_and_archived",
+            metadata={"closure_gates": {"smtp_sent": True}},
+        )
+    assert close_error.value.detail == "RMA_ISSUE_CLOSURE_GATES_REQUIRED"
+
+
+def test_manual_task_schema_rejects_legacy_close_action() -> None:
+    with pytest.raises(ValidationError):
+        ManualTaskResolveRequest(
+            resolution="legacy direct close must not be accepted",
+            next_action="close_ticket",
+        )
+
+
+@pytest.mark.anyio
+async def test_rma_closure_rechecks_durable_database_facts() -> None:
+    now = workflow.utcnow()
+    ticket = RepairTicket(id=1, ticket_no="T-1", current_status_code="rma_sent")
+    reply = ReplyRecord(
+        id=2,
+        ticket_id=1,
+        reply_type="rma_authorization",
+        to_addresses="rmatest2@accotest.com",
+        send_status="sent",
+        smtp_message_id="<issued@accotest.com>",
+        outgoing_email_id=3,
+        rma_pdf_oss_object_id=4,
+        archive_status="archived",
+        archive_verified_at=now,
+    )
+    rma = TicketRma(
+        id=5,
+        ticket_id=1,
+        rma_no="2026070910",
+        status="issued",
+        reply_record_id=2,
+        received_at=now,
+        pdf_oss_object_id=4,
+        pdf_sha256="a" * 64,
+        pdf_validation_status="passed",
+        pdf_archive_status="archived",
+        pdf_archived_at=now,
+        issued_at=now,
+    )
+    outgoing = Email(
+        id=3,
+        mailbox_account="rmatest1@accotest.com",
+        mail_direction="outbound",
+        message_id="<issued@accotest.com>",
+        from_address="rmatest1@accotest.com",
+        raw_eml_oss_object_id=6,
+    )
+    pdf_object = OssObject(id=4, object_key="rma.pdf", original_file_name="rma.pdf")
+    attachment = EmailAttachment(
+        id=7,
+        email_id=3,
+        oss_object_id=4,
+        file_name="rma.pdf",
+        file_hash="a" * 64,
+    )
+
+    async def get(model, object_id):
+        return {
+            (ReplyRecord, 2): reply,
+            (Email, 3): outgoing,
+            (OssObject, 4): pdf_object,
+        }.get((model, object_id))
+
+    session = SimpleNamespace(
+        get=get,
+        scalar=AsyncMock(side_effect=[rma, attachment]),
+    )
+    missing = await workflow._rma_closure_missing_facts(
+        session,
+        ticket=ticket,
+        metadata={"reply_id": 2},
+    )
+    assert missing == []
+
+    outgoing.raw_eml_oss_object_id = None
+    session.scalar = AsyncMock(side_effect=[rma, attachment])
+    missing = await workflow._rma_closure_missing_facts(
+        session,
+        ticket=ticket,
+        metadata={"reply_id": 2},
+    )
+    assert "outbound_eml_archived" in missing

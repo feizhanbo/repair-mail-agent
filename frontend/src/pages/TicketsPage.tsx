@@ -12,6 +12,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  Checkbox,
   DatePicker,
   Drawer,
   Empty,
@@ -75,6 +76,18 @@ type TransitionForm = {
   reason?: string;
 };
 
+type SapReconcileForm = {
+  outcome: 'accepted' | 'not_inserted';
+  call_id?: string;
+  reason: string;
+};
+
+type RmaManualPolicyForm = {
+  reason: string;
+  confirm_policy_values: true;
+  confirm_template_thread_and_archive: true;
+};
+
 export default function TicketsPage() {
   const [searchParams] = useSearchParams();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
@@ -89,6 +102,8 @@ export default function TicketsPage() {
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
   const [partialParse, setPartialParse] = useState<ParseResult | null>(null);
+  const [sapReconcileLineId, setSapReconcileLineId] = useState<number | null>(null);
+  const [rmaManualPolicyOpen, setRmaManualPolicyOpen] = useState(false);
   const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
   const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor', 'operator']);
@@ -131,7 +146,7 @@ export default function TicketsPage() {
   const transitionOptions = useMemo(() => {
     const transitions = systemQuery.data?.workflow_transitions ?? [];
     return transitions
-      .filter((t) => t.enabled)
+      .filter((t) => t.enabled && !['ready_for_export', 'rma_sent', 'closed'].includes(t.to_status_code))
       .map((t) => ({
         to_status_code: t.to_status_code,
         trigger_event: t.trigger_event,
@@ -234,7 +249,7 @@ export default function TicketsPage() {
       note: '操作员在工单中心确认公司已收到待修设备。',
     }),
     onSuccess: (result) => {
-      message.success(result.status === 'sent' ? '收货确认已发送并完成关单' : '公司收货事实已记录');
+      message.success('公司收货事实已记录；不会发送邮件或改变 RMA 签发状态');
       invalidateDetail();
       void queryClient.invalidateQueries({ queryKey: ['replies'] });
       void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
@@ -266,11 +281,38 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
+  const reconcileSapMutation = useMutation({
+    mutationFn: (values: SapReconcileForm) => api.reconcileSapSubmission(
+      selectedId as number,
+      sapReconcileLineId as number,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('SAP 不确定提交结果已完成对账');
+      setSapReconcileLineId(null);
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
   const retryRmaMutation = useMutation({
     mutationFn: (id: number) => api.retryRmaSend(id),
     onSuccess: () => {
-      message.success('RMA 模板回复重发已进入后台队列');
+      message.success('RMA 签发恢复已受理；已发送邮件只会重试归档，不会重复发送');
       invalidateDetail();
+    },
+    onError: handleMutationError,
+  });
+  const approveRmaManualPolicyMutation = useMutation({
+    mutationFn: (values: RmaManualPolicyForm) => api.approveRmaManualPolicy(
+      selectedId as number,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('特殊政策已记录，RMA 模板草稿生成任务已进入队列；不会自动发送');
+      setRmaManualPolicyOpen(false);
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
     },
     onError: handleMutationError,
   });
@@ -421,7 +463,9 @@ export default function TicketsPage() {
             onRetrySap={() => confirmAction('确认使用原提交键和原快照重试 SAP 提交？', () => retrySapMutation.mutate(detailQuery.data.ticket.id))}
             onPollSap={() => pollSapMutation.mutate(detailQuery.data.ticket.id)}
             onConfirmLateSap={() => confirmAction('确认接受迟到的 SAP RMA 回填结果？', () => confirmLateSapMutation.mutate(detailQuery.data.ticket.id))}
-            onRetryRma={() => confirmAction('确认按模板在原邮件链重新发送 RMA？', () => retryRmaMutation.mutate(detailQuery.data.ticket.id))}
+            onReconcileSap={setSapReconcileLineId}
+            onRetryRma={() => confirmAction('确认继续RMA签发？系统会优先恢复归档，只有明确未发送时才允许重新发送。', () => retryRmaMutation.mutate(detailQuery.data.ticket.id))}
+            onApproveRmaManualPolicy={() => setRmaManualPolicyOpen(true)}
             onConfirmDeviceReceived={() => confirmAction('确认公司已经收到客户寄来的待修设备及纸质 RMA 授权单？', () => confirmDeviceReceivedMutation.mutate(detailQuery.data.ticket.id))}
             onTransition={() => setTransitionOpen(true)}
             hasPrevTicket={hasPrevTicket}
@@ -436,6 +480,7 @@ export default function TicketsPage() {
             pollSapLoading={pollSapMutation.isPending}
             confirmLateSapLoading={confirmLateSapMutation.isPending}
             retryRmaLoading={retryRmaMutation.isPending}
+            approveRmaManualPolicyLoading={approveRmaManualPolicyMutation.isPending}
             confirmDeviceLoading={confirmDeviceReceivedMutation.isPending}
           />
         ) : detailQuery.isFetching ? (
@@ -509,6 +554,95 @@ export default function TicketsPage() {
           </Form>
         </Modal>
       ) : null}
+      <Modal
+        title="SAP 提交结果人工对账"
+        open={sapReconcileLineId !== null}
+        onCancel={() => setSapReconcileLineId(null)}
+        footer={null}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="warning">
+          仅在远端人工核对后操作。确认已插入时必须填写 SAP 生成的 CallID；确认未插入后系统才允许安全重试。
+        </Typography.Paragraph>
+        <Form<SapReconcileForm>
+          layout="vertical"
+          initialValues={{ outcome: 'accepted' }}
+          onFinish={(values) => reconcileSapMutation.mutate(values)}
+        >
+          <Form.Item label="核对结果" name="outcome" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'accepted', label: '远端已插入，绑定 CallID' },
+              { value: 'not_inserted', label: '远端确认未插入，允许重试' },
+            ]} />
+          </Form.Item>
+          <Form.Item
+            label="CallID"
+            name="call_id"
+            dependencies={['outcome']}
+            rules={[
+              ({ getFieldValue }) => ({
+                validator: (_, value) => (
+                  getFieldValue('outcome') !== 'accepted' || String(value || '').trim()
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('远端已插入时必须填写 CallID'))
+                ),
+              }),
+            ]}
+          >
+            <Input maxLength={191} />
+          </Form.Item>
+          <Form.Item label="核对依据/原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={reconcileSapMutation.isPending}>
+            提交对账结果
+          </Button>
+        </Form>
+      </Modal>
+      <Modal
+        title="特殊 RMA 政策人工确认"
+        open={rmaManualPolicyOpen}
+        onCancel={() => setRmaManualPolicyOpen(false)}
+        footer={null}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="warning">
+          此操作只生成“待人工审核”的模板草稿，不会自动发送。匿名客户因固定 PDF 版式不适用，系统会继续阻止并要求单独制作受控附件。
+        </Typography.Paragraph>
+        <Form<RmaManualPolicyForm>
+          layout="vertical"
+          onFinish={(values) => approveRmaManualPolicyMutation.mutate(values)}
+        >
+          <Form.Item label="人工确认依据" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Form.Item
+            name="confirm_policy_values"
+            valuePropName="checked"
+            rules={[{
+              validator: (_, value) => value
+                ? Promise.resolve()
+                : Promise.reject(new Error('必须确认价格、币种和税率')),
+            }]}
+          >
+            <Checkbox>我已核对价格、币种、税率及客户政策快照</Checkbox>
+          </Form.Item>
+          <Form.Item
+            name="confirm_template_thread_and_archive"
+            valuePropName="checked"
+            rules={[{
+              validator: (_, value) => value
+                ? Promise.resolve()
+                : Promise.reject(new Error('必须确认模板、原线程和归档要求')),
+            }]}
+          >
+            <Checkbox>我确认最终邮件必须使用模板、在原线程发送并保存 Message-ID 与归档证据</Checkbox>
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={approveRmaManualPolicyMutation.isPending}>
+            确认并生成待审草稿
+          </Button>
+        </Form>
+      </Modal>
       <ParseResultSelectionModal
         open={Boolean(partialParse)}
         parseResult={partialParse}
@@ -534,7 +668,9 @@ function TicketDetailView({
   onRetrySap,
   onPollSap,
   onConfirmLateSap,
+  onReconcileSap,
   onRetryRma,
+  onApproveRmaManualPolicy,
   onConfirmDeviceReceived,
   onTransition,
   hasPrevTicket,
@@ -549,6 +685,7 @@ function TicketDetailView({
   pollSapLoading,
   confirmLateSapLoading,
   retryRmaLoading,
+  approveRmaManualPolicyLoading,
   confirmDeviceLoading,
 }: {
   detail: TicketDetail;
@@ -564,7 +701,9 @@ function TicketDetailView({
   onRetrySap: () => void;
   onPollSap: () => void;
   onConfirmLateSap: () => void;
+  onReconcileSap: (lineId: number) => void;
   onRetryRma: () => void;
+  onApproveRmaManualPolicy: () => void;
   onConfirmDeviceReceived: () => void;
   onTransition: () => void;
   hasPrevTicket: boolean;
@@ -579,6 +718,7 @@ function TicketDetailView({
   pollSapLoading: boolean;
   confirmLateSapLoading: boolean;
   retryRmaLoading: boolean;
+  approveRmaManualPolicyLoading: boolean;
   confirmDeviceLoading: boolean;
 }) {
   const timelineEmails = detail.email_timeline.length > 0 ? detail.email_timeline : detail.source_email ? [detail.source_email] : [];
@@ -758,6 +898,15 @@ function TicketDetailView({
                     <Tag color="red">失败：{detail.sap_export_summary?.failed_count}</Tag>
                   ) : null}
                 </Space>
+                <Space wrap>
+                  <Tag color={detail.rma_issue_summary?.rma_received ? 'green' : 'default'}>正式RMA</Tag>
+                  <Tag color={detail.rma_issue_summary?.pdf_validated ? 'green' : 'default'}>PDF校验</Tag>
+                  <Tag color={detail.rma_issue_summary?.smtp_sent ? 'green' : 'default'}>SMTP发送</Tag>
+                  <Tag color={detail.rma_issue_summary?.message_id_saved ? 'green' : 'default'}>Message-ID</Tag>
+                  <Tag color={detail.rma_issue_summary?.pdf_archived ? 'green' : 'default'}>PDF归档</Tag>
+                  <Tag color={detail.rma_issue_summary?.outbound_archived ? 'green' : 'default'}>邮件归档</Tag>
+                  <Tag color={detail.rma_issue_summary?.closed ? 'green' : 'orange'}>签发闭环</Tag>
+                </Space>
                 <Table
                   size="small"
                   rowKey="id"
@@ -767,7 +916,7 @@ function TicketDetailView({
                   columns={[
                     { title: 'SN', dataIndex: 'sn', width: 150, fixed: 'left', render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '状态', dataIndex: 'status', width: 120, render: (v: string) => <StatusTag value={v} /> },
-                    { title: 'callID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                    { title: 'CallID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: 'RMA', dataIndex: 'rma_no', width: 130, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '客户代码', dataIndex: 'customer_code', width: 120, render: (v?: string) => v || '-' },
                     { title: '物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
@@ -788,6 +937,16 @@ function TicketDetailView({
                           : '-'
                       ),
                     },
+                    {
+                      title: '恢复操作',
+                      width: 150,
+                      fixed: 'right',
+                      render: (_: unknown, row: NonNullable<TicketDetail['sap_exports']>[number]) => (
+                        row.status === 'submit_uncertain' && canTransitionTicket
+                          ? <Button size="small" danger onClick={() => onReconcileSap(row.id)}>人工对账</Button>
+                          : '-'
+                      ),
+                    },
                   ]}
                 />
                 <Typography.Title level={5}>RMA 记录</Typography.Title>
@@ -801,6 +960,10 @@ function TicketDetailView({
                     { title: '状态', dataIndex: 'status', width: 130, render: (v: string) => <StatusTag value={v} /> },
                     { title: '接收时间', dataIndex: 'received_at', width: 170, render: formatTime },
                     { title: '发送时间', dataIndex: 'sent_at', width: 170, render: formatTime },
+                    { title: 'PDF校验', dataIndex: 'pdf_validation_status', width: 120, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: 'PDF归档', dataIndex: 'pdf_archive_status', width: 120, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: '归档时间', dataIndex: 'pdf_archived_at', width: 170, render: formatTime },
+                    { title: '签发完成', dataIndex: 'issued_at', width: 170, render: formatTime },
                     { title: 'PDF 对象', dataIndex: 'pdf_oss_object_id', width: 120, render: (v?: number) => v || '-' },
                     { title: '回复记录', dataIndex: 'reply_record_id', width: 120, render: (v?: number) => v || '-' },
                   ]}
@@ -810,7 +973,8 @@ function TicketDetailView({
                     <Button danger loading={retrySapLoading} onClick={onRetrySap}>重试 SAP 提交</Button>
                     <Button icon={<SyncOutlined />} loading={pollSapLoading} onClick={onPollSap}>重新轮询</Button>
                     <Button loading={confirmLateSapLoading} onClick={onConfirmLateSap}>确认迟到结果</Button>
-                    <Button type="primary" loading={retryRmaLoading} onClick={onRetryRma}>重发 RMA</Button>
+                    <Button type="primary" loading={retryRmaLoading} onClick={onRetryRma}>继续RMA签发/恢复归档</Button>
+                    <Button loading={approveRmaManualPolicyLoading} onClick={onApproveRmaManualPolicy}>确认特殊政策并生成待审草稿</Button>
                   </Space>
                 ) : null}
               </div>
@@ -831,6 +995,23 @@ function TicketDetailView({
                     { title: '时间', dataIndex: 'created_at', width: 160, render: formatTime },
                   ]}
                 />
+                <Typography.Title level={5}>外部操作</Typography.Title>
+                <Table
+                  size="small"
+                  rowKey="id"
+                  dataSource={detail.external_operations ?? []}
+                  pagination={false}
+                  scroll={{ x: 1100 }}
+                  columns={[
+                    { title: '操作', dataIndex: 'operation_type', width: 180 },
+                    { title: '状态', dataIndex: 'status', width: 130, render: (v: string) => <StatusTag value={v} /> },
+                    { title: '尝试', dataIndex: 'attempt_count', width: 70 },
+                    { title: '远端标识', dataIndex: 'remote_reference', width: 190, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                    { title: '恢复节点', dataIndex: 'recovery_stage', width: 170, render: (v?: string) => v || '-' },
+                    { title: '错误', width: 260, render: (_: unknown, row: NonNullable<TicketDetail['external_operations']>[number]) => row.error_code ? `${row.error_code}: ${row.error_message || '-'}` : '-' },
+                    { title: '完成时间', dataIndex: 'completed_at', width: 170, render: formatTime },
+                  ]}
+                />
                 <Typography.Title level={5}>人工任务</Typography.Title>
                 <Table<ManualTask> size="small" rowKey="id" dataSource={detail.manual_tasks} pagination={false}
                   columns={[
@@ -839,6 +1020,8 @@ function TicketDetailView({
                     { title: '优先级', dataIndex: 'priority', width: 100, render: (v: string) => <StatusTag value={v} kind="priority" /> },
                     { title: '描述', dataIndex: 'description', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '触发原因', dataIndex: 'trigger_reason', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '恢复节点', dataIndex: 'recovery_stage', width: 170, render: (v?: string) => v || '-' },
+                    { title: '处理方式', dataIndex: 'recovery_action', width: 360, render: (v?: string) => v || '-' },
                     { title: '创建时间', dataIndex: 'created_at', width: 160, render: formatTime },
                   ]}
                 />
@@ -873,7 +1056,7 @@ function TicketDetailView({
         <Button icon={<CheckCircleOutlined />} loading={validateLoading} onClick={onValidateSn}>SN 校验</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateExportLoading} onClick={onValidateExport}>完整安全校验</Button>
-        <Button icon={<CheckCircleOutlined />} loading={confirmDeviceLoading} disabled={detail.ticket.current_status_code === 'closed'} onClick={onConfirmDeviceReceived}>确认收货</Button>
+        <Button icon={<CheckCircleOutlined />} loading={confirmDeviceLoading} onClick={onConfirmDeviceReceived}>记录收货事实（不流转）</Button>
         {canTransitionTicket ? <Button type="primary" onClick={onTransition}>状态流转</Button> : null}
       </div>
     </div>

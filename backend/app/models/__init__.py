@@ -1,6 +1,13 @@
 from app.models.base import Base
 from app.models.identity import Role, User, UserRole
-from app.models.integrations import ExportSap, ExternalSyncCheckpoint, TicketRelayExport, TicketRma, TicketRmaItem
+from app.models.integrations import (
+    ExportSap,
+    ExternalOperationRecord,
+    ExternalSyncCheckpoint,
+    TicketRelayExport,
+    TicketRma,
+    TicketRmaItem,
+)
 from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog
 from app.models.mail import Email, EmailAttachment, EmailThread, EmailTicketLink
 from app.models.mail_fetch import MailFetchRecord
@@ -40,6 +47,7 @@ __all__ = [
     "NotificationEvent",
     "NotificationUserState",
     "ExternalSyncCheckpoint",
+    "ExternalOperationRecord",
     "TicketRelayExport",
     "ExportSap",
     "TicketRma",

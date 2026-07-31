@@ -13,6 +13,7 @@ from app.services.rma_pdf import (
     RmaPdfData,
     RmaPdfError,
     render_rma_pdf,
+    rma_pdf_file_name,
     rma_pdf_page_count,
     rma_pdf_snapshot,
     validate_rma_template_integrity,
@@ -37,8 +38,8 @@ def _data(item_count: int, *, test_long_text: bool = False) -> RmaPdfData:
         mailing_address="No real shipment - synthetic address",
         mailing_contact_person="Test Operator",
         mailing_contact_phone="000-0000",
-        delivery_fee_paid_by_customer="TEST ONLY",
-        repair_fee_paid_by_customer="TEST ONLY",
+        delivery_fee_paid_by_customer="one-way charge",
+        repair_fee_paid_by_customer="free of charge",
         total_cost=Decimal("0"),
         items=[
             RmaItemData(
@@ -96,10 +97,24 @@ def test_continuation_has_only_real_rows_and_no_hidden_details_labels() -> None:
             assert forbidden not in continuation
 
 
-def test_test_only_watermark_is_present_on_every_page() -> None:
+def test_test_only_flag_cannot_add_a_watermark() -> None:
     pdf = render_rma_pdf(_data(7), test_only=True)
     with fitz.open(stream=pdf, filetype="pdf") as document:
-        assert all("TESTONLY" in "".join(page.get_text().split()) for page in document)
+        assert all("TESTONLY" not in "".join(page.get_text().split()) for page in document)
+
+
+def test_rma_filename_and_contact_follow_fixed_template_format() -> None:
+    data = _data(1)
+    data.rma_no = "2026070910"
+    data.customer_name = "南京矽力微电子技术有限公司"
+    data.mailing_contact_person = "牛世磊"
+    data.mailing_contact_phone = "086-15101248952"
+
+    assert data.mailing_contact == "牛世磊086-15101248952"
+    assert rma_pdf_file_name(data) == "RMA2026070910南京矽力微电子技术有限公司.pdf"
+    with fitz.open(stream=render_rma_pdf(data), filetype="pdf") as document:
+        compact = "".join(page.get_text() for page in document).replace(" ", "").replace("\n", "")
+    assert "牛世磊086-15101248952" in compact
 
 
 def test_fixed_box_overflow_aborts_generation() -> None:

@@ -7,7 +7,7 @@ Create Date: 2026-07-28
 
 from collections.abc import Sequence
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql
 
@@ -65,12 +65,18 @@ SPECIAL_POLICIES = (
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    existing_export_rows = bind.execute(sa.text("SELECT COUNT(*) FROM export_sap")).scalar_one()
-    if existing_export_rows:
-        raise RuntimeError(
-            "export_sap contains legacy rows; migrate or archive them before applying f3a7b8c9d0e1"
+    if context.is_offline_mode():
+        op.execute(
+            "-- PRECONDITION: export_sap must contain zero legacy rows before applying "
+            "f3a7b8c9d0e1"
         )
+    else:
+        bind = op.get_bind()
+        existing_export_rows = bind.execute(sa.text("SELECT COUNT(*) FROM export_sap")).scalar_one()
+        if existing_export_rows:
+            raise RuntimeError(
+                "export_sap contains legacy rows; migrate or archive them before applying f3a7b8c9d0e1"
+            )
 
     op.add_column(
         "emails",

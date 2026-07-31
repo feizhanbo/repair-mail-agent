@@ -38,6 +38,7 @@ class ReplyRecord(TimestampMixin, Base):
         Index("idx_reply_records_rma_pdf", "rma_pdf_oss_object_id"),
         Index("idx_reply_records_ticket_round", "ticket_id", "followup_round"),
         Index("idx_reply_records_review_status", "review_status", "created_at"),
+        Index("idx_reply_records_archive_retry", "archive_status", "next_retry_at"),
     )
 
     id: Mapped[int] = pk_column()
@@ -67,9 +68,17 @@ class ReplyRecord(TimestampMixin, Base):
     reviewed_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_reply_records_reviewer"))
     reviewed_at: Mapped[datetime | None] = datetime_column()
     send_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="draft")
+    archive_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="not_required")
+    send_attempt_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    archive_attempt_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
     smtp_message_id: Mapped[str | None] = mapped_column(String(500))
+    smtp_response: Mapped[str | None] = mapped_column(String(500))
+    thread_version: Mapped[int | None] = mapped_column()
     in_reply_to: Mapped[str | None] = mapped_column(String(500))
     references_header: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = datetime_column()
+    archive_verified_at: Mapped[datetime | None] = datetime_column()
+    next_retry_at: Mapped[datetime | None] = datetime_column()
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
 

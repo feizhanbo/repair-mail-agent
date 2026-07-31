@@ -60,6 +60,42 @@ def test_followup_headers_keep_original_mail_thread() -> None:
     ) == "<root@example.com> <older@example.com> <current@example.com>"
 
 
+def test_rma_message_is_a_thread_reply_even_with_business_rma_subject() -> None:
+    reply = SimpleNamespace(
+        to_addresses="rmatest2@accotest.com",
+        cc_addresses=None,
+        subject="RMA2026070910南京矽力微电子技术有限公司",
+        in_reply_to="<latest-customer@example.com>",
+        references_header=(
+            "<original-repair@example.com> "
+            "<customer-supplement@example.com> "
+            "<latest-customer@example.com>"
+        ),
+        final_body="template body with return address",
+        draft_body=None,
+    )
+
+    message = replies._build_reply_message(
+        reply,
+        "<rma-reply@accotest.com>",
+        attachment_content=b"%PDF-1.7",
+        attachment_filename="RMA2026070910南京矽力微电子技术有限公司.pdf",
+    )
+
+    # The test-only transport prefix is a safety gate; the stored business
+    # subject and attachment basename remain identical.
+    assert message["Subject"] == "[TEST ONLY] RMA2026070910南京矽力微电子技术有限公司"
+    assert message["In-Reply-To"] == "<latest-customer@example.com>"
+    assert message["References"] == (
+        "<original-repair@example.com> "
+        "<customer-supplement@example.com> "
+        "<latest-customer@example.com>"
+    )
+    assert next(message.iter_attachments()).get_filename() == (
+        "RMA2026070910南京矽力微电子技术有限公司.pdf"
+    )
+
+
 def test_send_reply_uses_smtp_ssl_for_port_465(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple] = []
     _configure_smtp(monkeypatch, port=465)

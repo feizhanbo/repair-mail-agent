@@ -52,18 +52,27 @@ def test_real_e2e_preflight_requires_current_database_and_zero_messages() -> Non
 
 
 def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
+    parent_message_id = "<complete@example.test>"
     reply = _reply(
         "rma_authorization",
+        subject="Re: controlled message",
+        in_reply_to=parent_message_id,
+        references_header=parent_message_id,
         rma_pdf_oss_object_id=44,
         rma_pdf_data_snapshot={"watermark": "TEST ONLY"},
     )
     result = validate_complete_path(
         {
-            "email_detail": {"email": {"intent_type": "new_repair"}},
+            "email_detail": {
+                "email": {
+                    "intent_type": "new_repair",
+                    "message_id": parent_message_id,
+                }
+            },
             "ticket_detail": {
                 "ticket": {
                     "id": 7,
-                    "current_status_code": "ready_for_export",
+                    "current_status_code": "rma_sent",
                     "rma_status": "sent",
                     "missing_fields": {},
                     "customer_code": "TEST-CUSTOMER",
@@ -72,6 +81,7 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
                 },
                 "thread": {"id": 11},
                 "items": [{"sn": "TEST-SN", "material_code": "TEST-MATERIAL"}],
+                "rma_records": [{"id": 3, "status": "sent"}],
                 "reply_records": [reply],
             },
         }
@@ -80,10 +90,22 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
 
 
 def test_missing_path_allows_actual_required_field_subset_and_no_attachment() -> None:
-    reply = _reply("missing_fields", missing_fields={"mailing_address": "required"})
+    parent_message_id = "<missing@example.test>"
+    reply = _reply(
+        "missing_fields",
+        subject="Re: controlled message",
+        in_reply_to=parent_message_id,
+        references_header=parent_message_id,
+        missing_fields={"mailing_address": "required"},
+    )
     result = validate_missing_path(
         {
-            "email_detail": {"email": {"intent_type": "new_repair"}},
+            "email_detail": {
+                "email": {
+                    "intent_type": "new_repair",
+                    "message_id": parent_message_id,
+                }
+            },
             "ticket_detail": {
                 "ticket": {
                     "id": 8,

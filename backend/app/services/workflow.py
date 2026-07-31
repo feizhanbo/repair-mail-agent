@@ -1,17 +1,126 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ManualReviewTask, NotificationEvent, RepairTicket, TicketStatusLog, WorkflowStatus, WorkflowTransition
+from app.models import (
+    Email,
+    EmailAttachment,
+    ManualReviewTask,
+    NotificationEvent,
+    OssObject,
+    RepairTicket,
+    ReplyRecord,
+    TicketRma,
+    TicketStatusLog,
+    WorkflowStatus,
+    WorkflowTransition,
+)
 from app.services.audit import create_notification, log_operation
 from app.services.common import utcnow
 from app.services.routing import choose_available_operator
 
 OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
+
+
+def _formal_rma_number(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    if len(normalized) != 10 or not normalized.isdigit():
+        return False
+    try:
+        datetime.strptime(normalized[:8], "%Y%m%d")
+    except ValueError:
+        return False
+    return True
+
+
+async def _rma_closure_missing_facts(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    metadata: dict[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    reply_id = metadata.get("reply_id")
+    reply = (
+        await session.get(ReplyRecord, int(reply_id))
+        if isinstance(reply_id, int) or (isinstance(reply_id, str) and reply_id.isdigit())
+        else None
+    )
+    if reply is None or reply.ticket_id != ticket.id or reply.reply_type != "rma_authorization":
+        return ["rma_reply_record"]
+    if reply.send_status != "sent":
+        missing.append("smtp_sent")
+    if not reply.smtp_message_id:
+        missing.append("smtp_message_id")
+    if reply.archive_status != "archived" or reply.archive_verified_at is None:
+        missing.append("reply_archive_verified")
+    if not reply.outgoing_email_id:
+        missing.append("outbound_email")
+    if not reply.rma_pdf_oss_object_id:
+        missing.append("rma_pdf_object")
+
+    rma_record = await session.scalar(
+        select(TicketRma).where(
+            TicketRma.ticket_id == ticket.id,
+            TicketRma.reply_record_id == reply.id,
+        )
+    )
+    if rma_record is None:
+        missing.append("ticket_rma")
+    else:
+        if not _formal_rma_number(rma_record.rma_no) or rma_record.received_at is None:
+            missing.append("formal_rma_received")
+        if (
+            rma_record.pdf_validation_status != "passed"
+            or not rma_record.pdf_sha256
+            or rma_record.pdf_oss_object_id != reply.rma_pdf_oss_object_id
+        ):
+            missing.append("rma_pdf_validated")
+        if rma_record.pdf_archive_status != "archived" or rma_record.pdf_archived_at is None:
+            missing.append("rma_pdf_archived")
+        if rma_record.status != "issued" or rma_record.issued_at is None:
+            missing.append("rma_issued")
+
+    outgoing = (
+        await session.get(Email, reply.outgoing_email_id)
+        if reply.outgoing_email_id
+        else None
+    )
+    if (
+        outgoing is None
+        or outgoing.mail_direction != "outbound"
+        or outgoing.raw_eml_oss_object_id is None
+        or outgoing.message_id != reply.smtp_message_id
+    ):
+        missing.append("outbound_eml_archived")
+
+    pdf_object = (
+        await session.get(OssObject, reply.rma_pdf_oss_object_id)
+        if reply.rma_pdf_oss_object_id
+        else None
+    )
+    if pdf_object is None:
+        missing.append("rma_pdf_oss_object")
+
+    attachment = (
+        await session.scalar(
+            select(EmailAttachment).where(
+                EmailAttachment.email_id == reply.outgoing_email_id,
+                EmailAttachment.oss_object_id == reply.rma_pdf_oss_object_id,
+            )
+        )
+        if reply.outgoing_email_id and reply.rma_pdf_oss_object_id
+        else None
+    )
+    expected_hash = rma_record.pdf_sha256 if rma_record is not None else None
+    if attachment is None or not expected_hash or attachment.file_hash != expected_hash:
+        missing.append("outbound_rma_attachment")
+    return sorted(set(missing))
 
 
 def task_type_for_event(trigger_event: str) -> str:
@@ -33,6 +142,8 @@ async def create_manual_task_if_missing(
     priority: str = "normal",
     email_id: int | None = None,
     assigned_user_id: int | None = None,
+    recovery_stage: str | None = None,
+    recovery_action: str | None = None,
 ) -> ManualReviewTask:
     result = await session.execute(
         select(ManualReviewTask)
@@ -45,6 +156,13 @@ async def create_manual_task_if_missing(
     )
     existing = result.scalars().first()
     if existing is not None:
+        existing.recovery_stage = existing.recovery_stage or recovery_stage or task_type
+        existing.recovery_action = (
+            existing.recovery_action
+            or recovery_action
+            or trigger_reason
+            or "请核对异常原因并从对应业务阶段恢复。"
+        )
         owner = await choose_available_operator(
             session,
             existing.assigned_user_id or assigned_user_id or ticket.assigned_user_id,
@@ -85,6 +203,12 @@ async def create_manual_task_if_missing(
         status="pending",
         description=f"工单 {ticket.ticket_no} 需要人工复核。",
         trigger_reason=trigger_reason,
+        recovery_stage=recovery_stage or task_type,
+        recovery_action=(
+            recovery_action
+            or trigger_reason
+            or "请核对异常原因并从对应业务阶段恢复。"
+        ),
         assigned_user_id=owner.id if owner is not None else None,
     )
     session.add(task)
@@ -142,6 +266,45 @@ async def transition_ticket(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TICKET_ALREADY_CLOSED")
     if to_status_code == "ready_for_export" and not (metadata or {}).get("safety_check_hash"):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
+    if to_status_code == "rma_sent":
+        evidence = metadata or {}
+        if not evidence.get("reply_id") or not evidence.get("smtp_message_id"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="RMA_SMTP_EVIDENCE_REQUIRED",
+            )
+    if to_status_code == "closed":
+        gates = (metadata or {}).get("closure_gates")
+        required_gates = {
+            "rma_received",
+            "pdf_validated",
+            "smtp_sent",
+            "message_id_saved",
+            "pdf_archived",
+            "outbound_archived",
+        }
+        if (
+            trigger_event != "rma_issued_and_archived"
+            or not isinstance(gates, dict)
+            or any(gates.get(key) is not True for key in required_gates)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="RMA_ISSUE_CLOSURE_GATES_REQUIRED",
+            )
+        missing_facts = await _rma_closure_missing_facts(
+            session,
+            ticket=ticket,
+            metadata=metadata or {},
+        )
+        if missing_facts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "RMA_ISSUE_CLOSURE_FACTS_REQUIRED",
+                    "missing_facts": missing_facts,
+                },
+            )
     if from_status_code == "manual_review" and to_status_code != "manual_review":
         blocker_query = select(ManualReviewTask.id).where(
             ManualReviewTask.ticket_id == ticket.id,

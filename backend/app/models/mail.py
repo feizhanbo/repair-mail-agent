@@ -17,6 +17,7 @@ class EmailThread(TimestampMixin, Base):
         Index("idx_email_threads_subject", "normalized_subject"),
         Index("idx_email_threads_ticket", "ticket_id"),
         Index("idx_email_threads_latest", "latest_email_id"),
+        Index("idx_email_threads_predecessor", "predecessor_thread_id", "predecessor_ticket_id"),
     )
 
     id: Mapped[int] = pk_column()
@@ -31,6 +32,15 @@ class EmailThread(TimestampMixin, Base):
         mysql.BIGINT(unsigned=True),
         ForeignKey("repair_tickets.id", use_alter=True, name="fk_email_threads_ticket"),
     )
+    predecessor_thread_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("email_threads.id", use_alter=True, name="fk_email_threads_predecessor_thread"),
+    )
+    predecessor_ticket_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_tickets.id", use_alter=True, name="fk_email_threads_predecessor_ticket"),
+    )
+    thread_version: Mapped[int] = mapped_column(nullable=False, server_default="1")
     email_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
     merge_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
     merge_reason: Mapped[str | None] = mapped_column(String(500))
@@ -46,6 +56,7 @@ class Email(TimestampMixin, Base):
         Index("idx_emails_fetch_job", "fetch_job_run_id"),
         Index("idx_emails_direction_status_time", "mail_direction", "parse_status", "received_at"),
         Index("idx_emails_intent", "intent_type"),
+        Index("idx_emails_intent_subtype", "intent_subtype"),
         Index("idx_emails_from_domain", "from_domain"),
         Index("idx_emails_processing_trace", "processing_trace_id"),
         UniqueConstraint("source_content_sha256", name="uk_emails_source_content_sha256"),
@@ -80,10 +91,12 @@ class Email(TimestampMixin, Base):
     parse_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     processing_stage: Mapped[str] = mapped_column(String(50), nullable=False, server_default="fetched")
     intent_type: Mapped[str | None] = mapped_column(String(50))
+    intent_subtype: Mapped[str | None] = mapped_column(String(50))
     duplicate_of_email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_emails_duplicate_of"))
     terminal_reason_code: Mapped[str | None] = mapped_column(String(100))
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     retryable: Mapped[bool] = bool_column(True)
+    recovery_stage: Mapped[str | None] = mapped_column(String(100))
     next_retry_at: Mapped[datetime | None] = datetime_column()
     error_message: Mapped[str | None] = mapped_column(Text)
 

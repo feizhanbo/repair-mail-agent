@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 34
+    assert len(Base.metadata.tables) == 35
 
 
 def test_phase_one_table_names() -> None:
@@ -16,6 +16,7 @@ def test_phase_one_table_names() -> None:
         "emails",
         "export_sap",
         "external_sync_checkpoints",
+        "external_operation_records",
         "field_audit_logs",
         "job_run_logs",
         "mail_fetch_records",

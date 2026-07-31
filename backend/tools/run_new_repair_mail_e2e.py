@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from app.services.business_rules import CUSTOMER_REQUIRED_FIELD_SET
+from app.services.mail_safety import test_only_subject
 
 
 BASE_URL = os.getenv("E2E_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -19,7 +20,10 @@ TEST_SENDER = "rmatest1@accotest.com"
 TEST_RECIPIENT = "rmatest2@accotest.com"
 TERMINAL_JOB_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 POLL_SECONDS = 2
-TIMEOUT_SECONDS = 300
+TIMEOUT_SECONDS = max(
+    10,
+    min(300, int(os.getenv("E2E_WAIT_TIMEOUT_SECONDS", "300"))),
+)
 
 
 class E2EFailure(RuntimeError):
@@ -237,8 +241,15 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     ticket = detail.get("ticket") or {}
     if email.get("intent_type") != "new_repair":
         raise E2EFailure("Complete fixture was not classified as new_repair")
-    if ticket.get("current_status_code") != "ready_for_export" or ticket.get("rma_status") != "sent":
-        raise E2EFailure("Complete ticket is not ready_for_export with sent RMA")
+    if ticket.get("current_status_code") != "rma_sent":
+        raise E2EFailure("Complete ticket is not rma_sent")
+    sent_rmas = [
+        row
+        for row in detail.get("rma_records") or []
+        if row.get("status") == "sent"
+    ]
+    if len(sent_rmas) != 1:
+        raise E2EFailure("Complete ticket does not have exactly one sent RMA")
     if ticket.get("missing_fields") or not ticket.get("customer_code"):
         raise E2EFailure("Complete ticket still has missing fields or lacks SN-derived customer code")
     if not ticket.get("safety_check_hash") or not ticket.get("sn_validation_hash"):
@@ -246,8 +257,16 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     if not detail.get("items") or any(not item.get("sn") or not item.get("material_code") for item in detail["items"]):
         raise E2EFailure("Complete ticket items were not enriched from SN master data")
     reply = single_sent_reply(detail, "rma_authorization")
-    if not exact_recipient(reply) or not str(reply.get("subject") or "").upper().startswith("[TEST ONLY]"):
+    if not exact_recipient(reply) or not test_only_subject(
+        reply.get("subject")
+    ).upper().startswith("[TEST ONLY]"):
         raise E2EFailure("RMA reply did not preserve the exact test envelope and subject prefix")
+    parent_message_id = str(email.get("message_id") or "")
+    if (
+        reply.get("in_reply_to") != parent_message_id
+        or parent_message_id not in str(reply.get("references_header") or "")
+    ):
+        raise E2EFailure("RMA reply did not preserve the original message thread")
     if not reply.get("rma_pdf_oss_object_id") or not reply.get("rma_pdf_data_snapshot"):
         raise E2EFailure("RMA reply does not contain an archived PDF and snapshot")
     return {"ticket": ticket, "thread": detail.get("thread") or {}, "reply": reply}
@@ -271,9 +290,17 @@ def validate_missing_path(value: dict[str, Any]) -> dict[str, Any]:
     if (
         not exact_recipient(reply)
         or reply.get("rma_pdf_oss_object_id")
-        or not str(reply.get("subject") or "").upper().startswith("[TEST ONLY]")
+        or not test_only_subject(reply.get("subject")).upper().startswith(
+            "[TEST ONLY]"
+        )
     ):
         raise E2EFailure("Missing-field reply envelope or attachment state is invalid")
+    parent_message_id = str(email.get("message_id") or "")
+    if (
+        reply.get("in_reply_to") != parent_message_id
+        or parent_message_id not in str(reply.get("references_header") or "")
+    ):
+        raise E2EFailure("Missing-field reply did not preserve the original message thread")
     if set((reply.get("missing_fields") or {}).keys()) != missing_keys:
         raise E2EFailure("Follow-up reply did not ask exactly for the remaining required fields")
     return {"ticket": ticket, "thread": detail.get("thread") or {}, "reply": reply}
@@ -336,7 +363,7 @@ def run() -> int:
         complete_value = wait_for_ticket(
             client,
             complete_email_id,
-            expected_status="ready_for_export",
+            expected_status="rma_sent",
             expected_reply_type="rma_authorization",
         )
         complete = validate_complete_path(complete_value)

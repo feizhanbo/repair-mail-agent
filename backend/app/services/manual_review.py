@@ -26,6 +26,8 @@ TASK_FIELDS = (
     "status",
     "description",
     "trigger_reason",
+    "recovery_stage",
+    "recovery_action",
     "assigned_user_id",
     "claimed_by_user_id",
     "claimed_at",
@@ -287,16 +289,6 @@ async def resolve_task(
                         "followup_result": None,
                         "reparse_result": reparse_result,
                     }
-    elif next_action == "close_ticket":
-        await transition_ticket(
-            session,
-            ticket=ticket,
-            to_status_code="closed",
-            trigger_event="manual_close",
-            user_id=user_id,
-            reason=resolution,
-            resolving_task_id=task.id,
-        )
     elif next_action == "keep_manual_review":
         task.resolution = resolution
         await log_operation(

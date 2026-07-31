@@ -18,6 +18,7 @@ class AiProviderError(RuntimeError):
 
 class AiExtractResponse(BaseModel):
     intent_type: str = "unknown"
+    intent_subtype: str | None = None
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
     extracted_items: list[dict[str, Any]] = Field(default_factory=list)
     missing_fields: dict[str, Any] = Field(default_factory=dict)
@@ -63,6 +64,7 @@ _ALLOWED_INTENTS = {
     "new_repair", "customer_supplement", "normal_reply", "rma_sent",
     "device_received", "irrelevant", "unknown",
 }
+_ALLOWED_IRRELEVANT_SUBTYPES = {"general_irrelevant", "out_of_scope_repair"}
 
 
 def _without_optional_phone_requirement(value: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +89,13 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
         intent = str(normalized.get("intent_type") or "unknown").strip().lower()
         mapped_intent = _INTENT_ALIASES.get(intent, intent)
         normalized["intent_type"] = mapped_intent if mapped_intent in _ALLOWED_INTENTS else "unknown"
+        subtype = str(normalized.get("intent_subtype") or "").strip().lower()
+        if normalized["intent_type"] == "irrelevant":
+            normalized["intent_subtype"] = (
+                subtype if subtype in _ALLOWED_IRRELEVANT_SUBTYPES else "general_irrelevant"
+            )
+        else:
+            normalized["intent_subtype"] = None
         for field in ("extracted_fields", "missing_fields", "conflict_fields", "evidence"):
             normalized[field] = _as_mapping(normalized.get(field))
         normalized["missing_fields"] = _without_optional_phone_requirement(normalized["missing_fields"])

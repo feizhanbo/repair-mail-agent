@@ -16,6 +16,7 @@ from app.models import (
     EmailThread,
     EmailTicketLink,
     ExportSap,
+    ExternalOperationRecord,
     FieldAuditLog,
     ManualReviewTask,
     ParseResult,
@@ -154,10 +155,12 @@ EMAIL_FIELDS = (
     "parse_status",
     "processing_stage",
     "intent_type",
+    "intent_subtype",
     "duplicate_of_email_id",
     "terminal_reason_code",
     "last_error_code",
     "retryable",
+    "recovery_stage",
     "next_retry_at",
     "error_message",
     "created_at",
@@ -240,6 +243,7 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "parser_type",
             "parser_version",
             "intent_type",
+            "intent_subtype",
             "extracted_fields",
             "extracted_items",
             "missing_fields",
@@ -507,6 +511,13 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             .order_by(TicketRma.created_at)
         )
     ).scalars().all()
+    external_operations = (
+        await session.execute(
+            select(ExternalOperationRecord)
+            .where(ExternalOperationRecord.ticket_id == ticket.id)
+            .order_by(ExternalOperationRecord.created_at.desc())
+        )
+    ).scalars().all()
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     thread = await session.get(EmailThread, ticket.thread_id) if ticket.thread_id else None
     detail = {
@@ -522,6 +533,9 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                 "root_message_id",
                 "latest_email_id",
                 "ticket_id",
+                "predecessor_thread_id",
+                "predecessor_ticket_id",
+                "thread_version",
                 "email_count",
                 "merge_confidence",
                 "merge_reason",
@@ -571,6 +585,8 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "status",
                     "description",
                     "trigger_reason",
+                    "recovery_stage",
+                    "recovery_action",
                     "assigned_user_id",
                     "claimed_by_user_id",
                     "claimed_at",
@@ -609,8 +625,18 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "reviewed_by_user_id",
                     "reviewed_at",
                     "send_status",
+                    "archive_status",
+                    "send_attempt_count",
+                    "archive_attempt_count",
                     "smtp_message_id",
+                    "smtp_response",
+                    "thread_version",
+                    "in_reply_to",
+                    "references_header",
                     "sent_at",
+                    "archive_verified_at",
+                    "next_retry_at",
+                    "last_error_code",
                     "error_message",
                     "created_at",
                     "updated_at",
@@ -692,15 +718,111 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "status",
                     "policy_snapshot",
                     "pdf_oss_object_id",
+                    "pdf_sha256",
+                    "pdf_validation_status",
+                    "pdf_archive_status",
                     "reply_record_id",
                     "received_at",
                     "sent_at",
+                    "pdf_archived_at",
+                    "issued_at",
                     "created_at",
                     "updated_at",
                 ),
             )
             for row in rma_rows
         ],
+        "external_operations": [
+            model_to_dict(
+                row,
+                (
+                    "id",
+                    "operation_type",
+                    "operation_key",
+                    "status",
+                    "ticket_id",
+                    "email_id",
+                    "reply_record_id",
+                    "export_sap_id",
+                    "attempt_count",
+                    "remote_reference",
+                    "error_code",
+                    "error_message",
+                    "retryable",
+                    "recovery_stage",
+                    "next_retry_at",
+                    "started_at",
+                    "completed_at",
+                    "details_json",
+                    "created_at",
+                    "updated_at",
+                ),
+            )
+            for row in external_operations
+        ],
+    }
+    rma_reply = next(
+        (
+            row
+            for row in replies
+            if row.reply_type == "rma_authorization" and row.send_status == "sent"
+        ),
+        None,
+    )
+    rma_record = rma_rows[0] if len(rma_rows) == 1 else None
+    rma_outgoing = (
+        await session.get(Email, rma_reply.outgoing_email_id)
+        if rma_reply and rma_reply.outgoing_email_id
+        else None
+    )
+    rma_attachment = (
+        await session.scalar(
+            select(EmailAttachment).where(
+                EmailAttachment.email_id == rma_reply.outgoing_email_id,
+                EmailAttachment.oss_object_id == rma_reply.rma_pdf_oss_object_id,
+            )
+        )
+        if rma_reply
+        and rma_reply.outgoing_email_id
+        and rma_reply.rma_pdf_oss_object_id
+        else None
+    )
+    detail["rma_issue_summary"] = {
+        "rma_received": bool(
+            rma_record and rma_record.rma_no and rma_record.received_at
+        ),
+        "pdf_validated": bool(
+            rma_record
+            and rma_record.pdf_validation_status == "passed"
+            and rma_record.pdf_oss_object_id
+            and rma_record.pdf_sha256
+        ),
+        "smtp_sent": bool(
+            rma_reply and rma_reply.send_status == "sent" and rma_reply.smtp_message_id
+        ),
+        "message_id_saved": bool(
+            rma_reply
+            and rma_reply.smtp_message_id
+            and rma_outgoing
+            and rma_outgoing.message_id == rma_reply.smtp_message_id
+        ),
+        "pdf_archived": bool(
+            rma_record
+            and rma_record.pdf_archive_status == "archived"
+            and rma_record.pdf_archived_at
+        ),
+        "outbound_archived": bool(
+            rma_reply
+            and rma_reply.archive_status == "archived"
+            and rma_reply.archive_verified_at
+            and rma_outgoing
+            and rma_outgoing.raw_eml_oss_object_id
+            and rma_attachment
+            and rma_record
+            and rma_attachment.file_hash == rma_record.pdf_sha256
+        ),
+        "closed": ticket.current_status_code == "closed",
+        "terminal_reason_code": ticket.terminal_reason_code,
     }
     detail["email_timeline"] = await get_ticket_email_timeline(session, ticket.id)
     detail["attachments"] = await get_ticket_attachments(session, ticket.id)
@@ -1404,6 +1526,7 @@ async def apply_parse_result(
     parse_result.accepted_at = now
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
+    email.intent_subtype = parse_result.intent_subtype
     email.processing_stage = "completed"
     email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
     email.last_error_code = None

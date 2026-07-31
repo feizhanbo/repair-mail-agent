@@ -5,13 +5,16 @@ import json
 import re
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import ExternalSyncCheckpoint, SnAsset
 from app.services.common import utcnow
+from app.services.mail_safety import test_mail_configuration_reasons
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
@@ -27,6 +30,10 @@ class RelayConfigurationError(RuntimeError):
 
 
 class RelayOperationError(RuntimeError):
+    pass
+
+
+class RelaySubmissionUncertainError(RelayOperationError):
     pass
 
 
@@ -54,6 +61,33 @@ def _base_missing() -> list[str]:
 def relay_configuration_status() -> dict[str, Any]:
     if not settings.RELAY_SQLSERVER_ENABLED:
         return {"status": "disabled", "configured": False, "missing": []}
+    adapter = settings.RELAY_ADAPTER.strip().lower()
+    if adapter == "test_http":
+        missing: list[str] = []
+        parsed = urlsplit(settings.TEST_RELAY_BASE_URL)
+        if settings.APP_ENV.lower() not in {"dev", "test"}:
+            missing.append("TEST_RELAY_ENV_NOT_ALLOWED")
+        if not settings.RUN_REAL_MAIL_INTEGRATION_TESTS:
+            missing.append("RUN_REAL_MAIL_INTEGRATION_TESTS")
+        if test_mail_configuration_reasons():
+            missing.append("TEST_MAIL_GATE_FAILED")
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            missing.append("TEST_RELAY_LOOPBACK_URL_REQUIRED")
+        if not settings.TEST_RELAY_TOKEN:
+            missing.append("TEST_RELAY_TOKEN")
+        return {
+            "adapter": adapter,
+            "status": "misconfigured" if missing else "configured",
+            "configured": not missing,
+            "missing": sorted(set(missing)),
+        }
+    if adapter != "sqlserver":
+        return {
+            "adapter": adapter,
+            "status": "misconfigured",
+            "configured": False,
+            "missing": ["RELAY_ADAPTER_INVALID"],
+        }
     missing = _base_missing()
     if not settings.RELAY_SQLSERVER_SN_TABLE:
         missing.append("RELAY_SQLSERVER_SN_TABLE")
@@ -71,17 +105,8 @@ def relay_configuration_status() -> dict[str, Any]:
         missing.append("RELAY_SQLSERVER_RMA_COLUMN")
     if settings.RELAY_SQLSERVER_RESULT_MODE not in {"table", "stored_procedure"}:
         missing.append("RELAY_SQLSERVER_RESULT_MODE")
-    if settings.RELAY_SQLSERVER_RESULT_MODE == "table":
-        if not settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN:
-            missing.append("RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN")
-        elif (
-            (settings.RELAY_SQLSERVER_RESULT_COLUMN_MAP or {}).get(
-                settings.RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY
-            )
-            != settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN
-        ):
-            missing.append("RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN_MAP")
     return {
+        "adapter": adapter,
         "status": "misconfigured" if missing else "configured",
         "configured": not missing,
         "missing": sorted(set(missing)),
@@ -195,28 +220,38 @@ def _write_ticket_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
             if not remote_key:
                 raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
         else:
-            unique_value = _payload_value(payload, settings.RELAY_SQLSERVER_RESULT_UNIQUE_PAYLOAD_KEY)
-            if settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN and unique_value is not None:
-                unique_column = _identifier(settings.RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN)
-                existing = cursor.execute(
-                    f"SELECT TOP (1) {call_id_column} FROM {target} WHERE {unique_column} = ?",
-                    unique_value,
-                ).fetchone()
-                if existing is not None:
-                    return {
-                        "status": "succeeded",
-                        "remote_record_key": str(existing[0]),
-                        "idempotent_reuse": True,
-                    }
             columns = ", ".join(_identifier(column) for column in mapping.values())
             placeholders = ", ".join("?" for _ in values)
-            row = cursor.execute(
-                f"INSERT INTO {target} ({columns}) OUTPUT INSERTED.{call_id_column} VALUES ({placeholders})",
-                values,
-            ).fetchone()
-            if row is None or row[0] is None:
-                raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
-            remote_key = str(row[0])
+            # Once execute is invoked, a transport/driver exception cannot tell
+            # us whether SQL Server committed the row.  CallID is the only
+            # authoritative remote identity, so this becomes an explicit
+            # uncertain/manual-reconciliation state and must not be reinserted.
+            executed = False
+            try:
+                executed = True
+                cursor.execute(
+                    f"INSERT INTO {target} ({columns}) "
+                    f"OUTPUT INSERTED.{call_id_column} VALUES ({placeholders})",
+                    values,
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
+                remote_key = str(row[0])
+                connection.commit()
+            except RelayOperationError:
+                raise
+            except Exception as exc:
+                if executed or getattr(cursor, "rowcount", -1) != -1:
+                    raise RelaySubmissionUncertainError(
+                        "RELAY_SUBMIT_RESULT_UNCERTAIN"
+                    ) from exc
+                raise
+            return {
+                "status": "succeeded",
+                "remote_record_key": remote_key,
+                "idempotent_reuse": False,
+            }
         connection.commit()
         return {"status": "succeeded", "remote_record_key": remote_key, "idempotent_reuse": False}
 
@@ -242,6 +277,8 @@ async def validate_sn_against_relay(sn: str) -> dict[str, Any]:
         return {"status": "disabled", "sn": sn, "record": None}
     if not relay_configured():
         return {"status": "misconfigured", "sn": sn, "record": None}
+    if settings.RELAY_ADAPTER.strip().lower() == "test_http":
+        return {"status": "disabled", "sn": sn, "record": None, "reason": "TEST_RELAY_HAS_NO_SN_MASTER"}
     try:
         record = await asyncio.to_thread(_fetch_sn_exact, sn)
     except Exception as exc:
@@ -258,6 +295,13 @@ async def sync_sn_assets_from_relay(
     del user_id
     if not settings.RELAY_SQLSERVER_ENABLED:
         return {"status": "disabled", "configured": False, "synced_count": 0}
+    if settings.RELAY_ADAPTER.strip().lower() == "test_http":
+        return {
+            "status": "disabled",
+            "configured": True,
+            "synced_count": 0,
+            "reason": "TEST_RELAY_HAS_NO_SN_MASTER",
+        }
     config = relay_configuration_status()
     if not config["configured"]:
         return {"status": "misconfigured", "configured": False, "missing": config["missing"], "synced_count": 0}
@@ -324,8 +368,27 @@ async def push_ticket_snapshot_to_relay(payload: dict[str, Any]) -> dict[str, An
     config = relay_configuration_status()
     if not config["configured"]:
         return {"status": "misconfigured", "configured": False, "missing": config["missing"]}
+    if settings.RELAY_ADAPTER.strip().lower() == "test_http":
+        try:
+            async with httpx.AsyncClient(timeout=settings.RELAY_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    f"{settings.TEST_RELAY_BASE_URL.rstrip('/')}/records",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {settings.TEST_RELAY_TOKEN}"},
+                )
+                response.raise_for_status()
+                result = response.json()
+            if not result.get("remote_record_key"):
+                raise RelayOperationError("RELAY_CALL_ID_NOT_RETURNED")
+            return result
+        except RelayOperationError:
+            raise
+        except Exception as exc:
+            raise RelayOperationError("RELAY_TICKET_EXPORT_FAILED") from exc
     try:
         return await asyncio.to_thread(_write_ticket_snapshot, payload)
+    except RelaySubmissionUncertainError:
+        raise
     except Exception as exc:
         raise RelayOperationError("RELAY_TICKET_EXPORT_FAILED") from exc
 
@@ -340,6 +403,19 @@ async def poll_rma_from_relay(remote_call_id: str) -> dict[str, Any]:
             "remote_call_id": remote_call_id,
             "missing": config["missing"],
         }
+    if settings.RELAY_ADAPTER.strip().lower() == "test_http":
+        try:
+            async with httpx.AsyncClient(timeout=settings.RELAY_TIMEOUT_SECONDS) as client:
+                response = await client.get(
+                    f"{settings.TEST_RELAY_BASE_URL.rstrip('/')}/records/{remote_call_id}",
+                    headers={"Authorization": f"Bearer {settings.TEST_RELAY_TOKEN}"},
+                )
+                if response.status_code == 404:
+                    return {"status": "not_found", "remote_call_id": remote_call_id, "rma_no": None}
+                response.raise_for_status()
+                return response.json()
+        except Exception as exc:
+            raise RelayOperationError("RELAY_RMA_POLL_FAILED") from exc
     try:
         result = await asyncio.to_thread(_fetch_rma_result, remote_call_id)
     except Exception as exc:

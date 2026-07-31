@@ -31,7 +31,7 @@ def _ticket(**overrides) -> RepairTicket:
 
 
 def test_rma_pdf_template_has_one_canonical_version_with_legacy_read_compatibility() -> None:
-    assert TEMPLATE_VERSION == "rma_authorization_auto_v3_1"
+    assert TEMPLATE_VERSION == "rma_authorization_v3_2_reference"
     assert normalize_rma_template_version("rma_authorization_v1") == TEMPLATE_VERSION
     assert normalize_rma_template_version("rma_authorization_zh_v1") == TEMPLATE_VERSION
     assert normalize_rma_template_version(TEMPLATE_VERSION) == TEMPLATE_VERSION
@@ -49,6 +49,52 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
     assert "RMA维修授权表见附件" in templates[zh_type]["body_template"]
     assert "RMA authorization form is attached" in templates[en_type]["body_template"]
     assert TEMPLATE_VERSION not in {zh_version, en_version}
+    assert all(
+        "{{ return_address_block }}" in item["body_template"]
+        for item in REPLY_TEMPLATES
+        if item["template_type"].startswith("rma_authorization")
+    )
+
+
+def test_return_address_blocks_match_confirmed_business_text() -> None:
+    beijing = replies._return_address_block(
+        language="zh-CN",
+        customer_policy={
+            "shipping_company": settings.RMA_DEFAULT_BEIJING_COMPANY,
+            "shipping_address": settings.RMA_DEFAULT_BEIJING_ADDRESS,
+            "shipping_contact": settings.RMA_DEFAULT_BEIJING_CONTACT,
+            "shipping_phone": settings.RMA_DEFAULT_BEIJING_PHONE,
+            "shipping_postal_code": settings.RMA_DEFAULT_BEIJING_POSTAL_CODE,
+        },
+    )
+    tianjin = replies._return_address_block(
+        language="zh-CN",
+        customer_policy={
+            "shipping_company": settings.RMA_DEFAULT_TIANJIN_COMPANY,
+            "shipping_address": settings.RMA_DEFAULT_TIANJIN_ADDRESS,
+            "shipping_contact": settings.RMA_DEFAULT_TIANJIN_CONTACT,
+            "shipping_phone": settings.RMA_DEFAULT_TIANJIN_PHONE,
+            "shipping_postal_code": "",
+        },
+    )
+
+    assert beijing == (
+        "北京华峰测控技术股份有限公司\n"
+        "北京市海淀区丰豪东路9号院5号楼\n"
+        "李连荣电话：010-63725600-193；邮编：100094"
+    )
+    assert tianjin == (
+        "华峰测控技术（天津）有限责任公司\n"
+        "天津市滨海新区生态城川博道华峰测控1201号\n"
+        "郭洋（收）  电话：022-67253518-8108"
+    )
+    assert replies._return_address_block(language="en-US") == (
+        "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
+        "Attention: Li Lian Rong\n"
+        "Address: Building 5, IC PARK, No. 9 Fenghao East Road, "
+        "Haidian District (100094), Beijing\n"
+        "Phone: +86-15811322137"
+    )
 
 
 def test_overseas_out_of_warranty_and_special_rules() -> None:
@@ -58,11 +104,12 @@ def test_overseas_out_of_warranty_and_special_rules() -> None:
     assert version == "overseas_out_warranty_v1"
     assert template_type == "rma_authorization_overseas_out_of_warranty"
 
-    st_type, st_version = replies._rma_reply_template_type(
-        _ticket(customer_name="STMicroelectronics Pte Ltd", request_date=date(2026, 12, 31))
-    )
-    assert st_version == "overseas_st_pickup_v1"
-    assert st_type == "rma_authorization_overseas_st_pickup"
+    with pytest.raises(replies.RmaReplyRuleError) as st:
+        replies._rma_reply_template_type(
+            _ticket(customer_name="STMicroelectronics Pte Ltd", request_date=date(2026, 12, 31))
+        )
+    assert st.value.task_type == "rma_st_manual"
+    assert st.value.reason == "RMA_ST_CUSTOM_HANDLING_REQUIRES_MANUAL"
 
     with pytest.raises(replies.RmaReplyRuleError) as amkor:
         replies._rma_reply_template_type(_ticket(contact_email="person@amkor.com"))
@@ -128,6 +175,6 @@ def test_offline_preflight_passes_only_for_exact_sender_and_single_recipient_whi
     assert preflight.result["to"] == "rmatest2@accotest.com"
     assert preflight.result["cc"] == []
     assert preflight.result["bcc"] == []
-    assert preflight.result["rma_template_version"] == "rma_authorization_auto_v3_1"
+    assert preflight.result["rma_template_version"] == "rma_authorization_v3_2_reference"
     assert preflight.result["pdf_page_count"] == 3
-    assert preflight.result["watermarked_page_count"] == 3
+    assert preflight.result["watermarked_page_count"] == 0

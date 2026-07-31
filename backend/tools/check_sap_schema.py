@@ -4,8 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-from app.core.database import engine
-
+EXPECTED_REVISION = "h5c9d0e1f2a3"
+EXPECTED_BUSINESS_TABLE_COUNT = 35
 
 EXPECTED = {
     "export_sap": {
@@ -122,6 +122,8 @@ def _verify(sync_connection) -> dict[str, object]:
 
 
 async def main() -> None:
+    from app.core.database import engine
+
     async with engine.connect() as connection:
         revision = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
@@ -172,9 +174,9 @@ async def main() -> None:
     print(f"neutral_template_count={neutral_template_count}")
     for table_name, detail in result["details"].items():
         print(f"{table_name}={detail}")
-    if revision != "f3a7b8c9d0e1":
+    if revision != EXPECTED_REVISION:
         raise SystemExit(f"unexpected_revision={revision}")
-    if result["business_table_count"] != 34:
+    if result["business_table_count"] != EXPECTED_BUSINESS_TABLE_COUNT:
         raise SystemExit(f"unexpected_business_table_count={result['business_table_count']}")
     if result["errors"]:
         raise SystemExit(";".join(result["errors"]))

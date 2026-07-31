@@ -13,6 +13,7 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import (
+    ExportSap,
     ManualReviewTask,
     ParseResult,
     ReplyRecord,
@@ -22,7 +23,9 @@ from app.models import (
     User,
     UserRole,
 )
-from app.schemas.business import DeviceReceivedConfirmRequest, IdsRequest, ParseResultApplyRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
+from app.schemas.business import DeviceReceivedConfirmRequest, IdsRequest, ParseResultApplyRequest, RmaManualPolicyApprovalRequest, SapSubmitReconcileRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
+from app.services.audit import log_operation
+from app.services.common import utcnow
 from app.services.device_receipts import confirm_device_received
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
@@ -31,7 +34,7 @@ from app.services.workflow import transition_ticket
 from app.services.ticket_safety import build_safety_report, validate_and_mark_ready_for_export
 from app.services.jobs import enqueue_job, serialize_job
 from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
-from app.services.sap_rma import poll_export_batch
+from app.services.sap_rma import poll_export_batch, reconcile_uncertain_submission
 
 router = APIRouter()
 
@@ -198,9 +201,12 @@ async def transition(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
 ) -> dict:
-    if payload.to_status_code == "ready_for_export":
+    if payload.to_status_code in {"ready_for_export", "rma_sent", "closed"}:
         from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SYSTEM_MANAGED_STATUS_TRANSITION_REQUIRED",
+        )
     ticket = await ticket_service.get_ticket(session, ticket_id)
     await transition_ticket(
         session,
@@ -324,6 +330,31 @@ async def confirm_late_sap_result(
     return ok(result, "late SAP result confirmed")
 
 
+@router.post("/{ticket_id}/sap-export/lines/{line_id}/reconcile")
+async def reconcile_sap_submission(
+    ticket_id: int,
+    line_id: int,
+    payload: SapSubmitReconcileRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+) -> dict:
+    line = await session.get(ExportSap, line_id)
+    if line is None or line.ticket_id != ticket_id:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAP_EXPORT_LINE_NOT_FOUND")
+    result = await reconcile_uncertain_submission(
+        session,
+        line_id=line_id,
+        outcome=payload.outcome,
+        call_id=payload.call_id,
+        reason=payload.reason,
+        user_id=current_user.id,
+    )
+    await session.commit()
+    return ok(result, "uncertain SAP submission reconciled")
+
+
 @router.post("/{ticket_id}/rma/retry-send")
 async def retry_rma_send(
     ticket_id: int,
@@ -340,6 +371,36 @@ async def retry_rma_send(
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_NUMBER_NOT_UNIQUE_FOR_TICKET")
+    sent_reply = await session.scalar(
+        select(ReplyRecord)
+        .where(
+            ReplyRecord.ticket_id == ticket.id,
+            ReplyRecord.reply_type == "rma_authorization",
+            ReplyRecord.send_status == "sent",
+        )
+        .order_by(ReplyRecord.id.desc())
+    )
+    if ticket.current_status_code in {"rma_sent", "closed"} and sent_reply is not None:
+        from app.services.replies import resolve_completed_rma_tasks, retry_rma_archive
+
+        ticket.rma_status = "sent"
+        rma_rows[0].status = (
+            "issued" if ticket.current_status_code == "closed" else "sent"
+        )
+        rma_rows[0].reply_record_id = sent_reply.id
+        rma_rows[0].sent_at = sent_reply.sent_at
+        await resolve_completed_rma_tasks(
+            session,
+            ticket_id=ticket.id,
+            user_id=current_user.id,
+        )
+        result = await retry_rma_archive(
+            session,
+            reply_id=sent_reply.id,
+            user_id=current_user.id,
+        )
+        await session.commit()
+        return ok(result, "RMA reply already sent; archive finalization retried")
     reply_count = int(
         (
             await session.scalar(
@@ -371,6 +432,112 @@ async def retry_rma_send(
     )
     await session.commit()
     return ok(serialize_job(job), "RMA send retry queued")
+
+
+@router.post("/{ticket_id}/rma/manual-policy-approve")
+async def approve_rma_manual_policy(
+    ticket_id: int,
+    payload: RmaManualPolicyApprovalRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[
+        CurrentUser,
+        Depends(require_roles("operator", "supervisor")),
+    ],
+) -> dict:
+    """Approve a special policy for controlled draft generation, never auto-send."""
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    if ticket.current_status_code != "ready_for_export":
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="RMA_MANUAL_POLICY_TICKET_NOT_READY",
+        )
+    rma_rows = list(
+        (
+            await session.execute(
+                select(TicketRma).where(TicketRma.ticket_id == ticket.id)
+            )
+        ).scalars().all()
+    )
+    if len(rma_rows) != 1:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="RMA_NUMBER_NOT_UNIQUE_FOR_TICKET",
+        )
+    rma_record = rma_rows[0]
+    snapshot = dict(rma_record.policy_snapshot or {})
+    lines = [
+        dict(line)
+        for line in list(snapshot.get("lines") or [])
+        if isinstance(line, dict)
+    ]
+    if not lines:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="RMA_POLICY_SNAPSHOT_REQUIRED",
+        )
+    if any(bool(line.get("hide_company_name")) for line in lines):
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="RMA_ANONYMOUS_PDF_REQUIRES_SEPARATE_MANUAL_ARTIFACT",
+        )
+    approved_at = utcnow().isoformat()
+    for line in lines:
+        line["manual_approved"] = True
+        line["manual_approval"] = {
+            "approved_by_user_id": current_user.id,
+            "approved_at": approved_at,
+            "reason": payload.reason,
+            "auto_send_allowed": False,
+        }
+    snapshot["lines"] = lines
+    snapshot["manual_send_only"] = True
+    rma_record.policy_snapshot = snapshot
+    await log_operation(
+        session,
+        user_id=current_user.id,
+        operation_type="rma_special_policy_approved",
+        target_type="ticket_rma",
+        target_id=rma_record.id,
+        ticket_id=ticket.id,
+        description=payload.reason,
+        after_data={
+            "rma_no": rma_record.rma_no,
+            "manual_send_only": True,
+        },
+    )
+    job = await enqueue_job(
+        session,
+        job_type="rma_authorization",
+        resource_type="repair_ticket",
+        resource_id=ticket.id,
+        idempotency_key=(
+            f"rma_manual_policy:{ticket.id}:{ticket.version}:"
+            f"{rma_record.rma_no}"
+        ),
+        metadata={
+            "user_id": current_user.id,
+            "ticket_version": ticket.version,
+            "safety_check_hash": ticket.safety_check_hash,
+            "sn_validation_hash": ticket.sn_validation_hash,
+            "rma_no": rma_record.rma_no,
+            "rma_template_version": RMA_TEMPLATE_VERSION,
+            "manual_send_only": True,
+        },
+        max_attempts=1,
+    )
+    await session.commit()
+    return ok(
+        serialize_job(job),
+        "special policy approved; RMA draft generation queued for manual review",
+    )
 
 
 @router.post("/{ticket_id}/confirm-device-received")

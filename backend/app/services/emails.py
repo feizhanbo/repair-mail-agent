@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.request_context import get_correlation_id
-from app.models import Email, EmailAttachment, EmailThread, ParseResult, RepairTicket
+from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, ParseResult, RepairTicket
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import attachment_type, parse_attachment
@@ -71,6 +71,7 @@ async def list_emails(
     page_size: int = 20,
     parse_status: str | None = None,
     intent_type: str | None = None,
+    intent_subtype: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
     from_address: str | None = None,
@@ -83,6 +84,8 @@ async def list_emails(
         statement = statement.where(Email.parse_status == parse_status)
     if intent_type:
         statement = statement.where(Email.intent_type == intent_type)
+    if intent_subtype:
+        statement = statement.where(Email.intent_subtype == intent_subtype)
     if subject:
         statement = statement.where(Email.subject.like(f"%{subject}%"))
     if from_address:
@@ -106,6 +109,7 @@ async def export_emails(
     *,
     parse_status: str | None = None,
     intent_type: str | None = None,
+    intent_subtype: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
     from_address: str | None = None,
@@ -118,6 +122,8 @@ async def export_emails(
         statement = statement.where(Email.parse_status == parse_status)
     if intent_type:
         statement = statement.where(Email.intent_type == intent_type)
+    if intent_subtype:
+        statement = statement.where(Email.intent_subtype == intent_subtype)
     if subject:
         statement = statement.where(Email.subject.like(f"%{subject}%"))
     if from_address:
@@ -148,6 +154,7 @@ async def export_emails(
                 "from_address": email.from_address,
                 "to_addresses": email.to_addresses,
                 "intent_type": email.intent_type,
+                "intent_subtype": email.intent_subtype,
                 "parse_status": email.parse_status,
                 "received_at": email.received_at,
                 "attachment_count": attachment_count,
@@ -187,9 +194,11 @@ async def _find_thread_for_email(
     from_domain: str | None,
 ) -> EmailThread:
     closed_parent_message_id: str | None = None
+    predecessor_thread_id: int | None = None
+    predecessor_ticket_id: int | None = None
 
     async def active_thread_for(parent: Email) -> EmailThread | None:
-        nonlocal closed_parent_message_id
+        nonlocal closed_parent_message_id, predecessor_thread_id, predecessor_ticket_id
         if not parent.thread_id:
             return None
         candidate = await session.get(EmailThread, parent.thread_id)
@@ -199,6 +208,8 @@ async def _find_thread_for_email(
             ticket = await session.get(RepairTicket, candidate.ticket_id)
             if ticket and ticket.current_status_code == "closed":
                 closed_parent_message_id = parent.message_id
+                predecessor_thread_id = candidate.id
+                predecessor_ticket_id = ticket.id
                 return None
         return candidate
 
@@ -230,6 +241,9 @@ async def _find_thread_for_email(
         thread_key=sha256_text(f"{message_id}:{normalized_subject or ''}")[:128],
         normalized_subject=normalized_subject,
         root_message_id=message_id,
+        predecessor_thread_id=predecessor_thread_id,
+        predecessor_ticket_id=predecessor_ticket_id,
+        thread_version=0,
         email_count=0,
         merge_confidence=1.0000,
         merge_reason=create_reason,
@@ -304,11 +318,13 @@ async def ingest_email(
     )
     analysis = rule_analysis or analyze_email_rules(email)
     email.intent_type = analysis.intent_type
+    email.intent_subtype = analysis.intent_subtype
     if analysis.intent_type == "irrelevant":
         email.parse_status = "skipped"
         email.processing_stage = "completed"
         email.terminal_reason_code = "IRRELEVANT_EMAIL"
         email.retryable = False
+        email.recovery_stage = None
     session.add(email)
     try:
         await session.flush()
@@ -316,6 +332,7 @@ async def ingest_email(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_DUPLICATE") from exc
     thread.latest_email_id = email.id
     thread.email_count = (thread.email_count or 0) + 1
+    thread.thread_version = int(thread.thread_version or 0) + 1
 
     for attachment_payload in payload.attachments:
         session.add(
@@ -341,6 +358,7 @@ async def ingest_email(
         parser_type="rule",
         parser_version="pre-archive-v2",
         intent_type=parse_payload["intent_type"],
+        intent_subtype=parse_payload["intent_subtype"],
         extracted_fields=parse_payload["extracted_fields"],
         extracted_items=parse_payload["extracted_items"],
         missing_fields=parse_payload["missing_fields"],
@@ -477,6 +495,37 @@ ORPHAN_REVIEW_RULES: dict[str, tuple[str, str]] = {
         "收货通知缺少可精确关联的 In-Reply-To/References，仅创建独立人工核对工单，不修改任何已有工单。",
     ),
 }
+POST_CLOSE_TERMINAL_INTENTS = {
+    "normal_reply": "POST_RMA_THREAD_REPLY_ARCHIVED",
+    "rma_sent": "POST_RMA_STATUS_ARCHIVED",
+    "device_received": "POST_RMA_DEVICE_EVENT_ARCHIVED",
+}
+
+
+async def _link_post_close_email(
+    session: AsyncSession,
+    *,
+    email: Email,
+    ticket: RepairTicket,
+    link_type: str,
+    reason: str,
+) -> None:
+    existing = await session.scalar(
+        select(EmailTicketLink).where(
+            EmailTicketLink.email_id == email.id,
+            EmailTicketLink.ticket_id == ticket.id,
+            EmailTicketLink.link_type == link_type,
+        )
+    )
+    if existing is None:
+        session.add(
+            EmailTicketLink(
+                email_id=email.id,
+                ticket_id=ticket.id,
+                link_type=link_type,
+                link_reason=reason,
+            )
+        )
 
 
 async def _create_orphan_review_ticket(
@@ -577,6 +626,7 @@ async def reparse_email(
         analysis = analyze_email_rules(email)
         email.latest_reply_segment = analysis.body
         email.intent_type = analysis.intent_type
+        email.intent_subtype = analysis.intent_subtype
         parse_payload = analysis.to_parse_payload()
         rule_parse = ParseResult(
             email_id=email.id,
@@ -584,6 +634,7 @@ async def reparse_email(
             parser_type="rule",
             parser_version="pre-archive-v2",
             intent_type=parse_payload["intent_type"],
+            intent_subtype=parse_payload["intent_subtype"],
             extracted_fields=parse_payload["extracted_fields"],
             extracted_items=parse_payload["extracted_items"],
             missing_fields=parse_payload["missing_fields"],
@@ -597,6 +648,7 @@ async def reparse_email(
         await session.flush()
     else:
         email.intent_type = rule_parse.intent_type
+        email.intent_subtype = rule_parse.intent_subtype
     email.parse_status = "parsing"
     email.processing_stage = "parsing"
     email.terminal_reason_code = None
@@ -651,7 +703,14 @@ async def reparse_email(
 
     thread = await session.get(EmailThread, email.thread_id) if email.thread_id else None
     thread_ticket = await session.get(RepairTicket, thread.ticket_id) if thread and thread.ticket_id else None
-    closed_thread = bool(thread_ticket and thread_ticket.current_status_code == "closed")
+    predecessor_ticket = (
+        await session.get(RepairTicket, thread.predecessor_ticket_id)
+        if thread and thread.predecessor_ticket_id
+        else None
+    )
+    closed_predecessor = bool(
+        predecessor_ticket and predecessor_ticket.current_status_code == "closed"
+    )
     ai_result = await create_ai_parse_candidate(
         session,
         email=email,
@@ -676,20 +735,71 @@ async def reparse_email(
 
     if isinstance(ai_parse, ParseResult):
         email.intent_type = ai_parse.intent_type or email.intent_type
-        if closed_thread:
-            closed_reason = "已关闭工单收到新邮件，需要人工判断是否新建工单或重新开启处理。"
-            ticket = await ensure_manual_review_ticket_from_parse_result(
+        email.intent_subtype = ai_parse.intent_subtype
+        if (
+            closed_predecessor
+            and predecessor_ticket is not None
+            and ai_parse.intent_type in POST_CLOSE_TERMINAL_INTENTS
+            and not _parse_requires_manual(ai_parse, list(attachments))
+        ):
+            terminal_reason = POST_CLOSE_TERMINAL_INTENTS[ai_parse.intent_type]
+            ai_parse.apply_status = "auto_skipped"
+            email.parse_status = "skipped"
+            email.terminal_reason_code = terminal_reason
+            await _link_post_close_email(
                 session,
                 email=email,
-                parse_result=ai_parse,
-                reason=closed_reason,
-                task_type="closed_thread_new_email",
+                ticket=predecessor_ticket,
+                link_type="post_close_event",
+                reason=terminal_reason,
             )
-            email.parse_status = "needs_manual"
-            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": closed_reason}
         elif ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse, list(attachments)):
             ai_parse.apply_status = "auto_skipped"
             email.parse_status = "skipped"
+            email.terminal_reason_code = (
+                "OUT_OF_SCOPE_REPAIR"
+                if ai_parse.intent_subtype == "out_of_scope_repair"
+                else "IRRELEVANT_EMAIL"
+            )
+            if closed_predecessor and predecessor_ticket is not None:
+                await _link_post_close_email(
+                    session,
+                    email=email,
+                    ticket=predecessor_ticket,
+                    link_type="post_close_irrelevant",
+                    reason=email.terminal_reason_code,
+                )
+        elif (
+            closed_predecessor
+            and predecessor_ticket is not None
+            and ai_parse.intent_type != "new_repair"
+        ):
+            closed_reason = (
+                "已关闭工单线程的新邮件已完成分类，但内容可能要求修改既有RMA"
+                "或分类置信度不足，需要在不重开旧工单的前提下人工处理。"
+            )
+            await _link_post_close_email(
+                session,
+                email=email,
+                ticket=predecessor_ticket,
+                link_type="post_close_manual",
+                reason=closed_reason,
+            )
+            await create_manual_task_if_missing(
+                session,
+                ticket=predecessor_ticket,
+                task_type="post_rma_email_review",
+                trigger_reason=closed_reason,
+                priority="high",
+                email_id=email.id,
+            )
+            ai_parse.apply_status = "needs_manual_review"
+            email.parse_status = "needs_manual"
+            manual_ticket = {
+                "ticket_id": predecessor_ticket.id,
+                "ticket_no": predecessor_ticket.ticket_no,
+                "reason": closed_reason,
+            }
         elif thread_ticket is None and ai_parse.intent_type in ORPHAN_REVIEW_RULES:
             orphan_review = await _create_orphan_review_ticket(session, email=email, parse_result=ai_parse)
             if orphan_review is not None:
@@ -825,6 +935,51 @@ async def reparse_email(
                                 email_id=email.id,
                                 parse_result=ai_parse,
                             )
+    elif (
+        closed_predecessor
+        and predecessor_ticket is not None
+        and rule_parse.intent_type in POST_CLOSE_TERMINAL_INTENTS
+        and not _parse_requires_manual(rule_parse, list(attachments))
+    ):
+        terminal_reason = POST_CLOSE_TERMINAL_INTENTS[rule_parse.intent_type]
+        rule_parse.apply_status = "auto_skipped"
+        email.parse_status = "skipped"
+        email.terminal_reason_code = terminal_reason
+        await _link_post_close_email(
+            session,
+            email=email,
+            ticket=predecessor_ticket,
+            link_type="post_close_event",
+            reason=terminal_reason,
+        )
+    elif (
+        closed_predecessor
+        and predecessor_ticket is not None
+        and rule_parse.intent_type != "new_repair"
+    ):
+        closed_reason = "已关闭工单线程的新邮件无法由规则结果安全自动处理，需要人工复核分类及恢复动作。"
+        await _link_post_close_email(
+            session,
+            email=email,
+            ticket=predecessor_ticket,
+            link_type="post_close_manual",
+            reason=closed_reason,
+        )
+        await create_manual_task_if_missing(
+            session,
+            ticket=predecessor_ticket,
+            task_type="post_rma_email_review",
+            trigger_reason=closed_reason,
+            priority="high",
+            email_id=email.id,
+        )
+        rule_parse.apply_status = "needs_manual_review"
+        email.parse_status = "needs_manual"
+        manual_ticket = {
+            "ticket_id": predecessor_ticket.id,
+            "ticket_no": predecessor_ticket.ticket_no,
+            "reason": closed_reason,
+        }
     elif thread_ticket is None and rule_parse.intent_type in ORPHAN_REVIEW_RULES:
         orphan_review = await _create_orphan_review_ticket(session, email=email, parse_result=rule_parse)
         if orphan_review is not None:
@@ -852,16 +1007,19 @@ async def reparse_email(
         email.processing_stage = "completed"
         email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
         email.retryable = False
+        email.recovery_stage = None
         email.next_retry_at = None
     elif email.parse_status == "skipped":
         email.processing_stage = "completed"
         email.terminal_reason_code = email.terminal_reason_code or "EMAIL_PROCESSING_SKIPPED"
         email.retryable = False
+        email.recovery_stage = None
         email.next_retry_at = None
     elif email.parse_status == "needs_manual":
         email.processing_stage = "manual_review"
         email.terminal_reason_code = "EMAIL_REQUIRES_MANUAL_REVIEW"
         email.retryable = True
+        email.recovery_stage = "manual_review"
 
     await log_system_event(
         session,

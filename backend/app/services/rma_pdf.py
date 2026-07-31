@@ -19,11 +19,10 @@ from app.config import settings
 from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
-TEMPLATE_VERSION = "rma_authorization_auto_v3_1"
-TEMPLATE_SHA256 = "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0"
+TEMPLATE_VERSION = "rma_authorization_v3_2_reference"
+TEMPLATE_SHA256 = "35c70a98f0c3256e21dfe3776cf516883f14d9b44becb6c846ca0f0311bb0e6e"
 LEGACY_TEMPLATE_VERSIONS = {"v1", "rma_authorization_v1", "rma_authorization_zh_v1"}
 CODE39_PATTERN = re.compile(r"^[0-9A-Z\-. $/+%]+$")
-TEST_WATERMARK = "TEST ONLY / \u6d4b\u8bd5\u6570\u636e"
 
 CODE39 = {
     "0": "nnnwwnwnn", "1": "wnnwnnnnw", "2": "nnwwnnnnw", "3": "wnwwnnnnn",
@@ -98,8 +97,7 @@ class RmaPdfData(BaseModel):
 
     @property
     def mailing_contact(self) -> str:
-        separator = " / " if self.mailing_contact_person and self.mailing_contact_phone else ""
-        return f"{self.mailing_contact_person}{separator}{self.mailing_contact_phone}"
+        return f"{self.mailing_contact_person}{self.mailing_contact_phone}"
 
 
 @dataclass(frozen=True)
@@ -442,11 +440,11 @@ async def build_rma_pdf_data(
             customer_code=ticket.customer_code,
             customer_name=ticket.customer_name,
             mailing_address=ticket.mailing_address,
-            mailing_contact_person=ticket.contact_person,
-            mailing_contact_phone=ticket.contact_phone,
-            delivery_fee_paid_by_customer="one-way charge/单次收费",
+            mailing_contact_person=settings.RMA_PDF_MAILING_CONTACT_PERSON,
+            mailing_contact_phone=settings.RMA_PDF_MAILING_CONTACT_PHONE,
+            delivery_fee_paid_by_customer=settings.RMA_PDF_DEFAULT_DELIVERY_FEE,
             repair_fee_paid_by_customer=(
-                "free of charge/免费"
+                settings.RMA_PDF_DEFAULT_REPAIR_FEE
                 if total_cost == 0
                 else f"{total_cost:.2f} {currency}"
             ),
@@ -599,21 +597,6 @@ def _write_row(
         writer.write(page, spec, values[field_name])
 
 
-def _add_test_watermark(page: fitz.Page, writer: _FixedBoxTextWriter) -> None:
-    font_size = 36.0
-    width = writer.font.text_length(TEST_WATERMARK, fontsize=font_size)
-    x = max(20.0, (page.rect.width - width) / 2)
-    page.insert_text(
-        fitz.Point(x, page.rect.height / 2 + 12),
-        TEST_WATERMARK,
-        fontname=writer.font_name,
-        fontsize=font_size,
-        color=(0.85, 0.15, 0.15),
-        fill_opacity=0.22,
-        overlay=True,
-    )
-
-
 def render_rma_pdf(
     data: RmaPdfData,
     *,
@@ -684,9 +667,10 @@ def render_rma_pdf(
         }
         for field_name, value in detail_values.items():
             writer.write(details_page, specs[field_name], value)
-        if test_only:
-            for page in document:
-                _add_test_watermark(page, writer)
+        # RMA artifacts must match the business template in every environment.
+        # Test safety is enforced by the mail envelope/subject gate, never by
+        # modifying the customer-facing PDF.
+        del test_only
         try:
             import fontTools.subset  # noqa: F401
         except ModuleNotFoundError:
@@ -707,7 +691,7 @@ def render_rma_pdf(
 
 def rma_pdf_file_name(data: RmaPdfData) -> str:
     customer = re.sub(r"[\\/:*?\"<>|]+", "_", data.customer_name).strip(" ._") or "customer"
-    return f"RMA{data.rma_no}_{customer[:80]}.pdf"
+    return f"RMA{data.rma_no}{customer[:80]}.pdf"
 
 
 def rma_pdf_snapshot(

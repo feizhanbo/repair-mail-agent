@@ -29,4 +29,5 @@ test_proxy.py
 tunnel.py
 tmp/
 output/pdf/
+test-results/
 

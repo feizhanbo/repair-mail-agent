@@ -174,7 +174,11 @@ async def build_sn_validation_report(
     elif len(items) > 300:
         errors["items"] = "maximum_300_items"
 
-    source_system = "sqlserver_live+local_sn_assets" if settings.RELAY_SQLSERVER_ENABLED else "local_sn_assets"
+    sqlserver_live = (
+        settings.RELAY_SQLSERVER_ENABLED
+        and settings.RELAY_ADAPTER.strip().lower() == "sqlserver"
+    )
+    source_system = "sqlserver_live+local_sn_assets" if sqlserver_live else "local_sn_assets"
     for item in items:
         prefix = f"items.{item.line_no}"
         normalized_sn = _clean_text(item.sn).upper()
@@ -219,7 +223,7 @@ async def build_sn_validation_report(
                 if item.material_code and asset.material_code != item.material_code:
                     errors[f"{prefix}.material"] = "sn_material_mismatch"
 
-        if settings.RELAY_SQLSERVER_ENABLED and normalized_sn and _SN_PATTERN.fullmatch(normalized_sn):
+        if sqlserver_live and normalized_sn and _SN_PATTERN.fullmatch(normalized_sn):
             remote = await validate_sn_against_relay(normalized_sn)
             check["sqlserver_status"] = remote["status"]
             if remote["status"] != "found":
@@ -291,6 +295,10 @@ async def build_sn_validation_report(
         ticket.sn_validation_snapshot = snapshot
         ticket.sn_validation_hash = input_hash
         ticket.sn_validated_at = utcnow()
+        if passed and ticket.conflict_fields:
+            remaining_conflicts = dict(ticket.conflict_fields)
+            remaining_conflicts.pop("sn", None)
+            ticket.conflict_fields = remaining_conflicts
         ticket.safety_check_snapshot = None
         ticket.safety_check_hash = None
         ticket.safety_checked_at = None
@@ -343,27 +351,10 @@ async def validate_ticket_sn_core(
     ticket = await session.get(RepairTicket, ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
-    current_items = (
-        await session.execute(
-            select(RepairTicketItem)
-            .where(RepairTicketItem.ticket_id == ticket.id)
-            .order_by(RepairTicketItem.line_no, RepairTicketItem.id)
-        )
-    ).scalars().all()
-    current_hash = _stable_hash(_sn_input_snapshot(ticket, list(current_items)))
-    if ticket.sn_validation_status == "passed" and ticket.sn_validation_hash == current_hash:
-        return {
-            "ticket_id": ticket.id,
-            "status": "passed",
-            "report": {
-                "passed": True,
-                "status": "passed",
-                "errors": {},
-                "snapshot": ticket.sn_validation_snapshot,
-                "input_hash": current_hash,
-                "reused": True,
-            },
-        }
+    # A manual or recovery validation must refresh evidence from SN master
+    # data even when ticket fields are unchanged. Warranty dates, asset status,
+    # customer ownership, and material mappings can change independently of
+    # the ticket input hash.
     ticket.sn_validation_status = "running"
     report = await build_sn_validation_report(session, ticket_id=ticket.id, user_id=user_id, persist=True)
     if not report["passed"]:
@@ -479,7 +470,7 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
         )
     )
     if rma_required and not 1 <= len(items) <= 300:
-        errors["rma.items"] = "rma_authorization_auto_v3_1_requires_1_to_300_items"
+        errors["rma.items"] = "rma_pdf_requires_1_to_300_items"
     snapshot = {
         "ticket_id": ticket.id,
         "ticket_no": ticket.ticket_no,

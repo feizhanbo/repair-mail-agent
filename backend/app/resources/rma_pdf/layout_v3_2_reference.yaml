@@ -1,10 +1,10 @@
 {
-  "template_version": "rma_authorization_auto_v3_1",
-  "template_sha256": "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0",
+  "template_version": "rma_authorization_v3_2_reference",
+  "template_sha256": "35c70a98f0c3256e21dfe3776cf516883f14d9b44becb6c846ca0f0311bb0e6e",
   "template_page_count": 2,
   "page_width": 842.0,
   "page_height": 595.0,
-  "title": "RETURN MATERIAL AUTHORIZAION FORM AUTO",
+  "title": "RETURN MATERIAL AUTHORIZAION FORM",
   "static_anchors": {
     "0": ["Part Serial No.", "Maintenance price", "www.accotest.com"],
     "1": ["Customer Name", "Mailing Add", "Total cost", "www.accotest.com"]

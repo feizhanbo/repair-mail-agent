@@ -68,6 +68,18 @@ class TicketExportConfirmRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class SapSubmitReconcileRequest(BaseModel):
+    outcome: Literal["accepted", "not_inserted"]
+    reason: str = Field(min_length=1, max_length=500)
+    call_id: str | None = Field(default=None, max_length=191)
+
+
+class RmaManualPolicyApprovalRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    confirm_policy_values: Literal[True]
+    confirm_template_thread_and_archive: Literal[True]
+
+
 class TicketItemUpsert(BaseModel):
     id: int | None = None
     line_no: int | None = Field(default=None, ge=1)
@@ -114,7 +126,6 @@ class ManualTaskResolveRequest(BaseModel):
         "generate_followup",
         "wait_customer_info",
         "reparse",
-        "close_ticket",
         "keep_manual_review",
     ] = "keep_manual_review"
 

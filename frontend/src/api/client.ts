@@ -247,7 +247,20 @@ export const api = {
   retrySapExport: (id: number) => postData<JobRunLog>(`/tickets/${id}/sap-export/retry`),
   pollSapExport: (id: number) => postData<Record<string, unknown>>(`/tickets/${id}/sap-export/poll`),
   confirmLateSapResult: (id: number) => postData<Record<string, unknown>>(`/tickets/${id}/sap-export/confirm-late`),
+  reconcileSapSubmission: (
+    ticketId: number,
+    lineId: number,
+    body: { outcome: 'accepted' | 'not_inserted'; reason: string; call_id?: string },
+  ) => postData<Record<string, unknown>>(`/tickets/${ticketId}/sap-export/lines/${lineId}/reconcile`, body),
   retryRmaSend: (id: number) => postData<JobRunLog>(`/tickets/${id}/rma/retry-send`),
+  approveRmaManualPolicy: (
+    id: number,
+    body: {
+      reason: string;
+      confirm_policy_values: true;
+      confirm_template_thread_and_archive: true;
+    },
+  ) => postData<JobRunLog>(`/tickets/${id}/rma/manual-policy-approve`, body),
   confirmDeviceReceived: (id: number, body: { idempotency_key: string; note?: string }) =>
     postData<{ ticket_id: number; status: string; reply_id?: number | null; idempotent_reuse: boolean }>(`/tickets/${id}/confirm-device-received`, body),
   applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => {
@@ -263,6 +276,7 @@ export const api = {
   approveReply: (id: number) => postData(`/replies/${id}/approve-send`),
   reconcileReplySend: (id: number, body: { outcome: 'sent' | 'failed'; reason: string; smtp_message_id?: string }) =>
     postData<ReplyRecord>(`/replies/${id}/reconcile-send`, body),
+  retryReplyArchive: (id: number) => postData<Record<string, unknown>>(`/replies/${id}/retry-archive`),
   approveReplyJob: (id: number) => postData<{ reply: ReplyRecord; job?: JobRunLog | null }>(`/replies/${id}/approve-send/jobs`),
   rejectReply: (id: number, reason: string) => postData(`/replies/${id}/reject`, { reason }),
   snAssets: (params: Record<string, unknown>) => getData<PageData<SnAsset>>('/master-data/sn-assets', { params }),

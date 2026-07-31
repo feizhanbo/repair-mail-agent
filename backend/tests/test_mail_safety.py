@@ -130,7 +130,7 @@ def test_all_three_switch_combinations_keep_ordinary_and_followup_independent(
     assert replies._reply_can_auto_send(followup) is followup_enabled
 
 
-def test_seed_requires_rma_send_before_device_receipt_can_close_ticket() -> None:
+def test_seed_closes_only_after_rma_send_and_archive_verification() -> None:
     direct_close_rules = [
         transition
         for transition in seed_data.WORKFLOW_TRANSITIONS
@@ -148,7 +148,7 @@ def test_seed_requires_rma_send_before_device_receipt_can_close_ticket() -> None
     ]
     assert direct_close_rules == []
     assert [transition["trigger_event"] for transition in rma_send_rules] == ["rma_reply_sent"]
-    assert [transition["trigger_event"] for transition in close_rules] == ["device_receipt_ack_sent"]
+    assert [transition["trigger_event"] for transition in close_rules] == ["rma_issued_and_archived"]
 
 
 @pytest.mark.parametrize("intent_type", ["customer_supplement", "normal_reply", "rma_sent", "device_received"])
@@ -229,7 +229,9 @@ async def test_reply_to_closed_ticket_creates_new_thread_and_preserves_source_me
 
 
 @run_async
-async def test_device_receipt_records_pending_review_without_closing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_device_receipt_is_audit_only_without_email_or_state_progression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ticket = RepairTicket(
         id=1,
         ticket_no="RMA2026072001",
@@ -240,51 +242,13 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
         contact_email="outside@example.com",
         rma_status="sent",
     )
-    source_email = Email(
-        id=10,
-        thread_id=20,
-        mail_direction="inbound",
-        mailbox_account="rmatest1@accotest.com",
-        message_id="<customer-source@accotest.com>",
-        from_address="outside@example.com",
-    )
-
     async def get(model, object_id, **kwargs):
         if model is RepairTicket:
             return ticket
-        if model is Email:
-            return source_email
         return None
 
     session = SimpleNamespace(get=get, scalar=AsyncMock(return_value=None), add=Mock(), flush=AsyncMock())
-    monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", False)
-    monkeypatch.setattr(device_receipts, "create_manual_task_if_missing", AsyncMock())
     monkeypatch.setattr(device_receipts, "log_operation", AsyncMock())
-    content_template = ReplyTemplate(
-        id=30,
-        template_code="device_received_ack_zh",
-        template_name="设备收货确认",
-        template_type="device_received_ack",
-        language="zh-CN",
-        version="v1",
-        body_template="已收到 {{ ticket_no }}",
-    )
-    base_template = ReplyTemplate(
-        id=31,
-        template_code="all_replies_domestic_company_base_zh",
-        template_name="国内基础模板",
-        template_type="domestic_company_base",
-        language="zh-CN",
-        version="v1",
-        body_template="{{ content }}",
-    )
-    monkeypatch.setattr(device_receipts, "_require_reply_parent", AsyncMock(return_value=source_email))
-    monkeypatch.setattr(device_receipts, "_select_template", AsyncMock(return_value=content_template))
-    monkeypatch.setattr(
-        device_receipts,
-        "_render_reply_templates",
-        AsyncMock(return_value=("Re: 原邮件", "已收到 RMA2026072001", base_template)),
-    )
 
     result = await device_receipts.confirm_device_received(
         session,
@@ -295,17 +259,11 @@ async def test_device_receipt_records_pending_review_without_closing(monkeypatch
         idempotency_key="manual-test-1",
     )
 
-    assert result["status"] == "pending_review"
+    assert result["status"] == "recorded_no_progression"
     assert ticket.current_status_code == "rma_sent"
     assert ticket.device_received_at is not None
-    assert ticket.device_receipt_ack_status == "pending_review"
-    created_reply = session.add.call_args.args[0]
-    assert isinstance(created_reply, ReplyRecord)
-    assert created_reply.to_addresses == "rmatest2@accotest.com"
-    assert created_reply.cc_addresses is None
-    assert created_reply.template_id == 30
-    assert created_reply.base_template_id == 31
-    assert created_reply.in_reply_to == "<customer-source@accotest.com>"
+    assert ticket.device_receipt_ack_status == "recorded_no_progression"
+    session.add.assert_not_called()
 
 
 @run_async

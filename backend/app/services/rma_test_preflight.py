@@ -38,24 +38,24 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
         rma_no=authorization_no,
         request_date=date.today(),
         customer_code="RMATEST",
-        customer_name="RMA SMTP TEST ONLY",
+        customer_name="RMA SMTP PREFLIGHT",
         mailing_address="TEST DATA - NO SHIPMENT",
         mailing_contact_person="TEST CONTACT",
         mailing_contact_phone="000-0000",
-        delivery_fee_paid_by_customer="TEST ONLY",
-        repair_fee_paid_by_customer="TEST ONLY",
+        delivery_fee_paid_by_customer="one-way charge",
+        repair_fee_paid_by_customer="free of charge",
         total_cost=Decimal("0"),
         items=[
             RmaItemData(
                 part_no=f"TEST-PART-{index}",
-                part_description="TEST ONLY / synthetic part",
+                part_description="RMATEST synthetic part",
                 part_serial_no=f"TESTSN0000000{index}",
                 failure_description="Synthetic attachment validation only",
             )
             for index in range(1, 8)
         ],
     )
-    pdf_bytes = render_rma_pdf(data, test_only=True)
+    pdf_bytes = render_rma_pdf(data, test_only=False)
     filename = rma_pdf_file_name(data)
     subject = f"[TEST ONLY] RMA attachment validation RMATEST{stamp}"
     reply = ReplyRecord(
@@ -105,14 +105,14 @@ def build_rma_test_preflight(*, timestamp: str | None = None) -> RmaTestPrefligh
         page_texts = [page.get_text() for page in document]
         pdf_page_count = document.page_count
     compact_pdf_text = re.sub(r"\s+", "", "\n".join(page_texts))
-    for marker in ("TEST ONLY", "RMA SMTP TEST ONLY", "TESTSN00000001", "TEST-PART"):
+    for marker in ("RMA SMTP PREFLIGHT", "TESTSN00000001", "TEST-PART"):
         if re.sub(r"\s+", "", marker) not in compact_pdf_text:
             reasons.append(f"PDF_TEST_MARKER_MISSING:{marker}")
     watermarked_page_count = sum(
         "TESTONLY" in re.sub(r"\s+", "", page_text) for page_text in page_texts
     )
-    if watermarked_page_count != pdf_page_count:
-        reasons.append("PDF_TEST_WATERMARK_MISSING")
+    if watermarked_page_count:
+        reasons.append("PDF_TEST_WATERMARK_FORBIDDEN")
     if any("Customer Name" in page_text or "Mailing Add" in page_text for page_text in page_texts[1:-1]):
         reasons.append("PDF_CONTINUATION_HIDDEN_DETAILS_TEXT")
 

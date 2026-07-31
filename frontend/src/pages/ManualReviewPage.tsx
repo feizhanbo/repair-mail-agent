@@ -81,7 +81,6 @@ const resolveActionOptions = [
   { value: 'generate_followup', label: '生成追问' },
   { value: 'wait_customer_info', label: '等待客户补充' },
   { value: 'reparse', label: '重新解析' },
-  { value: 'close_ticket', label: '关闭工单' },
   { value: 'keep_manual_review', label: '保持人工复核' },
 ];
 

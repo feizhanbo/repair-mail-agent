@@ -60,7 +60,7 @@ class _PollSession:
 
 
 def _batch_fixture(rma_status: str = "waiting_sap"):
-    now = datetime(2026, 7, 28, 2, 0, 0)
+    now = sap_rma.utcnow()
     export = TicketRelayExport(
         id=10,
         ticket_id=20,
@@ -171,6 +171,11 @@ def test_two_sn_with_different_rma_require_manual_review(monkeypatch: pytest.Mon
     monkeypatch.setattr(sap_rma, "poll_rma_from_relay", poll)
     monkeypatch.setattr(sap_rma, "transition_ticket", transition)
     monkeypatch.setattr(sap_rma, "enqueue_job", enqueue)
+    monkeypatch.setattr(
+        sap_rma,
+        "start_external_operation",
+        AsyncMock(return_value=SimpleNamespace(status="running")),
+    )
 
     result = asyncio.run(sap_rma.poll_export_batch(session, export_id=export.id))
 
@@ -243,6 +248,11 @@ def test_rma_already_used_by_another_ticket_requires_manual_review(
     monkeypatch.setattr(sap_rma, "poll_rma_from_relay", poll)
     monkeypatch.setattr(sap_rma, "transition_ticket", transition)
     monkeypatch.setattr(sap_rma, "enqueue_job", enqueue)
+    monkeypatch.setattr(
+        sap_rma,
+        "start_external_operation",
+        AsyncMock(return_value=SimpleNamespace(status="running")),
+    )
 
     result = asyncio.run(sap_rma.poll_export_batch(session, export_id=export.id))
 
@@ -260,6 +270,21 @@ def test_unconfirmed_tianjin_address_blocks_export(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(ValueError, match="TIANJIN_SHIPPING_ADDRESS_NOT_CONFIGURED"):
         sap_rma._address_details("tianjin")
+
+
+def test_material_route_uses_board_list_for_domestic_and_beijing_for_overseas() -> None:
+    assert sap_rma._shipping_route(
+        language_code="zh-CN",
+        board_material_matched=True,
+    ) == "beijing"
+    assert sap_rma._shipping_route(
+        language_code="zh-CN",
+        board_material_matched=False,
+    ) == "tianjin"
+    assert sap_rma._shipping_route(
+        language_code="en-US",
+        board_material_matched=False,
+    ) == "beijing"
 
 
 class _PolicySession:
@@ -325,7 +350,7 @@ def test_free_and_special_price_overlap_requires_manual_review() -> None:
     assert result["error_code"] == "CUSTOMER_POLICY_FREE_PRICE_CONFLICT"
 
 
-def test_sqlserver_table_mode_requires_remote_submission_key_column(
+def test_sqlserver_table_mode_uses_sap_generated_call_id_without_client_unique_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_ENABLED", True)
@@ -341,7 +366,6 @@ def test_sqlserver_table_mode_requires_remote_submission_key_column(
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RMA_COLUMN", "U_CustomerNum")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN", "")
     monkeypatch.setattr(
         external_relay.settings,
         "RELAY_SQLSERVER_RESULT_COLUMN_MAP",
@@ -350,5 +374,5 @@ def test_sqlserver_table_mode_requires_remote_submission_key_column(
 
     result = external_relay.relay_configuration_status()
 
-    assert result["configured"] is False
-    assert "RELAY_SQLSERVER_RESULT_UNIQUE_COLUMN" in result["missing"]
+    assert result["configured"] is True
+    assert result["missing"] == []

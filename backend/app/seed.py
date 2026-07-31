@@ -60,7 +60,7 @@ WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
         "status_code": "rma_sent",
         "status_name": "RMA已发送",
         "status_category": "rma",
-        "description": "全部SN已取得同一RMA编号，RMA模板回复已在原邮件链发送成功。",
+        "description": "SMTP已明确发送RMA成功，等待完成PDF与出站邮件归档核验。",
         "sort_order": 70,
     },
     {
@@ -175,8 +175,8 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     {
         "from_status_code": "rma_sent",
         "to_status_code": "closed",
-        "trigger_event": "device_receipt_ack_sent",
-        "condition_desc": "公司收到待修设备并成功向客户发送收货确认后关单。",
+        "trigger_event": "rma_issued_and_archived",
+        "condition_desc": "正式RMA、PDF校验、邮件发送和归档均已完成。",
     },
 )
 
@@ -341,7 +341,8 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "您好：\n\nRMA维修授权表见附件。\n"
             "为了不耽误贵司维修进度，请注意以下事项：\n"
             "1. 请务必打印 RMA 表，并与报修板一同寄出。\n"
-            "2. 请妥善包装设备，并核对 RMA 表中的返回地址；如需变更地址请提前告知。\n"
+            "2. 请妥善包装设备，并寄送至以下地址：\n"
+            "{{ return_address_block }}\n"
             "3. 维修工期预计为 10 个工作日，实际进度以维修检测结果为准。\n\n谢谢。"
         ),
     },
@@ -384,10 +385,7 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "in the package sent to AccoTEST.\n"
             "Please ensure that the board is securely packed and that the return address on the RMA form is correct.\n\n"
             "Please ship the faulty board to:\n"
-            "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
-            "Attention: Li Lian Rong\n"
-            "Address: Building 5, IC PARK, No. 9 Fenghao East Road, Haidian District (100094), Beijing\n"
-            "Phone: +86-15811322137\n\n"
+            "{{ return_address_block }}\n\n"
             "Please note:\n"
             "1. Please attach the fault data to the email.\n"
             "2. Before shipment, please provide photos of the physical goods and outer packaging by email. "
@@ -413,10 +411,7 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "in the package sent to AccoTEST.\n"
             "Please ensure that the board is securely packed and that the return address on the RMA form is correct.\n\n"
             "Please ship the faulty board to:\n"
-            "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
-            "Attention: Li Lian Rong\n"
-            "Address: Building 5, IC PARK, No. 9 Fenghao East Road, Haidian District (100094), Beijing\n"
-            "Phone: +86-15811322137\n\n"
+            "{{ return_address_block }}\n\n"
             "Please note:\n"
             "1. Please attach the fault data to the email.\n"
             "2. Before shipment, please provide photos of the physical goods and outer packaging by email. "
@@ -446,6 +441,8 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "2. The detailed pick-up address, contact name, and contact phone number.\n"
             "3. Package details: total number of boxes, gross weight of each box with units, number of boards in each box, and the SN of every board.\n"
             "4. Please print the RMA authorization form and place it inside the package.\n\n"
+            "Return address:\n"
+            "{{ return_address_block }}\n\n"
             "Before shipment, please provide photos of the physical goods and outer packaging by email. "
             "The nameplate information must be clear for import customs clearance.\n\n"
             "Thank you for your cooperation!"
@@ -590,7 +587,7 @@ async def _seed_workflow_transitions(session: AsyncSession) -> int:
             WorkflowTransition.to_status_code == "closed",
             or_(
                 WorkflowTransition.from_status_code != "rma_sent",
-                WorkflowTransition.trigger_event != "device_receipt_ack_sent",
+                WorkflowTransition.trigger_event != "rma_issued_and_archived",
             ),
         )
         .values(enabled=False)

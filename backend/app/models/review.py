@@ -27,6 +27,8 @@ class ManualReviewTask(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     description: Mapped[str | None] = mapped_column(Text)
     trigger_reason: Mapped[str | None] = mapped_column(String(500))
+    recovery_stage: Mapped[str | None] = mapped_column(String(100))
+    recovery_action: Mapped[str | None] = mapped_column(String(500))
     assigned_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_manual_tasks_assignee"))
     claimed_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_manual_tasks_claimed_by"))
     claimed_at: Mapped[datetime | None] = datetime_column()
