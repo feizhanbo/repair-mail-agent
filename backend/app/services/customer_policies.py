@@ -18,6 +18,8 @@ POLICY_FIELDS = (
     "customer_code",
     "customer_name",
     "policy_type",
+    "charge_status",
+    "customer_scope",
     "effective_from",
     "effective_until",
     "repair_price",
@@ -38,6 +40,8 @@ POLICY_FIELDS = (
 POLICY_MUTABLE_FIELDS = {
     "customer_name",
     "policy_type",
+    "charge_status",
+    "customer_scope",
     "effective_from",
     "effective_until",
     "repair_price",
@@ -50,6 +54,16 @@ POLICY_MUTABLE_FIELDS = {
     "enabled",
 }
 FREE_POLICY_TYPES = {"permanent_free", "annual_free"}
+CHARGE_STATUSES = {"free", "annual_contract", "chargeable", "manual_confirmation"}
+CUSTOMER_SCOPES = {"domestic", "overseas"}
+
+
+def charge_status_for_policy_type(policy_type: str) -> str:
+    return {
+        "permanent_free": "free",
+        "annual_free": "annual_contract",
+        "special_out_of_warranty": "chargeable",
+    }.get(policy_type, "manual_confirmation")
 
 
 def serialize_policy(policy: CustomerServicePolicy) -> dict[str, Any]:
@@ -58,6 +72,10 @@ def serialize_policy(policy: CustomerServicePolicy) -> dict[str, Any]:
 
 def _validate_policy_values(values: dict[str, Any]) -> None:
     policy_type = str(values.get("policy_type") or "")
+    charge_status = str(
+        values.get("charge_status") or charge_status_for_policy_type(policy_type)
+    )
+    customer_scope = values.get("customer_scope")
     effective_from = values.get("effective_from")
     effective_until = values.get("effective_until")
     if policy_type == "annual_free" and values.get("enabled") and (not effective_from or not effective_until):
@@ -76,6 +94,16 @@ def _validate_policy_values(values: dict[str, Any]) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_CURRENCY_REQUIRED")
     if not str(values.get("shipping_fee_text") or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_SHIPPING_FEE_REQUIRED")
+    if charge_status not in CHARGE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="POLICY_CHARGE_STATUS_INVALID",
+        )
+    if values.get("enabled") and customer_scope not in CUSTOMER_SCOPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="POLICY_CUSTOMER_SCOPE_REQUIRED",
+        )
 
 
 async def list_policies(
@@ -137,6 +165,10 @@ async def create_policy(
     payload = dict(values)
     payload["customer_code"] = str(payload.get("customer_code") or "").strip().upper()
     payload["currency"] = str(payload.get("currency") or "CNY").strip().upper()
+    payload["charge_status"] = str(
+        payload.get("charge_status")
+        or charge_status_for_policy_type(str(payload.get("policy_type") or ""))
+    )
     if not payload["customer_code"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_CUSTOMER_CODE_REQUIRED")
     _validate_policy_values(payload)
@@ -168,6 +200,10 @@ async def update_policy(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POLICY_NOT_FOUND")
     merged = serialize_policy(policy)
     merged.update({key: value for key, value in values.items() if key in POLICY_MUTABLE_FIELDS})
+    if "policy_type" in values and "charge_status" not in values:
+        merged["charge_status"] = charge_status_for_policy_type(
+            str(merged.get("policy_type") or "")
+        )
     if "currency" in merged:
         merged["currency"] = str(merged["currency"] or "").strip().upper()
     _validate_policy_values(merged)
@@ -184,6 +220,8 @@ def _policy_snapshot(policy: CustomerServicePolicy, *, source: str) -> dict[str,
         "policy_code": policy.policy_code,
         "customer_code": policy.customer_code,
         "policy_type": policy.policy_type,
+        "charge_status": policy.charge_status,
+        "customer_scope": policy.customer_scope,
         "repair_price": str(policy.repair_price),
         "currency": policy.currency,
         "tax_rate": str(policy.tax_rate),
@@ -227,62 +265,33 @@ async def resolve_customer_policy(
             "error_code": "CUSTOMER_POLICY_FORCES_MANUAL_REVIEW",
             "policy_codes": sorted(policy.policy_code for policy in forced_manual),
         }
-    has_free = any(policy.policy_type in FREE_POLICY_TYPES for policy in candidates)
-    has_priced = any(policy.policy_type == "special_out_of_warranty" for policy in candidates)
-    if has_free and has_priced:
+    if not candidates:
         return {
-            "status": "conflict",
-            "error_code": "CUSTOMER_POLICY_FREE_PRICE_CONFLICT",
-            "policy_codes": sorted(policy.policy_code for policy in candidates),
+            "status": "missing",
+            "error_code": "CUSTOMER_POLICY_MISSING",
         }
-
-    if in_warranty:
-        free_candidates = [policy for policy in candidates if policy.policy_type in FREE_POLICY_TYPES]
-        if len(free_candidates) > 1:
-            return {
-                "status": "conflict",
-                "error_code": "CUSTOMER_POLICY_CONFLICT",
-                "policy_codes": sorted(policy.policy_code for policy in free_candidates),
-            }
-        if free_candidates:
-            snapshot = _policy_snapshot(free_candidates[0], source="customer_policy")
-            snapshot["repair_price"] = "0.00"
-            return {"status": "resolved", "policy": snapshot}
-        return {
-            "status": "resolved",
-            "policy": {
-                "policy_id": None,
-                "policy_code": "warranty-free",
-                "customer_code": normalized,
-                "policy_type": "warranty",
-                "repair_price": "0.00",
-                "currency": "CNY",
-                "tax_rate": "13.0000",
-                "shipping_fee_text": "one-way charge/单次收费",
-                "reply_salutation": None,
-                "hide_company_name": False,
-                "force_manual_review": False,
-                "source": "sn_warranty",
-            },
-        }
-
     if len(candidates) > 1:
         return {
             "status": "conflict",
             "error_code": "CUSTOMER_POLICY_CONFLICT",
             "policy_codes": sorted(policy.policy_code for policy in candidates),
         }
-    if candidates:
-        policy = candidates[0]
-        return {"status": "resolved", "policy": _policy_snapshot(policy, source="customer_policy")}
-
-    default_policy = await session.scalar(
-        select(CustomerServicePolicy).where(
-            CustomerServicePolicy.customer_code == "*",
-            CustomerServicePolicy.policy_type == "default",
-            CustomerServicePolicy.enabled.is_(True),
-        )
-    )
-    if default_policy is None:
-        return {"status": "missing", "error_code": "DEFAULT_CUSTOMER_POLICY_MISSING"}
-    return {"status": "resolved", "policy": _policy_snapshot(default_policy, source="default_policy")}
+    policy = candidates[0]
+    if policy.customer_scope not in CUSTOMER_SCOPES:
+        return {
+            "status": "missing",
+            "error_code": "CUSTOMER_SCOPE_UNRESOLVED",
+            "policy_codes": [policy.policy_code],
+        }
+    snapshot = _policy_snapshot(policy, source="customer_policy")
+    if in_warranty:
+        snapshot["charge_status"] = "free"
+        snapshot["repair_price"] = "0.00"
+        snapshot["source"] = "sn_warranty+customer_policy"
+    if snapshot["charge_status"] == "manual_confirmation":
+        return {
+            "status": "manual_confirmation",
+            "error_code": "CUSTOMER_POLICY_REQUIRES_MANUAL_CONFIRMATION",
+            "policy": snapshot,
+        }
+    return {"status": "resolved", "policy": snapshot}

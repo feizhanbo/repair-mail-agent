@@ -14,6 +14,7 @@ import {
   Button,
   Checkbox,
   DatePicker,
+  Descriptions,
   Drawer,
   Empty,
   Form,
@@ -50,6 +51,7 @@ import type {
   ManualTask,
   ParseResult,
   ReplyRecord,
+  SnValidationResult,
   StatusLog,
   Ticket,
   TicketDetail,
@@ -88,6 +90,17 @@ type RmaManualPolicyForm = {
   confirm_template_thread_and_archive: true;
 };
 
+type PolicyOverrideForm = {
+  charge_status: 'free' | 'annual_contract' | 'chargeable';
+  customer_scope: 'domestic' | 'overseas';
+  reason: string;
+};
+
+type ReturnRouteForm = {
+  return_location: 'beijing' | 'tianjin';
+  reason: string;
+};
+
 export default function TicketsPage() {
   const [searchParams] = useSearchParams();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
@@ -104,6 +117,8 @@ export default function TicketsPage() {
   const [partialParse, setPartialParse] = useState<ParseResult | null>(null);
   const [sapReconcileLineId, setSapReconcileLineId] = useState<number | null>(null);
   const [rmaManualPolicyOpen, setRmaManualPolicyOpen] = useState(false);
+  const [policyOverrideOpen, setPolicyOverrideOpen] = useState(false);
+  const [returnRouteItem, setReturnRouteItem] = useState<TicketLine | null>(null);
   const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
   const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor', 'operator']);
@@ -316,6 +331,51 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
+  const resolvePolicyMutation = useMutation({
+    mutationFn: () => api.resolveTicketPolicy(selectedId as number),
+    onSuccess: () => {
+      message.success('客户范围与服务政策已重新解析');
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
+  const overridePolicyMutation = useMutation({
+    mutationFn: (values: PolicyOverrideForm) => api.overrideTicketPolicy(
+      selectedId as number,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('仅当前工单的客户范围与收费状态已人工确认');
+      setPolicyOverrideOpen(false);
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
+  const resolveReturnRoutesMutation = useMutation({
+    mutationFn: () => api.resolveReturnRoutes(selectedId as number),
+    onSuccess: () => {
+      message.success('维修寄回地址已重新匹配');
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
+  const selectReturnRouteMutation = useMutation({
+    mutationFn: (values: ReturnRouteForm) => api.selectReturnRoute(
+      selectedId as number,
+      returnRouteItem?.id as number,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('当前明细的维修寄回地点已人工确认并快照');
+      setReturnRouteItem(null);
+      invalidateDetail();
+      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
+    },
+    onError: handleMutationError,
+  });
   const exportMutation = useMutation({
     mutationFn: () => api.exportSelectedTickets(selectedTicketKeys.map(Number)),
     onSuccess: (blob) => saveBlob(blob, 'tickets-selected-export.xlsx'),
@@ -466,6 +526,10 @@ export default function TicketsPage() {
             onReconcileSap={setSapReconcileLineId}
             onRetryRma={() => confirmAction('确认继续RMA签发？系统会优先恢复归档，只有明确未发送时才允许重新发送。', () => retryRmaMutation.mutate(detailQuery.data.ticket.id))}
             onApproveRmaManualPolicy={() => setRmaManualPolicyOpen(true)}
+            onResolvePolicy={() => resolvePolicyMutation.mutate()}
+            onOverridePolicy={() => setPolicyOverrideOpen(true)}
+            onResolveReturnRoutes={() => resolveReturnRoutesMutation.mutate()}
+            onSelectReturnRoute={setReturnRouteItem}
             onConfirmDeviceReceived={() => confirmAction('确认公司已经收到客户寄来的待修设备及纸质 RMA 授权单？', () => confirmDeviceReceivedMutation.mutate(detailQuery.data.ticket.id))}
             onTransition={() => setTransitionOpen(true)}
             hasPrevTicket={hasPrevTicket}
@@ -481,6 +545,8 @@ export default function TicketsPage() {
             confirmLateSapLoading={confirmLateSapMutation.isPending}
             retryRmaLoading={retryRmaMutation.isPending}
             approveRmaManualPolicyLoading={approveRmaManualPolicyMutation.isPending}
+            resolvePolicyLoading={resolvePolicyMutation.isPending}
+            resolveReturnRoutesLoading={resolveReturnRoutesMutation.isPending}
             confirmDeviceLoading={confirmDeviceReceivedMutation.isPending}
           />
         ) : detailQuery.isFetching ? (
@@ -554,6 +620,74 @@ export default function TicketsPage() {
           </Form>
         </Modal>
       ) : null}
+      <Modal
+        title="人工确认当前工单政策"
+        open={policyOverrideOpen}
+        onCancel={() => setPolicyOverrideOpen(false)}
+        footer={null}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="secondary">
+          此操作只修改当前工单快照，不会反向修改客户服务政策主数据。
+        </Typography.Paragraph>
+        <Form<PolicyOverrideForm>
+          layout="vertical"
+          initialValues={{
+            charge_status: (
+              detailQuery.data?.ticket.charge_status === 'free'
+              || detailQuery.data?.ticket.charge_status === 'annual_contract'
+              || detailQuery.data?.ticket.charge_status === 'chargeable'
+            ) ? detailQuery.data.ticket.charge_status : 'chargeable',
+            customer_scope: detailQuery.data?.ticket.customer_scope || 'domestic',
+          }}
+          onFinish={(values) => overridePolicyMutation.mutate(values)}
+        >
+          <Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'domestic', label: '国内客户' },
+              { value: 'overseas', label: '海外客户' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="收费状态" name="charge_status" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'free', label: '免费' },
+              { value: 'annual_contract', label: '包年/合同内' },
+              { value: 'chargeable', label: '收费' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="确认依据" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={overridePolicyMutation.isPending}>
+            保存当前工单政策快照
+          </Button>
+        </Form>
+      </Modal>
+      <Modal
+        title={`人工选择维修寄回地点${returnRouteItem ? `（明细 ${returnRouteItem.line_no}）` : ''}`}
+        open={returnRouteItem !== null}
+        onCancel={() => setReturnRouteItem(null)}
+        footer={null}
+        destroyOnClose
+      >
+        <Form<ReturnRouteForm>
+          layout="vertical"
+          onFinish={(values) => selectReturnRouteMutation.mutate(values)}
+        >
+          <Form.Item label="维修寄回地点" name="return_location" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'beijing', label: '北京' },
+              { value: 'tianjin', label: '天津' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="人工选择依据" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={selectReturnRouteMutation.isPending}>
+            保存地点与地址快照
+          </Button>
+        </Form>
+      </Modal>
       <Modal
         title="SAP 提交结果人工对账"
         open={sapReconcileLineId !== null}
@@ -671,6 +805,10 @@ function TicketDetailView({
   onReconcileSap,
   onRetryRma,
   onApproveRmaManualPolicy,
+  onResolvePolicy,
+  onOverridePolicy,
+  onResolveReturnRoutes,
+  onSelectReturnRoute,
   onConfirmDeviceReceived,
   onTransition,
   hasPrevTicket,
@@ -686,6 +824,8 @@ function TicketDetailView({
   confirmLateSapLoading,
   retryRmaLoading,
   approveRmaManualPolicyLoading,
+  resolvePolicyLoading,
+  resolveReturnRoutesLoading,
   confirmDeviceLoading,
 }: {
   detail: TicketDetail;
@@ -704,6 +844,10 @@ function TicketDetailView({
   onReconcileSap: (lineId: number) => void;
   onRetryRma: () => void;
   onApproveRmaManualPolicy: () => void;
+  onResolvePolicy: () => void;
+  onOverridePolicy: () => void;
+  onResolveReturnRoutes: () => void;
+  onSelectReturnRoute: (item: TicketLine) => void;
   onConfirmDeviceReceived: () => void;
   onTransition: () => void;
   hasPrevTicket: boolean;
@@ -719,6 +863,8 @@ function TicketDetailView({
   confirmLateSapLoading: boolean;
   retryRmaLoading: boolean;
   approveRmaManualPolicyLoading: boolean;
+  resolvePolicyLoading: boolean;
+  resolveReturnRoutesLoading: boolean;
   confirmDeviceLoading: boolean;
 }) {
   const timelineEmails = detail.email_timeline.length > 0 ? detail.email_timeline : detail.source_email ? [detail.source_email] : [];
@@ -765,20 +911,65 @@ function TicketDetailView({
             label: `维修明细(${detail.items.length})`,
             children: (
               <div className="drawer-stack">
+                <Typography.Title level={5}>SAP 物料与客户政策</Typography.Title>
+                <Descriptions size="small" column={3} bordered>
+                  <Descriptions.Item label="客户代码">{detail.ticket.customer_code || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户名称">{detail.ticket.customer_name || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户范围">
+                    {detail.ticket.customer_scope === 'overseas' ? '海外' : detail.ticket.customer_scope === 'domestic' ? '国内' : '待确认'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="收费状态">{detail.ticket.charge_status || '待确认'}</Descriptions.Item>
+                  <Descriptions.Item label="政策解析状态">{detail.ticket.policy_resolution_status || 'pending'}</Descriptions.Item>
+                  <Descriptions.Item label="SN 校验状态">{detail.ticket.sn_validation_status || 'pending'}</Descriptions.Item>
+                </Descriptions>
                 <Table<TicketLine>
                   size="small" rowKey="id" dataSource={detail.items} pagination={false}
                   columns={[
                     { title: '行', dataIndex: 'line_no', width: 48 },
                     { title: 'SN', dataIndex: 'sn', width: 140, render: (v?: string) => <CopyableField value={v || '-'} /> },
-                    { title: '物料编码', dataIndex: 'material_code', width: 130, render: (v?: string) => v || '-' },
-                    { title: '物料名称', dataIndex: 'material_name', width: 160, render: (v?: string) => v || '-' },
+                    { title: 'SAP 物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
+                    { title: 'SAP 物料名称', dataIndex: 'material_name', width: 170, render: (v?: string) => v || '-' },
+                    { title: '板卡型号', dataIndex: 'board_code', width: 120, render: (v?: string) => v || '-' },
+                    { title: '板卡名称', dataIndex: 'board_name', width: 150, render: (v?: string) => v || '-' },
+                    { title: '寄回地点', dataIndex: 'return_location', width: 100, render: (v?: string) => v === 'beijing' ? '北京' : v === 'tianjin' ? '天津' : '-' },
+                    { title: '地址匹配', dataIndex: 'return_route_status', width: 110, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: '判断依据', dataIndex: 'return_route_source', width: 150, render: (v?: string) => v || '-' },
+                    { title: '匹配说明', dataIndex: 'return_route_message', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '数量', dataIndex: 'quantity', width: 60 },
                     { title: '校验', dataIndex: 'validation_status', width: 100, render: (v: string) => <StatusTag value={v} /> },
                     { title: '校验说明', dataIndex: 'validation_message', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '故障描述', dataIndex: 'failure_description', ellipsis: true, render: (v?: string) => compactText(v) },
-                    { title: '操作', width: 80, render: (_: unknown, r: TicketLine) => <Button type="link" size="small" onClick={() => onEditItem(r)}>编辑</Button> },
+                    {
+                      title: '操作',
+                      width: 150,
+                      render: (_: unknown, r: TicketLine) => (
+                        <Space size={0}>
+                          <Button type="link" size="small" onClick={() => onEditItem(r)}>编辑</Button>
+                          <Button type="link" size="small" onClick={() => onSelectReturnRoute(r)}>选寄回地</Button>
+                        </Space>
+                      ),
+                    },
                   ]}
                 />
+                <Typography.Title level={5}>板卡与维修寄回信息</Typography.Title>
+                {detail.items.map((item) => (
+                  <Descriptions key={`route-${item.id}`} size="small" column={3} bordered>
+                    <Descriptions.Item label={`明细 ${item.line_no} 板卡`}>{item.board_code || '-'} / {item.board_name || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="寄回地点">{item.return_location === 'beijing' ? '北京' : item.return_location === 'tianjin' ? '天津' : '-'}</Descriptions.Item>
+                    <Descriptions.Item label="匹配状态">{item.return_route_status || 'pending'}</Descriptions.Item>
+                    <Descriptions.Item label="维修寄回地址" span={3}>{item.return_address || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="维修收货联系人">{item.return_contact || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="维修收货电话">{item.return_phone || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="邮编">{item.return_postal_code || '-'}</Descriptions.Item>
+                  </Descriptions>
+                ))}
+                <Typography.Title level={5}>客户方邮寄信息</Typography.Title>
+                <Descriptions size="small" column={3} bordered>
+                  <Descriptions.Item label="客户方邮寄地址" span={3}>{detail.ticket.mailing_address || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户方邮寄联系人">{detail.ticket.contact_person || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户方邮寄联系方式">{detail.ticket.contact_phone || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户邮箱">{detail.ticket.contact_email || '-'}</Descriptions.Item>
+                </Descriptions>
                 {detail.parse_results.length > 0 && (
                   <>
                     <Typography.Title level={5}>解析候选</Typography.Title>
@@ -824,6 +1015,15 @@ function TicketDetailView({
             label: '证据对比',
             children: (
               <div className="drawer-stack">
+                {/* === P2-1 恢复: Thread 上下文摘要 === */}
+                {detail.thread && (
+                  <Descriptions size="small" column={4} bordered style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="Thread ID">{detail.thread.id}</Descriptions.Item>
+                    <Descriptions.Item label="Thread Key">{detail.thread.thread_key || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="邮件数">{detail.thread.email_count ?? '-'}</Descriptions.Item>
+                    <Descriptions.Item label="合并置信度">{detail.thread.merge_confidence != null ? numberText(detail.thread.merge_confidence) : '-'}</Descriptions.Item>
+                  </Descriptions>
+                )}
                 {timelineEmails.length > 0 && (
                   <>
                     <Typography.Title level={5}>邮件时间线</Typography.Title>
@@ -881,6 +1081,40 @@ function TicketDetailView({
                     />
                   </>
                 )}
+                {/* === P0-1 恢复: SN 校验明细表 === */}
+                {detail.sn_validation_results.length > 0 && (
+                  <>
+                    <Typography.Title level={5}>SN 校验结果</Typography.Title>
+                    <Table<SnValidationResult>
+                      size="small" rowKey="id"
+                      dataSource={detail.sn_validation_results}
+                      pagination={false}
+                      columns={[
+                        { title: 'SN', dataIndex: 'sn', width: 150, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                        { title: '结果', dataIndex: 'result_status', width: 100, render: (v: string) => <StatusTag value={v} /> },
+                        { title: '存在', dataIndex: 'check_exists', width: 60, render: (v: unknown) => v === true ? '✅' : v === false ? '❌' : '-' },
+                        { title: '有效', dataIndex: 'check_valid', width: 60, render: (v: unknown) => v === true ? '✅' : v === false ? '❌' : '-' },
+                        { title: '客户匹配', dataIndex: 'check_customer_match', width: 80, render: (v: unknown) => v === true ? '✅' : v === false ? '❌' : '-' },
+                        { title: '物料匹配', dataIndex: 'check_material_match', width: 80, render: (v: unknown) => v === true ? '✅' : v === false ? '❌' : '-' },
+                        { title: '校验说明', dataIndex: 'result_message', ellipsis: true, render: (v?: string) => v || '-' },
+                        { title: '校验时间', dataIndex: 'checked_at', width: 170, render: formatTime },
+                      ]}
+                    />
+                  </>
+                )}
+                {/* === P0-2 恢复: 安全闸门快照 === */}
+                {detail.ticket.sn_validation_snapshot && (
+                  <>
+                    <Typography.Title level={5}>SN 校验快照</Typography.Title>
+                    <JsonBlock value={detail.ticket.sn_validation_snapshot} />
+                  </>
+                )}
+                {detail.ticket.safety_check_snapshot && (
+                  <>
+                    <Typography.Title level={5}>安全检测快照</Typography.Title>
+                    <JsonBlock value={detail.ticket.safety_check_snapshot} />
+                  </>
+                )}
               </div>
             ),
           },
@@ -920,6 +1154,8 @@ function TicketDetailView({
                     { title: 'RMA', dataIndex: 'rma_no', width: 130, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '客户代码', dataIndex: 'customer_code', width: 120, render: (v?: string) => v || '-' },
                     { title: '物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
+                    { title: '收费状态', dataIndex: 'charge_status', width: 130, render: (v?: string) => v || '-' },
+                    { title: '客户方邮寄地址', dataIndex: 'mailing_address', width: 220, ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '维修费', dataIndex: 'repair_fee', width: 100, render: (v?: number | string) => v ?? '-' },
                     { title: '币种', dataIndex: 'currency', width: 80, render: (v?: string) => v || '-' },
                     { title: '税率', dataIndex: 'tax_rate', width: 80, render: (v?: number | string) => v == null ? '-' : `${v}%` },
@@ -1041,6 +1277,11 @@ function TicketDetailView({
                       <div className="evidence-grid">
                         <div><Typography.Text strong>草稿内容</Typography.Text><pre className="json-block">{record.draft_body || '-'}</pre></div>
                         <div><Typography.Text strong>最终内容</Typography.Text><pre className="json-block">{record.final_body || '-'}</pre></div>
+                        <div><Typography.Text strong>回复模板版本</Typography.Text><Typography.Text>{record.reply_template_version || '-'}</Typography.Text></div>
+                        <div><Typography.Text strong>RMA 模板版本</Typography.Text><Typography.Text>{record.rma_template_version || '-'}</Typography.Text></div>
+                        {record.error_message && (
+                          <div><Typography.Text strong type="danger">错误信息</Typography.Text><pre className="json-block">{record.error_message}</pre></div>
+                        )}
                       </div>
                     ),
                   }}
@@ -1054,6 +1295,9 @@ function TicketDetailView({
         <Button icon={<EditOutlined />} onClick={onEditFields}>字段修正</Button>
         <Button icon={<FileAddOutlined />} onClick={onAddItem}>新增明细</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateLoading} onClick={onValidateSn}>SN 校验</Button>
+        <Button loading={resolvePolicyLoading} onClick={onResolvePolicy}>自动解析政策</Button>
+        <Button onClick={onOverridePolicy}>人工确认政策</Button>
+        <Button loading={resolveReturnRoutesLoading} onClick={onResolveReturnRoutes}>匹配寄回地址</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateExportLoading} onClick={onValidateExport}>完整安全校验</Button>
         <Button icon={<CheckCircleOutlined />} loading={confirmDeviceLoading} onClick={onConfirmDeviceReceived}>记录收货事实（不流转）</Button>

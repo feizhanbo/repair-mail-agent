@@ -29,7 +29,14 @@ _EXPORT_FILTERS = {
     "emails": {"parse_status", "intent_type", "intent_subtype", "keyword", "subject", "from_address", "message_id", "received_start", "received_end"},
     "tickets": {"status_code", "keyword", "ticket_no", "customer", "contact", "sn", "assigned_user_id", "request_date_start", "request_date_end"},
     "sn_assets": {"keyword", "sn", "customer", "material", "asset_status"},
-    "board_cards": {"keyword", "material_code", "material_name", "status"},
+    "board_cards": {
+        "keyword",
+        "board_code",
+        "board_name",
+        "customer_scope",
+        "return_location",
+        "status",
+    },
 }
 
 

@@ -23,6 +23,7 @@ class RepairTicket(TimestampMixin, Base):
         Index("idx_repair_tickets_rma_status", "rma_status", "updated_at"),
         Index("idx_repair_tickets_sn_validation_status", "sn_validation_status", "updated_at"),
         Index("idx_repair_tickets_device_ack_status", "device_receipt_ack_status", "updated_at"),
+        Index("idx_repair_tickets_policy_status", "policy_resolution_status", "updated_at"),
         CheckConstraint("followup_count >= 0", name="followup_count_non_negative"),
         CheckConstraint("max_followup_count >= followup_count", name="max_followup_count_gte_followup_count"),
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="confidence_between_0_and_1"),
@@ -35,6 +36,22 @@ class RepairTicket(TimestampMixin, Base):
     thread_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_threads.id", use_alter=True, name="fk_repair_tickets_thread"))
     customer_code: Mapped[str | None] = mapped_column(String(50))
     customer_name: Mapped[str | None] = mapped_column(String(255))
+    customer_scope: Mapped[str | None] = mapped_column(String(20))
+    customer_scope_source: Mapped[str | None] = mapped_column(String(30))
+    charge_status: Mapped[str | None] = mapped_column(String(30))
+    charge_status_source: Mapped[str | None] = mapped_column(String(30))
+    service_policy_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey(
+            "customer_service_policies.id",
+            name="fk_repair_tickets_service_policy",
+            ondelete="SET NULL",
+        ),
+    )
+    policy_resolution_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
+    policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     contact_person: Mapped[str | None] = mapped_column(String(100))
     contact_phone: Mapped[str | None] = mapped_column(String(100))
     contact_email: Mapped[str | None] = mapped_column(String(255))
@@ -81,7 +98,9 @@ class RepairTicketItem(TimestampMixin, Base):
         UniqueConstraint("ticket_id", "line_no", name="uk_ticket_items_line"),
         Index("idx_ticket_items_sn", "sn"),
         Index("idx_ticket_items_material_code", "material_code"),
+        Index("idx_ticket_items_board_code", "board_code"),
         Index("idx_ticket_items_validation", "validation_status"),
+        Index("idx_ticket_items_return_route", "return_route_status", "return_location"),
     )
 
     id: Mapped[int] = pk_column()
@@ -89,6 +108,27 @@ class RepairTicketItem(TimestampMixin, Base):
     line_no: Mapped[int] = mapped_column(nullable=False)
     material_code: Mapped[str | None] = mapped_column(String(100))
     material_name: Mapped[str | None] = mapped_column(String(255))
+    board_code: Mapped[str | None] = mapped_column(String(100))
+    board_name: Mapped[str | None] = mapped_column(String(255))
+    matched_board_card_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey(
+            "board_cards.id",
+            name="fk_ticket_items_board_card",
+            ondelete="SET NULL",
+        ),
+    )
+    return_location: Mapped[str | None] = mapped_column(String(20))
+    return_address: Mapped[str | None] = mapped_column(String(500))
+    return_contact: Mapped[str | None] = mapped_column(String(100))
+    return_phone: Mapped[str | None] = mapped_column(String(100))
+    return_postal_code: Mapped[str | None] = mapped_column(String(20))
+    return_route_source: Mapped[str | None] = mapped_column(String(30))
+    return_route_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
+    return_route_message: Mapped[str | None] = mapped_column(Text)
+    return_route_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     sn: Mapped[str | None] = mapped_column(String(100))
     sn_asset_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("sn_assets.id", name="fk_ticket_items_sn_asset"))
     quantity: Mapped[int] = mapped_column(nullable=False, server_default="1")

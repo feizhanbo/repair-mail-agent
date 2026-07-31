@@ -33,6 +33,9 @@ field_confidences, evidence, confidence_reasons, manual_review_direction, origin
 如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
 不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
 联系电话或手机号可以抽取为 contact_phone，但它是选填字段，缺失时不得放入 missing_fields。
+工单明细只从邮件提取 sn、board_code（板卡型号）、board_name（板卡名称）和故障信息。
+material_code/material_name 是 SAP 物料主数据，只能由 SN 反查，禁止根据邮件内容猜测或写入。
+mailing_address/contact_person/contact_phone 是客户方邮寄信息；维修寄回地址由系统规则计算，禁止从邮件字段混用。
 """.strip()
 
 AI_EXTRACT_SYSTEM_PROMPT += """
@@ -724,6 +727,9 @@ def _structured_attachment_business_data(
         "phone": "contact_phone",
         "request_date": "request_date",
         "mailing_address": "mailing_address",
+        # The legacy repair form labels the customer's own "Mailing Add" as
+        # return_address. This alias is accepted only for the deterministic
+        # attachment parser; system-calculated repair routes never enter here.
         "return_address": "mailing_address",
         "problem_description": "problem_description",
         "failure_description": "problem_description",
@@ -752,9 +758,11 @@ def _structured_attachment_business_data(
             item = {
                 "line_no": normalized_item.get("line_no", index),
                 "sn": normalized_item.get("sn"),
-                "material_code": normalized_item.get("material_code"),
-                "material_name": normalized_item.get("material_name"),
-                "board_model": normalized_item.get("board_model"),
+                "board_code": (
+                    normalized_item.get("board_code")
+                    or normalized_item.get("board_model")
+                ),
+                "board_name": normalized_item.get("board_name"),
                 "failure_description": (
                     normalized_item.get("failure_description")
                     or normalized_item.get("failure_information")

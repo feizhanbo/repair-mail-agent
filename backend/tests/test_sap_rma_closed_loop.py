@@ -93,7 +93,14 @@ def _batch_fixture(rma_status: str = "waiting_sap"):
             remote_call_id="call-1",
             sn="SN0001",
             submitted_at=now,
-            policy_snapshot={"repair_price": "1200", "currency": "CNY"},
+            policy_snapshot={
+                "repair_price": "1200",
+                "currency": "CNY",
+                "return_route_status": "resolved",
+                "shipping_address": "Beijing",
+                "shipping_contact": "Alice",
+                "shipping_phone": "010-1",
+            },
         ),
         ExportSap(
             id=32,
@@ -107,7 +114,14 @@ def _batch_fixture(rma_status: str = "waiting_sap"):
             remote_call_id="call-2",
             sn="SN0002",
             submitted_at=now,
-            policy_snapshot={"repair_price": "1200", "currency": "CNY"},
+            policy_snapshot={
+                "repair_price": "1200",
+                "currency": "CNY",
+                "return_route_status": "resolved",
+                "shipping_address": "Beijing",
+                "shipping_contact": "Alice",
+                "shipping_phone": "010-1",
+            },
         ),
     ]
     return export, ticket, lines
@@ -263,30 +277,6 @@ def test_rma_already_used_by_another_ticket_requires_manual_review(
     enqueue.assert_not_awaited()
 
 
-def test_unconfirmed_tianjin_address_blocks_export(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sap_rma.settings, "RMA_DEFAULT_TIANJIN_ADDRESS", "")
-    monkeypatch.setattr(sap_rma.settings, "RMA_DEFAULT_TIANJIN_CONTACT", "")
-    monkeypatch.setattr(sap_rma.settings, "RMA_DEFAULT_TIANJIN_PHONE", "")
-
-    with pytest.raises(ValueError, match="TIANJIN_SHIPPING_ADDRESS_NOT_CONFIGURED"):
-        sap_rma._address_details("tianjin")
-
-
-def test_material_route_uses_board_list_for_domestic_and_beijing_for_overseas() -> None:
-    assert sap_rma._shipping_route(
-        language_code="zh-CN",
-        board_material_matched=True,
-    ) == "beijing"
-    assert sap_rma._shipping_route(
-        language_code="zh-CN",
-        board_material_matched=False,
-    ) == "tianjin"
-    assert sap_rma._shipping_route(
-        language_code="en-US",
-        board_material_matched=False,
-    ) == "beijing"
-
-
 class _PolicySession:
     def __init__(self, candidates, default_policy=None):
         self.candidates = candidates
@@ -304,7 +294,10 @@ def _policy(code: str, kind: str, price: str) -> CustomerServicePolicy:
         id=abs(hash(code)) % 10_000 + 1,
         policy_code=code,
         customer_code="CM-TEST",
+        customer_name="Test Customer",
         policy_type=kind,
+        charge_status=customer_policies.charge_status_for_policy_type(kind),
+        customer_scope="domestic",
         repair_price=Decimal(price),
         currency="CNY",
         tax_rate=Decimal("13"),
@@ -313,7 +306,7 @@ def _policy(code: str, kind: str, price: str) -> CustomerServicePolicy:
     )
 
 
-def test_default_out_of_warranty_policy_is_1200_cny() -> None:
+def test_missing_customer_specific_policy_requires_manual_resolution() -> None:
     default_policy = _policy("default-oow", "default", "1200")
     default_policy.customer_code = "*"
     result = asyncio.run(
@@ -325,10 +318,8 @@ def test_default_out_of_warranty_policy_is_1200_cny() -> None:
         )
     )
 
-    assert result["status"] == "resolved"
-    assert Decimal(result["policy"]["repair_price"]) == Decimal("1200.00")
-    assert result["policy"]["currency"] == "CNY"
-    assert result["policy"]["tax_rate"] == "13"
+    assert result["status"] == "missing"
+    assert result["error_code"] == "CUSTOMER_POLICY_MISSING"
 
 
 def test_free_and_special_price_overlap_requires_manual_review() -> None:
@@ -347,7 +338,7 @@ def test_free_and_special_price_overlap_requires_manual_review() -> None:
     )
 
     assert result["status"] == "conflict"
-    assert result["error_code"] == "CUSTOMER_POLICY_FREE_PRICE_CONFLICT"
+    assert result["error_code"] == "CUSTOMER_POLICY_CONFLICT"
 
 
 def test_sqlserver_table_mode_uses_sap_generated_call_id_without_client_unique_column(

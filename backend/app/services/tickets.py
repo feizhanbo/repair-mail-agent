@@ -43,6 +43,13 @@ TICKET_FIELDS = (
     "thread_id",
     "customer_code",
     "customer_name",
+    "customer_scope",
+    "customer_scope_source",
+    "charge_status",
+    "charge_status_source",
+    "service_policy_id",
+    "policy_resolution_status",
+    "policy_snapshot",
     "contact_person",
     "contact_phone",
     "contact_email",
@@ -104,6 +111,18 @@ ITEM_FIELDS = (
     "line_no",
     "material_code",
     "material_name",
+    "board_code",
+    "board_name",
+    "matched_board_card_id",
+    "return_location",
+    "return_address",
+    "return_contact",
+    "return_phone",
+    "return_postal_code",
+    "return_route_source",
+    "return_route_status",
+    "return_route_message",
+    "return_route_snapshot",
     "sn",
     "sn_asset_id",
     "quantity",
@@ -123,6 +142,8 @@ ITEM_WRITE_FIELDS = {
     "line_no",
     "material_code",
     "material_name",
+    "board_code",
+    "board_name",
     "sn",
     "quantity",
     "failure_description",
@@ -1304,8 +1325,8 @@ async def _create_items_from_parse_result(
         return (
             not item.manual_locked
             and not (item.sn and str(item.sn).strip())
-            and not (item.material_code and str(item.material_code).strip())
-            and not (item.material_name and str(item.material_name).strip())
+            and not (item.board_code and str(item.board_code).strip())
+            and not (item.board_name and str(item.board_name).strip())
         )
 
     for item_index, payload in enumerate(item_payloads):
@@ -1326,8 +1347,12 @@ async def _create_items_from_parse_result(
         if placeholder is not None:
             old_value = _audit_value(serialize_item(placeholder))
             placeholder.sn = sn or None
-            placeholder.material_code = payload.get("material_code") or placeholder.material_code
-            placeholder.material_name = payload.get("material_name") or placeholder.material_name
+            placeholder.board_code = (
+                payload.get("board_code")
+                or payload.get("board_model")
+                or placeholder.board_code
+            )
+            placeholder.board_name = payload.get("board_name") or placeholder.board_name
             placeholder.quantity = payload.get("quantity") or placeholder.quantity or 1
             placeholder.failure_description = payload.get("failure_description") or placeholder.failure_description or ticket.problem_description
             placeholder.failure_information = payload.get("failure_information") or placeholder.failure_information
@@ -1356,8 +1381,8 @@ async def _create_items_from_parse_result(
         item = RepairTicketItem(
             ticket_id=ticket.id,
             line_no=line_no,
-            material_code=payload.get("material_code"),
-            material_name=payload.get("material_name"),
+            board_code=payload.get("board_code") or payload.get("board_model"),
+            board_name=payload.get("board_name"),
             sn=sn or None,
             quantity=payload.get("quantity") or 1,
             failure_description=payload.get("failure_description") or ticket.problem_description,

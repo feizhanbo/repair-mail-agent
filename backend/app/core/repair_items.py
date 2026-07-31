@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Iterable
 
 
@@ -13,6 +14,14 @@ def _text(value: Any) -> str:
 
 def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def normalize_board_code(value: Any) -> str:
+    return unicodedata.normalize("NFKC", _text(value)).strip().upper()
+
+
+def normalize_board_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", _text(value))).strip()
 
 
 def _serial_number_is_sn(value: Any) -> bool:
@@ -51,6 +60,22 @@ def normalize_repair_item(payload: dict[str, Any], *, default_line_no: int | Non
         normalized["sn"] = sn
     else:
         normalized.pop("sn", None)
+
+    if not _text(normalized.get("board_code")):
+        board_code = next(
+            (
+                _text(normalized.get(alias))
+                for alias in ("board_model", "board_type")
+                if _text(normalized.get(alias))
+            ),
+            "",
+        )
+        if board_code:
+            normalized["board_code"] = board_code
+    if _text(normalized.get("board_code")):
+        normalized["board_code"] = normalize_board_code(normalized["board_code"])
+    if _text(normalized.get("board_name")):
+        normalized["board_name"] = normalize_board_name(normalized["board_name"])
 
     if not _text(normalized.get("failure_description")):
         failure_description = next(

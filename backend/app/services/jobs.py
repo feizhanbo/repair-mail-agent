@@ -261,9 +261,16 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
                 user_id=user_id, job=job,
             )
         if kind == "board_cards":
-            items, file_hash = await asyncio.to_thread(master_data.parse_board_cards_xlsx, content)
+            items, file_hash = await asyncio.to_thread(
+                master_data.parse_board_cards_file,
+                content,
+                filename=metadata.get("filename"),
+            )
             return await master_data.import_board_cards(
-                session, items=items, source_file_name=None, source_file_hash=file_hash,
+                session,
+                items=items,
+                source_file_name=metadata.get("filename"),
+                source_file_hash=file_hash,
                 user_id=user_id, job=job,
             )
         raise ValueError("MASTER_DATA_KIND_NOT_SUPPORTED")

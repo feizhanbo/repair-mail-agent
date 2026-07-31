@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -196,6 +197,16 @@ async def test_sn_failure_stops_export_validation_immediately(monkeypatch) -> No
         raise AssertionError("remaining safety checks must not run after SN failure")
 
     monkeypatch.setattr(ticket_safety, "validate_ticket_sn_core", fake_sn)
+    monkeypatch.setattr(
+        ticket_safety,
+        "resolve_and_snapshot_ticket_policy",
+        AsyncMock(return_value={"status": "resolved"}),
+    )
+    monkeypatch.setattr(
+        ticket_safety,
+        "resolve_ticket_return_routes",
+        AsyncMock(return_value={"status": "resolved", "items": []}),
+    )
     monkeypatch.setattr(ticket_safety, "build_safety_report", forbidden_safety)
 
     result = await ticket_safety.validate_and_mark_ready_for_export(Session(), ticket_id=1, user_id=7)
@@ -240,6 +251,16 @@ async def test_manual_ready_resolution_clears_historical_parse_markers(monkeypat
     monkeypatch.setattr(ticket_safety, "build_safety_report", fake_safety)
     monkeypatch.setattr(ticket_safety, "transition_ticket", fake_transition)
     monkeypatch.setattr(ticket_safety, "relay_configured", lambda: False)
+    monkeypatch.setattr(
+        ticket_safety,
+        "resolve_and_snapshot_ticket_policy",
+        AsyncMock(return_value={"status": "resolved"}),
+    )
+    monkeypatch.setattr(
+        ticket_safety,
+        "resolve_ticket_return_routes",
+        AsyncMock(return_value={"status": "resolved", "items": []}),
+    )
 
     result = await ticket_safety.validate_and_mark_ready_for_export(
         Session(),

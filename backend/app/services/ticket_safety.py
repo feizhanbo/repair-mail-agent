@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import (
-    BoardCard,
     Email,
     RepairTicket,
     RepairTicketItem,
@@ -23,6 +22,10 @@ from app.models import (
     TicketRelayExport,
 )
 from app.services.business_rules import required_missing_for_ticket
+from app.services.business_resolution import (
+    resolve_and_snapshot_ticket_policy,
+    resolve_ticket_return_routes,
+)
 from app.services.common import utcnow
 from app.services.external_relay import relay_configured, validate_sn_against_relay
 from app.services.jobs import enqueue_job
@@ -44,6 +47,10 @@ _FIELD_LIMITS = {
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _normalized_customer_name(value: Any) -> str:
+    return re.sub(r"[\s（）()·・,，.。]+", "", _clean_text(value)).casefold()
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
@@ -132,10 +139,14 @@ async def build_sn_validation_report(
         customer_codes = {asset.customer_code for asset in assets if asset.customer_code}
         customer_names = {asset.customer_name for asset in assets if asset.customer_name}
         assets_by_sn = {_clean_text(asset.sn).upper(): asset for asset in assets if _clean_text(asset.sn)}
-        if not ticket.customer_code and len(customer_codes) == 1:
+        normalized_names = {_normalized_customer_name(name) for name in customer_names}
+        if (
+            not ticket.customer_code
+            and ticket.customer_name
+            and len(customer_codes) == 1
+            and _normalized_customer_name(ticket.customer_name) in normalized_names
+        ):
             ticket.customer_code = next(iter(customer_codes))
-        if not ticket.customer_name and len(customer_names) == 1:
-            ticket.customer_name = next(iter(customer_names))
         # SN validation hashes the post-enrichment state. Otherwise filling
         # material data during the same validation immediately makes the
         # freshly stored hash stale when the full safety report recomputes it.
@@ -190,7 +201,6 @@ async def build_sn_validation_report(
             "status": "failed",
         }
         asset: SnAsset | None = None
-        board_card: BoardCard | None = None
         if not normalized_sn:
             errors[f"{prefix}.sn"] = "required"
         elif not _SN_PATTERN.fullmatch(normalized_sn):
@@ -202,7 +212,6 @@ async def build_sn_validation_report(
             if asset is None:
                 errors[f"{prefix}.sn"] = "sn_not_found"
             else:
-                board_card = await session.scalar(select(BoardCard).where(BoardCard.material_code == asset.material_code))
                 check.update(
                     {
                         "asset_id": asset.id,
@@ -270,7 +279,7 @@ async def build_sn_validation_report(
                     check_valid=asset.asset_status == "valid" if asset else False,
                     check_customer_match=(not ticket.customer_code or ticket.customer_code == asset.customer_code) if asset else False,
                     check_material_match=(not item.material_code or item.material_code == asset.material_code) if asset else False,
-                    need_ship_to_beijing=board_card.need_ship_to_beijing if board_card else None,
+                    need_ship_to_beijing=None,
                     result_status="pass" if passed else "failed",
                     result_message=item.validation_message,
                     checked_by="manual" if user_id else "system",
@@ -404,6 +413,15 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
     source_email = await _customer_source_email(session, ticket)
     for name in required_missing_for_ticket(ticket, items):
         errors[name] = "required"
+    for name in ("mailing_address", "contact_person", "contact_phone"):
+        if not _clean_text(getattr(ticket, name)):
+            errors[name] = "required_for_sap_export"
+    if ticket.policy_resolution_status != "resolved":
+        errors["customer_policy"] = f"status_{ticket.policy_resolution_status}"
+    if ticket.customer_scope not in {"domestic", "overseas"}:
+        errors["customer_scope"] = "unresolved"
+    if ticket.charge_status not in {"free", "annual_contract", "chargeable"}:
+        errors["charge_status"] = "unresolved_or_manual_confirmation"
     for name, limit in _FIELD_LIMITS.items():
         value = _clean_text(getattr(ticket, name))
         if len(value) > limit:
@@ -444,6 +462,16 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
                 "line_no": item.line_no,
                 "material_code": item.material_code,
                 "material_name": item.material_name,
+                "board_code": item.board_code,
+                "board_name": item.board_name,
+                "return_location": item.return_location,
+                "return_address": item.return_address,
+                "return_contact": item.return_contact,
+                "return_phone": item.return_phone,
+                "return_postal_code": item.return_postal_code,
+                "return_route_source": item.return_route_source,
+                "return_route_status": item.return_route_status,
+                "return_route_snapshot": item.return_route_snapshot,
                 "sn": _clean_text(item.sn).upper(),
                 "quantity": item.quantity,
                 "failure_description": item.failure_description,
@@ -483,6 +511,10 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
         "sn_validation_snapshot": ticket.sn_validation_snapshot,
         "customer_code": ticket.customer_code,
         "customer_name": ticket.customer_name,
+        "customer_scope": ticket.customer_scope,
+        "charge_status": ticket.charge_status,
+        "policy_resolution_status": ticket.policy_resolution_status,
+        "policy_snapshot": ticket.policy_snapshot,
         "contact_person": ticket.contact_person,
         "contact_phone": ticket.contact_phone,
         "contact_email": contact_email,
@@ -518,7 +550,15 @@ async def validate_and_mark_ready_for_export(
     if sn_result["status"] != "passed":
         return {"ticket_id": ticket.id, "status": "sn_validation_failed", "sn_result": sn_result, "jobs": []}
 
+    policy_result = await resolve_and_snapshot_ticket_policy(
+        session,
+        ticket=ticket,
+        user_id=user_id,
+    )
+    route_result = await resolve_ticket_return_routes(session, ticket=ticket)
     report = await build_safety_report(session, ticket_id=ticket.id)
+    report["policy_result"] = policy_result
+    report["return_route_result"] = route_result
     if not report["passed"]:
         ticket.relay_export_status = "not_required"
         ticket.rma_status = "manual_review" if report["snapshot"].get("rma_required") else "not_required"

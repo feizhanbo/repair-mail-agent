@@ -4,7 +4,7 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "h5c9d0e1f2a3"
+EXPECTED_REVISION = "j7e1f2a3b4c5"
 EXPECTED_BUSINESS_TABLE_COUNT = 35
 
 EXPECTED = {
@@ -20,6 +20,7 @@ EXPECTED = {
             "shipping_fee",
             "repair_fee",
             "tax_rate",
+            "charge_status",
         },
         "unique": {
             "uk_export_sap_submission_key",
@@ -36,6 +37,8 @@ EXPECTED = {
         "columns": {
             "customer_code",
             "policy_type",
+            "charge_status",
+            "customer_scope",
             "effective_from",
             "effective_until",
             "repair_price",
@@ -49,6 +52,53 @@ EXPECTED = {
         },
         "unique": {"uk_customer_service_policies_code"},
         "foreign_keys": {"fk_customer_service_policies_imported_by"},
+    },
+    "board_cards": {
+        "columns": {
+            "board_code",
+            "board_name",
+            "return_location",
+            "route_type",
+            "customer_scope",
+            "material_code",
+            "need_ship_to_beijing",
+        },
+        "unique": set(),
+        "foreign_keys": {"fk_board_cards_imported_by"},
+    },
+    "repair_tickets": {
+        "columns": {
+            "customer_scope",
+            "customer_scope_source",
+            "charge_status",
+            "charge_status_source",
+            "service_policy_id",
+            "policy_resolution_status",
+            "policy_snapshot",
+        },
+        "unique": {"uk_repair_tickets_no"},
+        "foreign_keys": {
+            "fk_repair_tickets_service_policy",
+        },
+    },
+    "repair_ticket_items": {
+        "columns": {
+            "board_code",
+            "board_name",
+            "matched_board_card_id",
+            "return_location",
+            "return_address",
+            "return_contact",
+            "return_phone",
+            "return_route_status",
+            "return_route_snapshot",
+        },
+        "unique": {"uk_ticket_items_line"},
+        "foreign_keys": {
+            "fk_ticket_items_ticket",
+            "fk_ticket_items_sn_asset",
+            "fk_ticket_items_board_card",
+        },
     },
     "ticket_rmas": {
         "columns": {

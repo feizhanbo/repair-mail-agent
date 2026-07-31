@@ -88,13 +88,7 @@ def test_return_address_blocks_match_confirmed_business_text() -> None:
         "天津市滨海新区生态城川博道华峰测控1201号\n"
         "郭洋（收）  电话：022-67253518-8108"
     )
-    assert replies._return_address_block(language="en-US") == (
-        "Beijing Huafeng Test & Control Technology Co., Ltd.\n"
-        "Attention: Li Lian Rong\n"
-        "Address: Building 5, IC PARK, No. 9 Fenghao East Road, "
-        "Haidian District (100094), Beijing\n"
-        "Phone: +86-15811322137"
-    )
+    assert replies._return_address_block(language="en-US") == ""
 
 
 def test_overseas_out_of_warranty_and_special_rules() -> None:

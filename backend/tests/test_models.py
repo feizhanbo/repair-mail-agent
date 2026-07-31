@@ -91,6 +91,7 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "material_code",
         "customer_name",
         "material_name",
+        "charge_status",
         "contact_person",
         "contact_phone",
         "email_subject",
@@ -109,3 +110,33 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "remote_call_id",
         "rma_no",
     } <= set(export_columns.keys())
+
+
+def test_board_policy_and_ticket_route_columns_exist() -> None:
+    board_columns = Base.metadata.tables["board_cards"].columns
+    assert {
+        "board_code",
+        "board_name",
+        "return_location",
+        "route_type",
+        "customer_scope",
+    } <= set(board_columns.keys())
+    policy_columns = Base.metadata.tables["customer_service_policies"].columns
+    assert {"charge_status", "customer_scope"} <= set(policy_columns.keys())
+    ticket_columns = Base.metadata.tables["repair_tickets"].columns
+    assert {
+        "customer_scope",
+        "charge_status",
+        "policy_resolution_status",
+        "policy_snapshot",
+    } <= set(ticket_columns.keys())
+    item_columns = Base.metadata.tables["repair_ticket_items"].columns
+    assert {
+        "board_code",
+        "board_name",
+        "matched_board_card_id",
+        "return_location",
+        "return_address",
+        "return_route_status",
+        "return_route_snapshot",
+    } <= set(item_columns.keys())

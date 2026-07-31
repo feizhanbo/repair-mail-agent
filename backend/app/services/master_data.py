@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BoardCard, JobRunLog, SnAsset
+from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.schemas.business import BoardCardImportItem, SnAssetImportItem
 from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
@@ -48,6 +49,11 @@ SN_ASSET_FIELDS = (
 
 BOARD_CARD_FIELDS = (
     "id",
+    "board_code",
+    "board_name",
+    "return_location",
+    "route_type",
+    "customer_scope",
     "material_code",
     "material_name",
     "need_ship_to_beijing",
@@ -183,11 +189,20 @@ async def list_board_cards(
     page: int = 1,
     page_size: int = 20,
     keyword: str | None = None,
-    material_code: str | None = None,
-    material_name: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    customer_scope: str | None = None,
+    return_location: str | None = None,
     status: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    statement = _board_card_statement(keyword=keyword, material_code=material_code, material_name=material_name, status=status)
+    statement = _board_card_statement(
+        keyword=keyword,
+        board_code=board_code,
+        board_name=board_name,
+        customer_scope=customer_scope,
+        return_location=return_location,
+        status=status,
+    )
     statement = statement.order_by(BoardCard.updated_at.desc(), BoardCard.id.desc())
     rows, total = await paginate_scalars(session, statement, page, page_size)
     return [model_to_dict(row, BOARD_CARD_FIELDS) for row in rows], total
@@ -196,20 +211,28 @@ async def list_board_cards(
 def _board_card_statement(
     *,
     keyword: str | None = None,
-    material_code: str | None = None,
-    material_name: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    customer_scope: str | None = None,
+    return_location: str | None = None,
     status: str | None = None,
 ):
     statement = select(BoardCard)
     if status:
         statement = statement.where(BoardCard.status == status)
-    if material_code:
-        statement = statement.where(BoardCard.material_code.like(f"%{material_code}%"))
-    if material_name:
-        statement = statement.where(BoardCard.material_name.like(f"%{material_name}%"))
+    if board_code:
+        statement = statement.where(BoardCard.board_code.like(f"%{board_code}%"))
+    if board_name:
+        statement = statement.where(BoardCard.board_name.like(f"%{board_name}%"))
+    if customer_scope:
+        statement = statement.where(BoardCard.customer_scope == customer_scope)
+    if return_location:
+        statement = statement.where(BoardCard.return_location == return_location)
     if keyword:
         like = f"%{keyword}%"
-        statement = statement.where(or_(BoardCard.material_code.like(like), BoardCard.material_name.like(like)))
+        statement = statement.where(
+            or_(BoardCard.board_code.like(like), BoardCard.board_name.like(like))
+        )
     return statement
 
 
@@ -229,13 +252,95 @@ async def import_board_cards(
         await session.flush()
     created = 0
     updated = 0
+    skipped = 0
+    normalized_items: list[dict[str, Any]] = []
+    active_routes: dict[str, set[str]] = {}
     for item in items:
         data = item.model_dump()
-        material_code = data["material_code"].strip()
-        row = await session.scalar(select(BoardCard).where(BoardCard.material_code == material_code))
+        board_code = normalize_board_code(
+            data.get("board_code") or data.get("material_code")
+        )
+        board_name = normalize_board_name(
+            data.get("board_name") or data.get("material_name")
+        ) or None
+        if not board_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="BOARD_CODE_REQUIRED",
+            )
+        return_location = data.get("return_location")
+        if return_location is None:
+            return_location = "beijing" if data.get("need_ship_to_beijing") else "tianjin"
+        route_type = str(data.get("route_type") or "board_rule")
+        customer_scope = str(data.get("customer_scope") or "domestic")
+        normalized = {
+            **data,
+            "board_code": board_code,
+            "board_name": board_name,
+            "return_location": return_location,
+            "route_type": route_type,
+            "customer_scope": customer_scope,
+            "material_code": board_code,
+            "material_name": board_name,
+            "need_ship_to_beijing": return_location == "beijing",
+        }
+        normalized_items.append(normalized)
+        if (
+            normalized.get("status", "active") == "active"
+            and customer_scope == "domestic"
+            and route_type == "board_rule"
+        ):
+            active_routes.setdefault(board_code, set()).add(return_location)
+    conflicts = sorted(code for code, locations in active_routes.items() if len(locations) > 1)
+    if conflicts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "BOARD_ROUTE_CONFLICT", "board_codes": conflicts},
+        )
+
+    seen: set[tuple[str, str | None, str, str]] = set()
+    for data in normalized_items:
+        business_key = (
+            data["board_code"],
+            data["board_name"],
+            data["customer_scope"],
+            data["route_type"],
+        )
+        if business_key in seen:
+            skipped += 1
+            continue
+        seen.add(business_key)
+        if (
+            data["customer_scope"] == "overseas"
+            and data["route_type"] == "scope_default"
+            and data.get("status", "active") == "active"
+        ):
+            duplicate_default = await session.scalar(
+                select(BoardCard).where(
+                    BoardCard.customer_scope == "overseas",
+                    BoardCard.route_type == "scope_default",
+                    BoardCard.status == "active",
+                    or_(
+                        BoardCard.board_code != data["board_code"],
+                        BoardCard.board_name != data["board_name"],
+                    ),
+                )
+            )
+            if duplicate_default is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="OVERSEAS_DEFAULT_ROUTE_ALREADY_EXISTS",
+                )
+        row = await session.scalar(
+            select(BoardCard).where(
+                BoardCard.board_code == data["board_code"],
+                BoardCard.board_name == data["board_name"],
+                BoardCard.customer_scope == data["customer_scope"],
+                BoardCard.route_type == data["route_type"],
+            )
+        )
         payload = {
             **data,
-            "material_code": material_code,
             "source_file_name": source_file_name,
             "source_file_hash": source_file_hash,
             "imported_by_user_id": user_id,
@@ -252,7 +357,12 @@ async def import_board_cards(
         job.status = "success"
         job.finished_at = utcnow()
     job.success_count = created + updated
-    job.metadata_json = {"created": created, "updated": updated, "source_file_hash": source_file_hash}
+    job.metadata_json = {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "source_file_hash": source_file_hash,
+    }
     await log_operation(
         session,
         user_id=user_id,
@@ -261,7 +371,13 @@ async def import_board_cards(
         target_id=None,
         after_data=job.metadata_json,
     )
-    return {"job_run_id": job.id, "created": created, "updated": updated, "processed": len(items)}
+    return {
+        "job_run_id": job.id,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "processed": len(items),
+    }
 
 
 def _date_or_none(value: str | None) -> date | None:
@@ -612,9 +728,24 @@ def parse_board_cards_xlsx(content: bytes) -> tuple[list[BoardCardImportItem], s
         try:
             items.append(
                 BoardCardImportItem(
-                    material_code=_string_value(row.get("material_code")).strip(),
+                    board_code=_string_value(
+                        row.get("board_code") or row.get("material_code")
+                    ).strip(),
+                    board_name=_string_value(
+                        row.get("board_name") or row.get("material_name")
+                    ).strip() or None,
+                    return_location=_string_value(row.get("return_location")).strip() or None,
+                    route_type=_string_value(row.get("route_type") or "board_rule").strip(),
+                    customer_scope=_string_value(
+                        row.get("customer_scope") or "domestic"
+                    ).strip(),
+                    material_code=_string_value(row.get("material_code")).strip() or None,
                     material_name=_string_value(row.get("material_name")).strip() or None,
-                    need_ship_to_beijing=_bool_value(_string_value(row.get("need_ship_to_beijing"))),
+                    need_ship_to_beijing=(
+                        _bool_value(_string_value(row.get("need_ship_to_beijing")))
+                        if row.get("need_ship_to_beijing") is not None
+                        else None
+                    ),
                     shipping_address=_string_value(row.get("shipping_address")).strip() or None,
                     shipping_contact=_string_value(row.get("shipping_contact")).strip() or None,
                     shipping_phone=_string_value(row.get("shipping_phone")).strip() or None,
@@ -629,6 +760,95 @@ def parse_board_cards_xlsx(content: bytes) -> tuple[list[BoardCardImportItem], s
     if errors:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "XLSX_VALIDATION_FAILED", "errors": errors})
     return items, file_hash
+
+
+def _split_return_address(value: str) -> tuple[str | None, str | None, str | None, str | None]:
+    normalized = re.sub(r"\s+", " ", value or "").strip()
+    if not normalized:
+        return None, None, None, None
+    phone_match = re.search(r"(?:010|022)[-\d]+(?:-\d+)?", normalized)
+    postal_match = re.search(r"邮编\s*[:：]?\s*(\d{6})", normalized)
+    contact_match = re.search(
+        r"([\u4e00-\u9fff]{2,10})(?:（收）|\(收\))?\s*(?:电话|TEL)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    contact = contact_match.group(1) if contact_match else None
+    address = normalized
+    cut_positions = [
+        match.start()
+        for match in (contact_match, phone_match, postal_match)
+        if match is not None
+    ]
+    if cut_positions:
+        address = normalized[: min(cut_positions)].strip(" ,，;；")
+    return (
+        address or None,
+        contact,
+        phone_match.group(0) if phone_match else None,
+        postal_match.group(1) if postal_match else None,
+    )
+
+
+def parse_board_cards_xls(content: bytes) -> tuple[list[BoardCardImportItem], str]:
+    try:
+        import xlrd
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="XLRD_NOT_INSTALLED",
+        ) from exc
+
+    workbook = xlrd.open_workbook(file_contents=content)
+    items: list[BoardCardImportItem] = []
+    for sheet_index, sheet in enumerate(workbook.sheets()):
+        current_raw_address = ""
+        location = "beijing" if sheet_index == 0 else "tianjin"
+        for row_index in range(2, sheet.nrows):
+            board_code = _string_value(sheet.cell_value(row_index, 0)).strip().upper()
+            board_name = _string_value(sheet.cell_value(row_index, 1)).strip() or None
+            raw_address = _string_value(sheet.cell_value(row_index, 2)).strip()
+            if raw_address:
+                current_raw_address = raw_address
+                if "北京" in raw_address:
+                    location = "beijing"
+                elif "天津" in raw_address:
+                    location = "tianjin"
+            if not board_code:
+                continue
+            address, contact, phone, postal_code = _split_return_address(
+                current_raw_address
+            )
+            items.append(
+                BoardCardImportItem(
+                    board_code=board_code,
+                    board_name=board_name,
+                    return_location=location,
+                    route_type="board_rule",
+                    customer_scope="domestic",
+                    shipping_address=address,
+                    shipping_contact=contact,
+                    shipping_phone=phone,
+                    postal_code=postal_code,
+                    status="active",
+                    source_row_no=row_index + 1,
+                    raw_data={
+                        "sheet_name": sheet.name,
+                        "raw_shipping_address": current_raw_address,
+                    },
+                )
+            )
+    return items, hashlib.sha256(content).hexdigest()
+
+
+def parse_board_cards_file(
+    content: bytes,
+    *,
+    filename: str | None,
+) -> tuple[list[BoardCardImportItem], str]:
+    if (filename or "").lower().endswith(".xls"):
+        return parse_board_cards_xls(content)
+    return parse_board_cards_xlsx(content)
 
 
 def _read_csv(content: bytes) -> tuple[list[dict[str, str]], str]:
@@ -679,9 +899,18 @@ def parse_board_cards_csv(content: bytes) -> tuple[list[BoardCardImportItem], st
         try:
             items.append(
                 BoardCardImportItem(
-                    material_code=(row.get("material_code") or "").strip(),
+                    board_code=(row.get("board_code") or row.get("material_code") or "").strip(),
+                    board_name=(row.get("board_name") or row.get("material_name") or "").strip() or None,
+                    return_location=(row.get("return_location") or "").strip() or None,
+                    route_type=(row.get("route_type") or "board_rule").strip(),
+                    customer_scope=(row.get("customer_scope") or "domestic").strip(),
+                    material_code=(row.get("material_code") or "").strip() or None,
                     material_name=(row.get("material_name") or "").strip() or None,
-                    need_ship_to_beijing=_bool_value(row.get("need_ship_to_beijing")),
+                    need_ship_to_beijing=(
+                        _bool_value(row.get("need_ship_to_beijing"))
+                        if row.get("need_ship_to_beijing") not in {None, ""}
+                        else None
+                    ),
                     shipping_address=(row.get("shipping_address") or "").strip() or None,
                     shipping_contact=(row.get("shipping_contact") or "").strip() or None,
                     shipping_phone=(row.get("shipping_phone") or "").strip() or None,
@@ -738,9 +967,11 @@ def board_cards_template_csv() -> bytes:
     return csv_bytes(
         [
             {
-                "material_code": "MAT001",
-                "material_name": "示例物料",
-                "need_ship_to_beijing": "true",
+                "board_code": "M8002",
+                "board_name": "PVI",
+                "return_location": "beijing",
+                "route_type": "board_rule",
+                "customer_scope": "domestic",
                 "shipping_address": "北京市示例地址",
                 "shipping_contact": "张三",
                 "shipping_phone": "010-00000000",
@@ -748,7 +979,11 @@ def board_cards_template_csv() -> bytes:
                 "status": "active",
             }
         ],
-        ["material_code", "material_name", "need_ship_to_beijing", "shipping_address", "shipping_contact", "shipping_phone", "postal_code", "status"],
+        [
+            "board_code", "board_name", "return_location", "route_type",
+            "customer_scope", "shipping_address", "shipping_contact",
+            "shipping_phone", "postal_code", "status",
+        ],
     )
 
 
@@ -783,9 +1018,11 @@ def board_cards_template_xlsx() -> bytes:
     return xlsx_bytes(
         [
             {
-                "material_code": "MAT001",
-                "material_name": "示例物料",
-                "need_ship_to_beijing": "true",
+                "board_code": "M8002",
+                "board_name": "PVI",
+                "return_location": "beijing",
+                "route_type": "board_rule",
+                "customer_scope": "domestic",
                 "shipping_address": "北京市示例地址",
                 "shipping_contact": "张三",
                 "shipping_phone": "010-00000000",
@@ -793,7 +1030,11 @@ def board_cards_template_xlsx() -> bytes:
                 "status": "active",
             }
         ],
-        ["material_code", "material_name", "need_ship_to_beijing", "shipping_address", "shipping_contact", "shipping_phone", "postal_code", "status"],
+        [
+            "board_code", "board_name", "return_location", "route_type",
+            "customer_scope", "shipping_address", "shipping_contact",
+            "shipping_phone", "postal_code", "status",
+        ],
     )
 
 
@@ -824,11 +1065,20 @@ async def export_board_cards(
     session: AsyncSession,
     *,
     keyword: str | None = None,
-    material_code: str | None = None,
-    material_name: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    customer_scope: str | None = None,
+    return_location: str | None = None,
     status: str | None = None,
 ) -> bytes:
-    statement = _board_card_statement(keyword=keyword, material_code=material_code, material_name=material_name, status=status).order_by(
+    statement = _board_card_statement(
+        keyword=keyword,
+        board_code=board_code,
+        board_name=board_name,
+        customer_scope=customer_scope,
+        return_location=return_location,
+        status=status,
+    ).order_by(
         BoardCard.updated_at.desc(), BoardCard.id.desc()
     )
     rows = (await session.execute(statement)).scalars().all()

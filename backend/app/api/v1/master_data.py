@@ -210,6 +210,11 @@ async def list_board_cards(
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     keyword: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    customer_scope: str | None = None,
+    return_location: str | None = None,
+    # Deprecated aliases kept for one compatibility release.
     material_code: str | None = None,
     material_name: str | None = None,
     status: str | None = None,
@@ -220,8 +225,10 @@ async def list_board_cards(
         page=page_no,
         page_size=page_size,
         keyword=keyword,
-        material_code=material_code,
-        material_name=material_name,
+        board_code=board_code or material_code,
+        board_name=board_name or material_name,
+        customer_scope=customer_scope,
+        return_location=return_location,
         status=status,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
@@ -242,6 +249,10 @@ async def export_board_cards(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
     keyword: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    customer_scope: str | None = None,
+    return_location: str | None = None,
     material_code: str | None = None,
     material_name: str | None = None,
     status: str | None = None,
@@ -250,8 +261,10 @@ async def export_board_cards(
     content = await master_data_service.export_board_cards(
         session,
         keyword=keyword,
-        material_code=material_code,
-        material_name=material_name,
+        board_code=board_code or material_code,
+        board_name=board_name or material_name,
+        customer_scope=customer_scope,
+        return_location=return_location,
         status=status,
     )
     return Response(
@@ -300,7 +313,11 @@ async def import_board_cards_file(
     file: UploadFile = File(...),
 ) -> dict:
     content = await file.read()
-    items, file_hash = await asyncio.to_thread(master_data_service.parse_board_cards_xlsx, content)
+    items, file_hash = await asyncio.to_thread(
+        master_data_service.parse_board_cards_file,
+        content,
+        filename=file.filename,
+    )
     result = await master_data_service.import_board_cards(
         session,
         items=items,
@@ -328,10 +345,14 @@ async def _queue_master_data_file(
     *,
     kind: str,
 ) -> dict:
-    if file.filename and not file.filename.lower().endswith(".xlsx"):
+    allowed_extensions = (".xlsx", ".xls") if kind == "board_cards" else (".xlsx",)
+    if file.filename and not file.filename.lower().endswith(allowed_extensions):
         from fastapi import HTTPException, status
 
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="XLSX_FILE_REQUIRED")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MASTER_DATA_FILE_TYPE_NOT_SUPPORTED",
+        )
     content = await file.read()
     if not content:
         from fastapi import HTTPException, status
@@ -359,7 +380,11 @@ async def _queue_master_data_file(
         resource_type="master_data",
         resource_id=None,
         idempotency_key=f"master_data_import:{kind}:{file_hash}",
-        metadata={"kind": kind, "user_id": current_user.id},
+        metadata={
+            "kind": kind,
+            "user_id": current_user.id,
+            "filename": file.filename,
+        },
         input_oss_object_id=input_object.id,
     )
     await session.commit()

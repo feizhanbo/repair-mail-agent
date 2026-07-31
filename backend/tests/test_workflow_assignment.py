@@ -144,6 +144,45 @@ async def test_manual_review_cannot_leave_while_another_task_is_open() -> None:
 
 
 @pytest.mark.anyio
+async def test_return_route_task_does_not_block_sap_ready_transition() -> None:
+    class RouteOnlySession:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.added = []
+
+        async def scalar(self, statement):
+            self.calls += 1
+            if self.calls == 1:
+                assert "manual_review_tasks.task_type !=" in str(statement)
+                return None
+            if self.calls == 2:
+                return SimpleNamespace(is_terminal=False)
+            return SimpleNamespace(condition_desc="validated")
+
+        def add(self, value) -> None:
+            self.added.append(value)
+
+    ticket = SimpleNamespace(
+        id=8,
+        current_status_code="manual_review",
+        version=3,
+    )
+    session = RouteOnlySession()
+
+    await workflow.transition_ticket(
+        session,
+        ticket=ticket,
+        to_status_code="ready_for_export",
+        trigger_event="manual_resolved",
+        resolving_task_id=7,
+        metadata={"safety_check_hash": "a" * 64},
+    )
+
+    assert ticket.current_status_code == "ready_for_export"
+    assert ticket.version == 4
+
+
+@pytest.mark.anyio
 async def test_rma_sent_and_closed_cannot_bypass_evidence_gates() -> None:
     unused_session = SimpleNamespace()
     ready = SimpleNamespace(

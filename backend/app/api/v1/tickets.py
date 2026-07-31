@@ -4,7 +4,7 @@ import asyncio
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from app.models import (
     ExportSap,
     ManualReviewTask,
     ParseResult,
+    RepairTicketItem,
     ReplyRecord,
     Role,
     TicketRelayExport,
@@ -23,12 +24,31 @@ from app.models import (
     User,
     UserRole,
 )
-from app.schemas.business import DeviceReceivedConfirmRequest, IdsRequest, ParseResultApplyRequest, RmaManualPolicyApprovalRequest, SapSubmitReconcileRequest, TicketExportConfirmRequest, TicketFieldPatchRequest, TicketItemsPatchRequest, TicketOwnerUpdateRequest, TicketTransitionRequest
+from app.schemas.business import (
+    DeviceReceivedConfirmRequest,
+    IdsRequest,
+    ParseResultApplyRequest,
+    RmaManualPolicyApprovalRequest,
+    SapSubmitReconcileRequest,
+    TicketExportConfirmRequest,
+    TicketFieldPatchRequest,
+    TicketItemsPatchRequest,
+    TicketOwnerUpdateRequest,
+    TicketPolicyOverrideRequest,
+    TicketReturnRouteManualRequest,
+    TicketTransitionRequest,
+)
 from app.services.audit import log_operation
 from app.services.common import utcnow
 from app.services.device_receipts import confirm_device_received
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
+from app.services.business_resolution import (
+    manually_select_item_route,
+    override_ticket_policy,
+    resolve_and_snapshot_ticket_policy,
+    resolve_ticket_return_routes,
+)
 from app.services.email_flow_trace import build_ticket_timeline
 from app.services.workflow import transition_ticket
 from app.services.ticket_safety import build_safety_report, validate_and_mark_ready_for_export
@@ -37,6 +57,17 @@ from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
 from app.services.sap_rma import poll_export_batch, reconcile_uncertain_submission
 
 router = APIRouter()
+
+
+def _ensure_policy_route_mutable(ticket: object) -> None:
+    if (
+        getattr(ticket, "rma_status", None) == "sent"
+        or getattr(ticket, "current_status_code", None) == "closed"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="TERMINAL_TICKET_POLICY_AND_ROUTE_IMMUTABLE",
+        )
 
 
 @router.get("")
@@ -251,6 +282,125 @@ async def validate_sn(
     result = await ticket_service.validate_ticket_sn(session, ticket_id=ticket_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "ticket sn validated")
+
+
+@router.post("/{ticket_id}/policy/resolve")
+async def resolve_ticket_policy(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[
+        CurrentUser, Depends(require_roles("operator", "supervisor"))
+    ],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    _ensure_policy_route_mutable(ticket)
+    result = await resolve_and_snapshot_ticket_policy(
+        session,
+        ticket=ticket,
+        user_id=current_user.id,
+    )
+    ticket.version += 1
+    await ticket_service._invalidate_export_snapshot(
+        session,
+        ticket=ticket,
+        user_id=current_user.id,
+        reason="customer policy recalculated",
+        invalidate_sn=False,
+    )
+    await session.commit()
+    return ok(result, "ticket policy resolved")
+
+
+@router.post("/{ticket_id}/policy/manual-override")
+async def manually_override_ticket_policy(
+    ticket_id: int,
+    payload: TicketPolicyOverrideRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[
+        CurrentUser, Depends(require_roles("operator", "supervisor"))
+    ],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    _ensure_policy_route_mutable(ticket)
+    result = await override_ticket_policy(
+        session,
+        ticket=ticket,
+        charge_status=payload.charge_status,
+        customer_scope=payload.customer_scope,
+        user_id=current_user.id,
+        reason=payload.reason,
+    )
+    ticket.version += 1
+    await ticket_service._invalidate_export_snapshot(
+        session,
+        ticket=ticket,
+        user_id=current_user.id,
+        reason="ticket policy manually overridden",
+        invalidate_sn=False,
+    )
+    await session.commit()
+    return ok(result, "ticket policy overridden")
+
+
+@router.post("/{ticket_id}/return-routes/resolve")
+async def resolve_return_routes(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[
+        CurrentUser, Depends(require_roles("operator", "supervisor"))
+    ],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    _ensure_policy_route_mutable(ticket)
+    result = await resolve_ticket_return_routes(session, ticket=ticket)
+    ticket.version += 1
+    await ticket_service._invalidate_export_snapshot(
+        session,
+        ticket=ticket,
+        user_id=current_user.id,
+        reason="return routes recalculated",
+        invalidate_sn=False,
+    )
+    await session.commit()
+    return ok(result, "return routes resolved")
+
+
+@router.post("/{ticket_id}/items/{item_id}/return-route/manual")
+async def manually_select_return_route(
+    ticket_id: int,
+    item_id: int,
+    payload: TicketReturnRouteManualRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[
+        CurrentUser, Depends(require_roles("operator", "supervisor"))
+    ],
+) -> dict:
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    _ensure_policy_route_mutable(ticket)
+    item = await session.get(RepairTicketItem, item_id)
+    if item is None or item.ticket_id != ticket.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="TICKET_ITEM_NOT_FOUND",
+        )
+    result = await manually_select_item_route(
+        session,
+        ticket=ticket,
+        item=item,
+        return_location=payload.return_location,
+        user_id=current_user.id,
+        reason=payload.reason,
+    )
+    ticket.version += 1
+    await ticket_service._invalidate_export_snapshot(
+        session,
+        ticket=ticket,
+        user_id=current_user.id,
+        reason="return route manually selected",
+        invalidate_sn=False,
+    )
+    await session.commit()
+    return ok(result, "return route manually selected")
 
 
 @router.post("/{ticket_id}/sap-export/retry")

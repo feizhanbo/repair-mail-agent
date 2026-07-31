@@ -48,6 +48,7 @@ import type {
   ManualTaskDetail,
   PageData,
   ParseResult,
+  ReplyRecord,
   TicketLine,
 } from '../types/api';
 import { ARCHIVE_DOWNLOAD_WARNING, attachmentTypeLabel, isEngineeringReference } from '../utils/attachments';
@@ -67,6 +68,17 @@ type ResolveForm = {
   resolution_type?: string;
   next_action: string;
   result_payload_text?: string;
+};
+
+type PolicyOverrideForm = {
+  charge_status: 'free' | 'annual_contract' | 'chargeable';
+  customer_scope: 'domestic' | 'overseas';
+  reason: string;
+};
+
+type ReturnRouteForm = {
+  return_location: 'beijing' | 'tianjin';
+  reason: string;
 };
 
 const taskStatusOptions = [
@@ -118,6 +130,8 @@ export default function ManualReviewPage() {
   const [itemOpen, setItemOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<TicketLine | null>(null);
   const [partialParse, setPartialParse] = useState<ParseResult | null>(null);
+  const [policyOverrideOpen, setPolicyOverrideOpen] = useState(false);
+  const [returnRouteItem, setReturnRouteItem] = useState<TicketLine | null>(null);
   const [filterForm] = Form.useForm<TaskFilters>();
   const queryClient = useQueryClient();
   const visibleTaskScopeOptions = taskScopeOptions;
@@ -256,6 +270,51 @@ export default function ManualReviewPage() {
     },
     onError: handleMutationError,
   });
+  const resolvePolicyMutation = useMutation({
+    mutationFn: () => api.resolveTicketPolicy(
+      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+    ),
+    onSuccess: () => {
+      message.success('客户范围与服务政策已重新解析');
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
+  });
+  const overridePolicyMutation = useMutation({
+    mutationFn: (values: PolicyOverrideForm) => api.overrideTicketPolicy(
+      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('当前工单政策已人工确认');
+      setPolicyOverrideOpen(false);
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
+  });
+  const resolveRoutesMutation = useMutation({
+    mutationFn: () => api.resolveReturnRoutes(
+      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+    ),
+    onSuccess: () => {
+      message.success('维修寄回地址已重新匹配');
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
+  });
+  const selectRouteMutation = useMutation({
+    mutationFn: (values: ReturnRouteForm) => api.selectReturnRoute(
+      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      returnRouteItem?.id as number,
+      values,
+    ),
+    onSuccess: () => {
+      message.success('维修寄回地点与地址快照已保存');
+      setReturnRouteItem(null);
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
+  });
   const applyParseMutation = useMutation({
     mutationFn: ({ id, action, selected_fields, selected_item_indices }: { id: number; action: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => api.applyParseResult(id, {
       action,
@@ -287,13 +346,19 @@ export default function ManualReviewPage() {
               onClick={(e) => { e.stopPropagation(); navigate(`/tickets?ticket_id=${record.ticket_id}`); }}>
               #{record.ticket_id}
             </Button>
+            <Tag style={{ marginLeft: 4 }}>{record.task_type}</Tag>
           </div>
           <div>
-            <Typography.Text type="secondary" ellipsis={{ tooltip: record.trigger_reason }}
-              style={{ fontSize: 12 }}>{record.trigger_reason || record.description || '-'}</Typography.Text>
+            <Typography.Text style={{ fontSize: 12 }}>
+              {record.trigger_reason || record.description || '-'}
+            </Typography.Text>
           </div>
         </div>
       ),
+    },
+    {
+      title: '任务类型', dataIndex: 'task_type', width: 120,
+      render: (v: string) => <Tag>{v}</Tag>,
     },
     {
       title: '状态', dataIndex: 'status', width: 80,
@@ -302,6 +367,10 @@ export default function ManualReviewPage() {
     {
       title: '优先级', dataIndex: 'priority', width: 70,
       render: (v: string) => <StatusTag value={v} kind="priority" />,
+    },
+    {
+      title: '负责人', dataIndex: 'assigned_user_id', width: 100,
+      render: (v: number | null) => v ? `用户#${v}` : <Typography.Text type="secondary">未分配</Typography.Text>,
     },
   ];
 
@@ -336,6 +405,9 @@ export default function ManualReviewPage() {
               </Form.Item>
               <Form.Item name="priority" noStyle>
                 <Select allowClear placeholder="优先级" options={taskPriorityOptions} />
+              </Form.Item>
+              <Form.Item name="task_type" noStyle>
+                <Input allowClear placeholder="任务类型" />
               </Form.Item>
               <Form.Item name="date_range" noStyle>
                 <DatePicker.RangePicker allowClear style={{ width: '100%' }} />
@@ -379,9 +451,15 @@ export default function ManualReviewPage() {
               onReparse={() => confirmAction('确认重新解析关联邮件？', () => reparseMutation.mutate())}
               onDraftReply={() => confirmAction('确认生成追问草稿？', () => draftReplyMutation.mutate())}
               onValidateSn={() => confirmAction('确认执行 SN 校验？', () => validateSnMutation.mutate())}
+              onResolvePolicy={() => resolvePolicyMutation.mutate()}
+              onOverridePolicy={() => setPolicyOverrideOpen(true)}
+              onResolveRoutes={() => resolveRoutesMutation.mutate()}
+              onSelectRoute={setReturnRouteItem}
               reparseLoading={reparseMutation.isPending}
               draftLoading={draftReplyMutation.isPending}
               validateLoading={validateSnMutation.isPending}
+              resolvePolicyLoading={resolvePolicyMutation.isPending}
+              resolveRoutesLoading={resolveRoutesMutation.isPending}
             />
             </SectionPanel>
           </div>
@@ -438,6 +516,70 @@ export default function ManualReviewPage() {
           }}
         />
       </Modal>
+      <Modal
+        title="人工确认当前工单政策"
+        open={policyOverrideOpen}
+        onCancel={() => setPolicyOverrideOpen(false)}
+        footer={null}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="secondary">
+          仅修改当前工单快照，不会反向修改客户政策主数据。
+        </Typography.Paragraph>
+        <Form<PolicyOverrideForm>
+          layout="vertical"
+          initialValues={{
+            charge_status: 'chargeable',
+            customer_scope: detailQuery.data?.ticket_context.ticket.customer_scope || 'domestic',
+          }}
+          onFinish={(values) => overridePolicyMutation.mutate(values)}
+        >
+          <Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'domestic', label: '国内客户' },
+              { value: 'overseas', label: '海外客户' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="收费状态" name="charge_status" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'free', label: '免费' },
+              { value: 'annual_contract', label: '包年/合同内' },
+              { value: 'chargeable', label: '收费' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="确认依据" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={overridePolicyMutation.isPending}>
+            保存当前工单政策
+          </Button>
+        </Form>
+      </Modal>
+      <Modal
+        title={`人工选择维修寄回地点${returnRouteItem ? `（明细 ${returnRouteItem.line_no}）` : ''}`}
+        open={returnRouteItem !== null}
+        onCancel={() => setReturnRouteItem(null)}
+        footer={null}
+        destroyOnClose
+      >
+        <Form<ReturnRouteForm>
+          layout="vertical"
+          onFinish={(values) => selectRouteMutation.mutate(values)}
+        >
+          <Form.Item label="维修寄回地点" name="return_location" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'beijing', label: '北京' },
+              { value: 'tianjin', label: '天津' },
+            ]} />
+          </Form.Item>
+          <Form.Item label="人工选择依据" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={selectRouteMutation.isPending}>
+            保存地点与地址快照
+          </Button>
+        </Form>
+      </Modal>
       <Modal title="完成复核任务" open={resolveOpen} onCancel={() => setResolveOpen(false)} footer={null} destroyOnClose>
         <Form<ResolveForm> layout="vertical" onFinish={(values) => confirmAction('确认完成复核任务？', () => resolveMutation.mutate(values))}>
           <Form.Item label="处理类型" name="resolution_type">
@@ -480,9 +622,15 @@ function ManualEvidencePane({
   onReparse,
   onDraftReply,
   onValidateSn,
+  onResolvePolicy,
+  onOverridePolicy,
+  onResolveRoutes,
+  onSelectRoute,
   reparseLoading,
   draftLoading,
   validateLoading,
+  resolvePolicyLoading,
+  resolveRoutesLoading,
 }: {
   detail?: ManualTaskDetail;
   loading: boolean;
@@ -495,9 +643,15 @@ function ManualEvidencePane({
   onReparse: () => void;
   onDraftReply: () => void;
   onValidateSn: () => void;
+  onResolvePolicy: () => void;
+  onOverridePolicy: () => void;
+  onResolveRoutes: () => void;
+  onSelectRoute: (item: TicketLine) => void;
   reparseLoading: boolean;
   draftLoading: boolean;
   validateLoading: boolean;
+  resolvePolicyLoading: boolean;
+  resolveRoutesLoading: boolean;
 }) {
   const attachmentDownloadMutation = useMutation({
     mutationFn: (attachmentId: number) => api.attachmentDownloadUrl(attachmentId),
@@ -646,14 +800,50 @@ function ManualEvidencePane({
                     <Table<FieldAuditLog>
                       size="small" rowKey="id" dataSource={fieldAudits} pagination={false}
                       columns={[
-                        { title: '字段', dataIndex: 'field_name', width: 140 },
+                        { title: '字段', dataIndex: 'field_name', width: 130 },
+                        { title: '明细ID', dataIndex: 'ticket_item_id', width: 70, render: (v?: number) => v || '-' },
                         { title: '旧值', dataIndex: 'old_value', ellipsis: true, render: (v?: string) => v || '-' },
                         { title: '新值', dataIndex: 'new_value', ellipsis: true, render: (v?: string) => v || '-' },
-                        { title: '来源', dataIndex: 'source_type', width: 90 },
+                        { title: '来源', dataIndex: 'source_type', width: 80 },
                         { title: '时间', dataIndex: 'created_at', width: 150, render: formatTime },
                       ]}
                     />
                   </>
+                )}
+              </div>
+            ),
+          },
+          {
+            key: 'replies',
+            label: `回复记录 (${context.reply_records?.length ?? 0})`,
+            children: (
+              <div className="drawer-stack">
+                {context.reply_records?.length ? (
+                  <Table<ReplyRecord>
+                    size="small" rowKey="id"
+                    dataSource={context.reply_records}
+                    pagination={false}
+                    columns={[
+                      { title: '类型', dataIndex: 'reply_type', width: 100 },
+                      { title: '轮次', dataIndex: 'followup_round', width: 60 },
+                      { title: '主题', dataIndex: 'subject', ellipsis: true, render: (v?: string) => v || '-' },
+                      { title: '收件人', dataIndex: 'to_addresses', ellipsis: true },
+                      { title: '审核状态', dataIndex: 'review_status', width: 100, render: (v: string) => <StatusTag value={v} kind="review" /> },
+                      { title: '发送状态', dataIndex: 'send_status', width: 100, render: (v: string) => <StatusTag value={v} /> },
+                      { title: '创建时间', dataIndex: 'created_at', width: 170, render: formatTime },
+                    ]}
+                    expandable={{
+                      expandedRowRender: (record: ReplyRecord) => (
+                        <div className="evidence-grid">
+                          <div><Typography.Text strong>草稿内容</Typography.Text><pre className="json-block">{record.draft_body || '-'}</pre></div>
+                          <div><Typography.Text strong>最终内容</Typography.Text><pre className="json-block">{record.final_body || '-'}</pre></div>
+                          <div><Typography.Text strong>错误信息</Typography.Text><pre className="json-block">{record.error_message || '-'}</pre></div>
+                        </div>
+                      ),
+                    }}
+                  />
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无回复记录" />
                 )}
               </div>
             ),
@@ -666,9 +856,13 @@ function ManualEvidencePane({
                 <Descriptions column={2} size="small" bordered>
                   <Descriptions.Item label="客户代码">{context.ticket.customer_code || '-'}</Descriptions.Item>
                   <Descriptions.Item label="客户名称">{context.ticket.customer_name || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="联系电话">{context.ticket.contact_phone || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="联系邮箱">{context.ticket.contact_email || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="寄送地址" span={2}>{context.ticket.mailing_address || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户范围">{context.ticket.customer_scope === 'overseas' ? '海外' : context.ticket.customer_scope === 'domestic' ? '国内' : '待确认'}</Descriptions.Item>
+                  <Descriptions.Item label="收费状态">{context.ticket.charge_status || '待确认'}</Descriptions.Item>
+                  <Descriptions.Item label="客户方邮寄联系人">{context.ticket.contact_person || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户方邮寄联系方式">{context.ticket.contact_phone || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="客户邮箱">{context.ticket.contact_email || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="政策解析状态">{context.ticket.policy_resolution_status || 'pending'}</Descriptions.Item>
+                  <Descriptions.Item label="客户方邮寄地址" span={2}>{context.ticket.mailing_address || '-'}</Descriptions.Item>
                 </Descriptions>
                 <Typography.Title level={5}>维修明细</Typography.Title>
                 <Table<TicketLine>
@@ -676,11 +870,25 @@ function ManualEvidencePane({
                   columns={[
                     { title: '行', dataIndex: 'line_no', width: 48 },
                     { title: 'SN', dataIndex: 'sn', width: 140, render: (v?: string) => v || '-' },
-                    { title: '物料编码', dataIndex: 'material_code', ellipsis: true, render: (v?: string) => v || '-' },
-                    { title: '物料名称', dataIndex: 'material_name', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: 'SAP 物料代码', dataIndex: 'material_code', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: 'SAP 物料名称', dataIndex: 'material_name', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '板卡型号', dataIndex: 'board_code', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '板卡名称', dataIndex: 'board_name', ellipsis: true, render: (v?: string) => v || '-' },
+                    { title: '寄回地点', dataIndex: 'return_location', width: 90, render: (v?: string) => v === 'beijing' ? '北京' : v === 'tianjin' ? '天津' : '-' },
+                    { title: '地址匹配', dataIndex: 'return_route_status', width: 100, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: '维修寄回地址', dataIndex: 'return_address', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '数量', dataIndex: 'quantity', width: 60 },
                     { title: '故障描述', dataIndex: 'failure_description', ellipsis: true, render: (v?: string) => compactText(v) },
-                    { title: '操作', width: 70, render: (_: unknown, r: TicketLine) => <Button type="link" size="small" onClick={() => onEditItem(r)}>编辑</Button> },
+                    {
+                      title: '操作',
+                      width: 150,
+                      render: (_: unknown, r: TicketLine) => (
+                        <Space size={0}>
+                          <Button type="link" size="small" onClick={() => onEditItem(r)}>编辑</Button>
+                          <Button type="link" size="small" onClick={() => onSelectRoute(r)}>选寄回地</Button>
+                        </Space>
+                      ),
+                    },
                   ]}
                 />
                 <Typography.Text type="secondary">
@@ -696,6 +904,9 @@ function ManualEvidencePane({
         <Button icon={<EditOutlined />} onClick={onEditFields}>字段修正</Button>
         <Button icon={<FileAddOutlined />} onClick={() => onEditItem()}>新增明细</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateLoading} onClick={onValidateSn}>SN 校验</Button>
+        <Button loading={resolvePolicyLoading} onClick={onResolvePolicy}>自动解析政策</Button>
+        <Button onClick={onOverridePolicy}>人工确认政策</Button>
+        <Button loading={resolveRoutesLoading} onClick={onResolveRoutes}>匹配寄回地址</Button>
         <Button icon={<SyncOutlined />} loading={reparseLoading} onClick={onReparse}>重新解析</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
         <Button type="primary" disabled={detail.task.status === 'resolved' || detail.task.status === 'closed'} onClick={onResolve}>完成任务</Button>

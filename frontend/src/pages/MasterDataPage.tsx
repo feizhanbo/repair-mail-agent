@@ -26,8 +26,10 @@ type SnFilters = {
 };
 
 type BoardFilters = {
-  material_code?: string;
-  material_name?: string;
+  board_code?: string;
+  board_name?: string;
+  customer_scope?: string;
+  return_location?: string;
   status?: string;
 };
 
@@ -113,7 +115,9 @@ export default function MasterDataPage() {
   });
 
   const uploadProps: UploadProps = {
-    accept: '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    accept: activeTab === 'board'
+      ? '.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      : '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     beforeUpload: (file) => {
       importFileMutation.mutate(file);
       return Upload.LIST_IGNORE;
@@ -139,10 +143,14 @@ export default function MasterDataPage() {
   );
   const boardColumns: ColumnsType<BoardCard> = useMemo(
     () => [
-      { title: '物料编码', dataIndex: 'material_code', width: 160 },
-      { title: '物料名称', dataIndex: 'material_name', ellipsis: true, render: (value?: string) => value || '-' },
-      { title: '寄北京', dataIndex: 'need_ship_to_beijing', width: 100, render: (value: boolean) => <StatusTag value={value ? 'pass' : 'pending'} /> },
-      { title: '寄送地址', dataIndex: 'shipping_address', ellipsis: true, render: (value?: string) => value || '-' },
+      { title: '板卡型号', dataIndex: 'board_code', width: 150 },
+      { title: '板卡名称', dataIndex: 'board_name', ellipsis: true, render: (value?: string) => value || '-' },
+      { title: '客户范围', dataIndex: 'customer_scope', width: 110, render: (value: string) => value === 'overseas' ? '海外' : '国内' },
+      { title: '规则类型', dataIndex: 'route_type', width: 120 },
+      { title: '寄回地点', dataIndex: 'return_location', width: 100, render: (value: string) => value === 'beijing' ? '北京' : '天津' },
+      { title: '维修寄回地址', dataIndex: 'shipping_address', ellipsis: true, render: (value?: string) => value || '-' },
+      { title: '维修联系人', dataIndex: 'shipping_contact', width: 120, render: (value?: string) => value || '-' },
+      { title: '维修电话', dataIndex: 'shipping_phone', width: 150, render: (value?: string) => value || '-' },
       { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <StatusTag value={value} /> },
     ],
     [],
@@ -156,6 +164,8 @@ export default function MasterDataPage() {
       tax_rate: Number(policy.tax_rate),
     } : {
       policy_type: 'special_out_of_warranty',
+      charge_status: 'chargeable',
+      customer_scope: 'domestic',
       currency: 'CNY',
       tax_rate: 13,
       shipping_fee_text: 'one-way charge/单次收费',
@@ -168,6 +178,8 @@ export default function MasterDataPage() {
     { title: '客户代码', dataIndex: 'customer_code', width: 130 },
     { title: '客户名称', dataIndex: 'customer_name', ellipsis: true, render: (v?: string) => v || '-' },
     { title: '政策类型', dataIndex: 'policy_type', width: 170 },
+    { title: '收费状态', dataIndex: 'charge_status', width: 140 },
+    { title: '客户范围', dataIndex: 'customer_scope', width: 100, render: (v?: string) => v === 'overseas' ? '海外' : v === 'domestic' ? '国内' : '待确认' },
     { title: '生效日期', dataIndex: 'effective_from', width: 120, render: (v?: string) => v || '-' },
     { title: '失效日期', dataIndex: 'effective_until', width: 120, render: (v?: string) => v || '-' },
     { title: '维修价', dataIndex: 'repair_price', width: 100 },
@@ -312,11 +324,23 @@ export default function MasterDataPage() {
                       setSelectedBoardKeys([]);
                     }}
                   >
-                    <Form.Item name="material_code">
-                      <Input allowClear placeholder="物料编码" />
+                    <Form.Item name="board_code">
+                      <Input allowClear placeholder="板卡型号" />
                     </Form.Item>
-                    <Form.Item name="material_name">
-                      <Input allowClear placeholder="物料名称" />
+                    <Form.Item name="board_name">
+                      <Input allowClear placeholder="板卡名称" />
+                    </Form.Item>
+                    <Form.Item name="customer_scope">
+                      <Select allowClear placeholder="客户范围" style={{ width: 120 }} options={[
+                        { value: 'domestic', label: '国内' },
+                        { value: 'overseas', label: '海外' },
+                      ]} />
+                    </Form.Item>
+                    <Form.Item name="return_location">
+                      <Select allowClear placeholder="寄回地点" style={{ width: 120 }} options={[
+                        { value: 'beijing', label: '北京' },
+                        { value: 'tianjin', label: '天津' },
+                      ]} />
                     </Form.Item>
                     <Form.Item name="status">
                       <Select
@@ -459,6 +483,22 @@ export default function MasterDataPage() {
               { value: 'special_out_of_warranty', label: '特殊超保价' },
             ]} />
           </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item label="收费状态" name="charge_status" rules={[{ required: true }]}>
+              <Select style={{ width: 180 }} options={[
+                { value: 'free', label: '免费' },
+                { value: 'annual_contract', label: '包年合同' },
+                { value: 'chargeable', label: '收费' },
+                { value: 'manual_confirmation', label: '人工确认' },
+              ]} />
+            </Form.Item>
+            <Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}>
+              <Select style={{ width: 140 }} options={[
+                { value: 'domestic', label: '国内' },
+                { value: 'overseas', label: '海外' },
+              ]} />
+            </Form.Item>
+          </Space>
           <Space style={{ display: 'flex' }} align="start">
             <Form.Item label="生效日期" name="effective_from"><Input type="date" /></Form.Item>
             <Form.Item label="失效日期" name="effective_until"><Input type="date" /></Form.Item>

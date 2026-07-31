@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -15,20 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import (
-    BoardCard,
     Email,
     ExportSap,
     ManualReviewTask,
     RepairTicket,
     RepairTicketItem,
-    SnAsset,
     TicketRelayExport,
     TicketRma,
     TicketRmaItem,
 )
 from app.services.common import model_to_dict, utcnow
 from app.services.business_notifications import notify_ticket_once
-from app.services.customer_policies import resolve_customer_policy
 from app.services.external_operations import (
     fail_external_operation,
     start_external_operation,
@@ -70,6 +67,7 @@ EXPORT_FIELDS = (
     "material_code",
     "customer_name",
     "material_name",
+    "charge_status",
     "contact_person",
     "contact_phone",
     "email_subject",
@@ -131,47 +129,6 @@ def _submission_key(ticket_id: int, item_id: int, ticket_version: int, payload_h
             f"repair-mail-agent:sap:{ticket_id}:{item_id}:{ticket_version}:{payload_hash}",
         )
     )
-
-
-def _is_in_warranty(asset: SnAsset | None, requested_on: date) -> bool:
-    if asset is None or asset.warranty_end_date is None:
-        return False
-    if asset.warranty_start_date and requested_on < asset.warranty_start_date:
-        return False
-    return requested_on <= asset.warranty_end_date
-
-
-def _address_details(route: str) -> tuple[str, str, str]:
-    if route == "beijing":
-        values = (
-            settings.RMA_DEFAULT_BEIJING_ADDRESS,
-            settings.RMA_DEFAULT_BEIJING_CONTACT,
-            settings.RMA_DEFAULT_BEIJING_PHONE,
-        )
-        error_code = "BEIJING_SHIPPING_ADDRESS_NOT_CONFIGURED"
-    else:
-        values = (
-            settings.RMA_DEFAULT_TIANJIN_ADDRESS,
-            settings.RMA_DEFAULT_TIANJIN_CONTACT,
-            settings.RMA_DEFAULT_TIANJIN_PHONE,
-        )
-        error_code = "TIANJIN_SHIPPING_ADDRESS_NOT_CONFIGURED"
-    if any(not value.strip() for value in values):
-        raise ValueError(error_code)
-    return values
-
-
-def _shipping_route(*, language_code: str | None, board_material_matched: bool) -> str:
-    """Resolve one material's return route.
-
-    A board card is a material category, not a separate repair object.  The
-    active BoardCard material list selects Beijing for domestic requests;
-    other domestic materials select Tianjin.  All overseas English requests
-    use the confirmed Beijing international address.
-    """
-    if language_code == "en-US":
-        return "beijing"
-    return "beijing" if board_material_matched else "tianjin"
 
 
 async def _move_to_manual(
@@ -236,65 +193,53 @@ async def ensure_export_lines(
         raise ValueError("SAP_EXPORT_ITEMS_REQUIRED")
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     requested_on = ticket.request_date or utcnow().date()
-    prepared: list[tuple[RepairTicketItem, dict[str, Any], str, str, str, str]] = []
-    routes: set[str] = set()
+    prepared: list[tuple[RepairTicketItem, dict[str, Any], str]] = []
 
     for item in items:
         sn = (item.sn or "").strip().upper()
         material_code = (item.material_code or "").strip()
-        if not sn or not ticket.customer_code or not material_code:
+        if (
+            not sn
+            or not ticket.customer_code
+            or not material_code
+            or not item.material_name
+            or not ticket.mailing_address
+            or not ticket.contact_person
+            or not ticket.contact_phone
+            or ticket.charge_status not in {"free", "annual_contract", "chargeable"}
+            or ticket.policy_resolution_status != "resolved"
+        ):
             raise ValueError("SAP_EXPORT_REQUIRED_FIELDS_MISSING")
-        board = await session.scalar(
-            select(BoardCard).where(
-                BoardCard.material_code == material_code,
-                BoardCard.status == "active",
-            )
-        )
-        route = _shipping_route(
-            language_code=ticket.language_code,
-            board_material_matched=board is not None,
-        )
-        routes.add(route)
-        asset = await session.get(SnAsset, item.sn_asset_id) if item.sn_asset_id else None
-        policy_result = await resolve_customer_policy(
-            session,
-            customer_code=ticket.customer_code,
-            requested_on=requested_on,
-            in_warranty=_is_in_warranty(asset, requested_on),
-        )
-        if policy_result["status"] != "resolved":
-            raise ValueError(str(policy_result.get("error_code") or "CUSTOMER_POLICY_UNRESOLVED"))
-        policy = dict(policy_result["policy"])
-        address, shipping_contact, shipping_phone = _address_details(route)
-        policy["shipping_route"] = route
-        policy["shipping_address"] = address
-        if route == "beijing":
-            policy["shipping_company"] = settings.RMA_DEFAULT_BEIJING_COMPANY
-            policy["shipping_postal_code"] = settings.RMA_DEFAULT_BEIJING_POSTAL_CODE
-        else:
-            policy["shipping_company"] = settings.RMA_DEFAULT_TIANJIN_COMPANY
-            policy["shipping_postal_code"] = settings.RMA_DEFAULT_TIANJIN_POSTAL_CODE
-        policy["shipping_contact"] = shipping_contact
-        policy["shipping_phone"] = shipping_phone
-        prepared.append((item, policy, address, shipping_contact, shipping_phone, sn))
-
-    if len(routes) > 1:
-        raise ValueError("MIXED_SHIPPING_ADDRESS_REQUIRES_MANUAL_REVIEW")
+        policy = dict(ticket.policy_snapshot or {})
+        policy["charge_status"] = ticket.charge_status
+        policy["customer_scope"] = ticket.customer_scope
+        # RMA rendering consumes these compatibility keys, but SAP payload
+        # fields below always come from the customer's mailing information.
+        policy["shipping_route"] = item.return_location
+        policy["shipping_address"] = item.return_address
+        policy["shipping_contact"] = item.return_contact
+        policy["shipping_phone"] = item.return_phone
+        policy["shipping_postal_code"] = item.return_postal_code
+        policy["return_route_source"] = item.return_route_source
+        policy["return_route_status"] = item.return_route_status
+        policy["return_route_snapshot"] = item.return_route_snapshot
+        prepared.append((item, policy, sn))
 
     rows: list[ExportSap] = []
-    for item, policy, address, shipping_contact, shipping_phone, sn in prepared:
+    for item, policy, sn in prepared:
         payload = {
             "sn": sn,
             "customer_code": ticket.customer_code,
             "material_code": item.material_code,
             "customer_name": ticket.customer_name,
             "material_name": item.material_name,
-            "contact_person": shipping_contact,
-            "contact_phone": shipping_phone,
+            "charge_status": ticket.charge_status,
+            "contact_person": ticket.contact_person,
+            "contact_phone": ticket.contact_phone,
             "email_subject": source_email.subject if source_email else None,
             "problem_description": item.failure_description or ticket.problem_description,
             "repair_requested_at": requested_on.isoformat(),
-            "mailing_address": address,
+            "mailing_address": ticket.mailing_address,
             "currency": policy["currency"],
             "shipping_fee": policy["shipping_fee_text"],
             "repair_fee": policy["repair_price"],
@@ -331,6 +276,7 @@ async def ensure_export_lines(
             material_code=payload["material_code"],
             customer_name=payload["customer_name"],
             material_name=payload["material_name"],
+            charge_status=payload["charge_status"],
             contact_person=payload["contact_person"],
             contact_phone=payload["contact_phone"],
             email_subject=payload["email_subject"],
@@ -359,6 +305,7 @@ def _line_payload(row: ExportSap) -> dict[str, Any]:
         "material_code": row.material_code,
         "customer_name": row.customer_name,
         "material_name": row.material_name,
+        "charge_status": row.charge_status,
         "contact_person": row.contact_person,
         "contact_phone": row.contact_phone,
         "email_subject": row.email_subject,
@@ -372,6 +319,7 @@ def _line_payload(row: ExportSap) -> dict[str, Any]:
         "currency": row.currency,
         "shipping_fee": row.shipping_fee,
         "repair_fee": str(row.repair_fee) if row.repair_fee is not None else None,
+        "tax_rate": str(row.tax_rate) if row.tax_rate is not None else None,
     }
 
 
@@ -838,8 +786,10 @@ async def poll_export_batch(
         }
 
     distinct_rmas = sorted({line.rma_no for line in lines if line.rma_no})
+    existing_rmas: dict[str, TicketRma | None] = {}
     for rma_no in distinct_rmas:
         rma = await session.scalar(select(TicketRma).where(TicketRma.rma_no == rma_no))
+        existing_rmas[str(rma_no)] = rma
         if rma is not None and rma.ticket_id != ticket.id:
             export.status = "manual_review"
             export.error_code = "RMA_NUMBER_ALREADY_LINKED_TO_OTHER_TICKET"
@@ -854,6 +804,39 @@ async def poll_export_batch(
                 task_type="duplicate_rma_number",
                 reason=export.error_code,
             )
+
+    export.status = "rma_received"
+    ticket.relay_export_status = "rma_received"
+    if len(distinct_rmas) != 1:
+        export.status = "manual_review"
+        export.error_code = "MULTIPLE_RMA_NUMBERS_REQUIRE_MANUAL_REVIEW"
+        ticket.relay_export_status = "failed"
+        return await _move_to_manual(
+            session,
+            ticket=ticket,
+            task_type="multiple_rma_numbers_for_ticket",
+            reason="MULTIPLE_RMA_NUMBERS_REQUIRE_MANUAL_REVIEW",
+        )
+    unresolved_routes = [
+        line
+        for line in lines
+        if (line.policy_snapshot or {}).get("return_route_status") != "resolved"
+        or not (line.policy_snapshot or {}).get("shipping_address")
+        or not (line.policy_snapshot or {}).get("shipping_contact")
+        or not (line.policy_snapshot or {}).get("shipping_phone")
+    ]
+    if unresolved_routes:
+        export.status = "manual_review"
+        export.error_code = "RMA_RETURN_ROUTE_UNRESOLVED"
+        ticket.rma_status = "manual_review"
+        return await _move_to_manual(
+            session,
+            ticket=ticket,
+            task_type="return_route_review",
+            reason="RMA_RETURN_ROUTE_UNRESOLVED",
+        )
+    for rma_no in distinct_rmas:
+        rma = existing_rmas[str(rma_no)]
         if rma is None:
             matching = [line for line in lines if line.rma_no == rma_no]
             rma = TicketRma(
@@ -870,20 +853,12 @@ async def poll_export_batch(
                 select(TicketRmaItem).where(TicketRmaItem.ticket_item_id == line.ticket_item_id)
             )
             if existing_link is None:
-                session.add(TicketRmaItem(ticket_rma_id=rma.id, ticket_item_id=line.ticket_item_id))
-
-    export.status = "rma_received"
-    ticket.relay_export_status = "rma_received"
-    if len(distinct_rmas) != 1:
-        export.status = "manual_review"
-        export.error_code = "MULTIPLE_RMA_NUMBERS_REQUIRE_MANUAL_REVIEW"
-        ticket.relay_export_status = "failed"
-        return await _move_to_manual(
-            session,
-            ticket=ticket,
-            task_type="multiple_rma_numbers_for_ticket",
-            reason="MULTIPLE_RMA_NUMBERS_REQUIRE_MANUAL_REVIEW",
-        )
+                session.add(
+                    TicketRmaItem(
+                        ticket_rma_id=rma.id,
+                        ticket_item_id=line.ticket_item_id,
+                    )
+                )
 
     if allow_late_result and ticket.current_status_code == "manual_review":
         timeout_task = await session.scalar(

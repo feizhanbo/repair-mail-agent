@@ -62,6 +62,7 @@ def test_xlsx_templates_are_parseable() -> None:
     board_items, board_hash = master_data_service.parse_board_cards_xlsx(master_data_service.board_cards_template_xlsx())
 
     assert sn_items[0].sn == "SN202607070001"
-    assert board_items[0].material_code == "MAT001"
+    assert board_items[0].board_code == "M8002"
+    assert board_items[0].return_location == "beijing"
     assert len(sn_hash) == 64
     assert len(board_hash) == 64

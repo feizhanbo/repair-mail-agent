@@ -107,6 +107,7 @@ class ExportSap(TimestampMixin, Base):
     material_code: Mapped[str | None] = mapped_column(String(100))
     customer_name: Mapped[str | None] = mapped_column(String(255))
     material_name: Mapped[str | None] = mapped_column(String(255))
+    charge_status: Mapped[str | None] = mapped_column(String(30))
     contact_person: Mapped[str | None] = mapped_column(String(100))
     contact_phone: Mapped[str | None] = mapped_column(String(100))
     email_subject: Mapped[str | None] = mapped_column(String(500))

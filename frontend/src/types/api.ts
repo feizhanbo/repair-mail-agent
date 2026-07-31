@@ -324,6 +324,13 @@ export type Ticket = {
   thread_id?: number | null;
   customer_code?: string | null;
   customer_name?: string | null;
+  customer_scope?: 'domestic' | 'overseas' | null;
+  customer_scope_source?: string | null;
+  charge_status?: 'free' | 'annual_contract' | 'chargeable' | 'manual_confirmation' | null;
+  charge_status_source?: string | null;
+  service_policy_id?: number | null;
+  policy_resolution_status?: string;
+  policy_snapshot?: JsonRecord | null;
   contact_person?: string | null;
   contact_phone?: string | null;
   contact_email?: string | null;
@@ -369,6 +376,18 @@ export type TicketLine = {
   line_no: number;
   material_code?: string | null;
   material_name?: string | null;
+  board_code?: string | null;
+  board_name?: string | null;
+  matched_board_card_id?: number | null;
+  return_location?: 'beijing' | 'tianjin' | null;
+  return_address?: string | null;
+  return_contact?: string | null;
+  return_phone?: string | null;
+  return_postal_code?: string | null;
+  return_route_source?: string | null;
+  return_route_status?: 'pending' | 'resolved' | 'needs_manual';
+  return_route_message?: string | null;
+  return_route_snapshot?: JsonRecord | null;
   sn?: string | null;
   sn_asset_id?: number | null;
   quantity: number;
@@ -513,6 +532,11 @@ export type SapExportLine = {
   sn: string;
   customer_code?: string | null;
   material_code?: string | null;
+  material_name?: string | null;
+  charge_status?: 'free' | 'annual_contract' | 'chargeable' | 'manual_confirmation' | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  mailing_address?: string | null;
   currency?: string | null;
   shipping_fee?: string | null;
   repair_fee?: number | string | null;
@@ -673,10 +697,19 @@ export type SnAsset = {
 
 export type BoardCard = {
   id: number;
+  board_code: string;
+  board_name?: string | null;
+  return_location: 'beijing' | 'tianjin';
+  route_type: 'board_rule' | 'scope_default';
+  customer_scope: 'domestic' | 'overseas';
+  /** @deprecated Compatibility fields. */
   material_code: string;
   material_name?: string | null;
   need_ship_to_beijing: boolean;
   shipping_address?: string | null;
+  shipping_contact?: string | null;
+  shipping_phone?: string | null;
+  postal_code?: string | null;
   status: string;
 };
 
@@ -799,6 +832,8 @@ export type CustomerServicePolicy = {
   customer_code: string;
   customer_name?: string | null;
   policy_type: 'default' | 'permanent_free' | 'annual_free' | 'special_out_of_warranty';
+  charge_status: 'free' | 'annual_contract' | 'chargeable' | 'manual_confirmation';
+  customer_scope?: 'domestic' | 'overseas' | null;
   effective_from?: string | null;
   effective_until?: string | null;
   repair_price: number | string;

@@ -310,6 +310,13 @@ async def transition_ticket(
             ManualReviewTask.ticket_id == ticket.id,
             ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
         )
+        if to_status_code == "ready_for_export":
+            # Return-route evidence is an RMA gate, not a SAP export field.
+            # Keep its task open and visible without blocking a ticket whose
+            # SN, policy, customer mailing fields and SAP payload are valid.
+            blocker_query = blocker_query.where(
+                ManualReviewTask.task_type != "return_route_review"
+            )
         if resolving_task_id is not None:
             blocker_query = blocker_query.where(ManualReviewTask.id != resolving_task_id)
         blocker_id = await session.scalar(blocker_query.limit(1))

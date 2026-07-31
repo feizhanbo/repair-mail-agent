@@ -520,8 +520,6 @@ def _return_address_block(
     language: str,
     customer_policy: dict[str, Any] | None = None,
 ) -> str:
-    if language == "en-US":
-        return settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
     policy = customer_policy or {}
     company = str(policy.get("shipping_company") or "").strip()
     address = str(policy.get("shipping_address") or "").strip()

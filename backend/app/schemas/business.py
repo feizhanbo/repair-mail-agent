@@ -80,11 +80,24 @@ class RmaManualPolicyApprovalRequest(BaseModel):
     confirm_template_thread_and_archive: Literal[True]
 
 
+class TicketPolicyOverrideRequest(BaseModel):
+    charge_status: Literal["free", "annual_contract", "chargeable", "manual_confirmation"]
+    customer_scope: Literal["domestic", "overseas"] | None = None
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class TicketReturnRouteManualRequest(BaseModel):
+    return_location: Literal["beijing", "tianjin"]
+    reason: str = Field(min_length=3, max_length=500)
+
+
 class TicketItemUpsert(BaseModel):
     id: int | None = None
     line_no: int | None = Field(default=None, ge=1)
     material_code: str | None = Field(default=None, max_length=100)
     material_name: str | None = Field(default=None, max_length=255)
+    board_code: str | None = Field(default=None, max_length=100)
+    board_name: str | None = Field(default=None, max_length=255)
     sn: str | None = Field(default=None, max_length=100)
     quantity: int | None = Field(default=None, ge=1)
     failure_description: str | None = None
@@ -184,9 +197,15 @@ class SnAssetImportRequest(BaseModel):
 
 
 class BoardCardImportItem(BaseModel):
-    material_code: str = Field(max_length=100)
+    board_code: str | None = Field(default=None, max_length=100)
+    board_name: str | None = Field(default=None, max_length=255)
+    return_location: Literal["beijing", "tianjin"] | None = None
+    route_type: Literal["board_rule", "scope_default"] = "board_rule"
+    customer_scope: Literal["domestic", "overseas"] = "domestic"
+    # Deprecated compatibility aliases.
+    material_code: str | None = Field(default=None, max_length=100)
     material_name: str | None = Field(default=None, max_length=255)
-    need_ship_to_beijing: bool = False
+    need_ship_to_beijing: bool | None = None
     shipping_address: str | None = Field(default=None, max_length=500)
     shipping_contact: str | None = Field(default=None, max_length=100)
     shipping_phone: str | None = Field(default=None, max_length=100)
@@ -212,6 +231,8 @@ class CustomerServicePolicyCreateRequest(BaseModel):
         "annual_free",
         "special_out_of_warranty",
     ]
+    charge_status: Literal["free", "annual_contract", "chargeable", "manual_confirmation"] | None = None
+    customer_scope: Literal["domestic", "overseas"] | None = None
     effective_from: date | None = None
     effective_until: date | None = None
     repair_price: float = Field(ge=0)
@@ -232,6 +253,8 @@ class CustomerServicePolicyUpdateRequest(BaseModel):
         "annual_free",
         "special_out_of_warranty",
     ] | None = None
+    charge_status: Literal["free", "annual_contract", "chargeable", "manual_confirmation"] | None = None
+    customer_scope: Literal["domestic", "overseas"] | None = None
     effective_from: date | None = None
     effective_until: date | None = None
     repair_price: float | None = Field(default=None, ge=0)

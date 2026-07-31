@@ -123,13 +123,13 @@ class Settings(BaseSettings):
         "material_name": "itemName",
         "email_subject": "subject",
         "contact_person": "BPContact",
-        "contact_phone": "Telephone",
+        "contact_phone": "BPCellular",
         "problem_description": "U_FailurePhenomena",
         "repair_requested_at": "U_BXDate",
-        "mailing_address": "BPShipAddr",
+        "mailing_address": "BPBillAddr",
         "currency": "U_cur",
         "shipping_fee": "U_DeliveryPaid",
-        "repair_fee": "U_WSPrice",
+        "charge_status": "U_RepairPaid",
     }
     RELAY_SQLSERVER_BATCH_SIZE: int = 500
     RELAY_SQLSERVER_SYNC_INTERVAL_MINUTES: int = 5
@@ -196,13 +196,12 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_REAL_NAME: str = "System Administrator"
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
 
-    # TEMPORARY: Commented out for local comparison audit — asyncmy DLL blocked by Windows AppLocker.
-    # @field_validator("DATABASE_URL", "DEV_DATABASE_URL", "DB_SMOKE_DATABASE_URL", mode="before")
-    # @classmethod
-    # def normalize_legacy_mysql_async_driver(cls, value: object) -> object:
-    #     if isinstance(value, str) and value.startswith("mysql+aiomysql://"):
-    #         return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
-    #     return value
+    @field_validator("DATABASE_URL", "DEV_DATABASE_URL", "DB_SMOKE_DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_legacy_mysql_async_driver(cls, value: object) -> object:
+        if isinstance(value, str) and value.startswith("mysql+aiomysql://"):
+            return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
+        return value
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 

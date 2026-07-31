@@ -252,6 +252,26 @@ export const api = {
     lineId: number,
     body: { outcome: 'accepted' | 'not_inserted'; reason: string; call_id?: string },
   ) => postData<Record<string, unknown>>(`/tickets/${ticketId}/sap-export/lines/${lineId}/reconcile`, body),
+  resolveTicketPolicy: (id: number) =>
+    postData<Record<string, unknown>>(`/tickets/${id}/policy/resolve`),
+  overrideTicketPolicy: (
+    id: number,
+    body: {
+      charge_status: 'free' | 'annual_contract' | 'chargeable' | 'manual_confirmation';
+      customer_scope?: 'domestic' | 'overseas';
+      reason: string;
+    },
+  ) => postData<Record<string, unknown>>(`/tickets/${id}/policy/manual-override`, body),
+  resolveReturnRoutes: (id: number) =>
+    postData<Record<string, unknown>>(`/tickets/${id}/return-routes/resolve`),
+  selectReturnRoute: (
+    ticketId: number,
+    itemId: number,
+    body: { return_location: 'beijing' | 'tianjin'; reason: string },
+  ) => postData<Record<string, unknown>>(
+    `/tickets/${ticketId}/items/${itemId}/return-route/manual`,
+    body,
+  ),
   retryRmaSend: (id: number) => postData<JobRunLog>(`/tickets/${id}/rma/retry-send`),
   approveRmaManualPolicy: (
     id: number,

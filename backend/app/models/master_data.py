@@ -55,7 +55,10 @@ class SnAsset(TimestampMixin, Base):
 class BoardCard(TimestampMixin, Base):
     __tablename__ = "board_cards"
     __table_args__ = (
-        UniqueConstraint("material_code", name="uk_board_cards_material_code"),
+        Index("idx_board_cards_board_code", "board_code"),
+        Index("idx_board_cards_board_name", "board_name"),
+        Index("idx_board_cards_route", "customer_scope", "route_type", "status"),
+        Index("idx_board_cards_location", "return_location", "status"),
         Index("idx_board_cards_material_name", "material_name"),
         Index("idx_board_cards_ship_to_beijing", "need_ship_to_beijing"),
         Index("idx_board_cards_status", "status"),
@@ -63,6 +66,13 @@ class BoardCard(TimestampMixin, Base):
     )
 
     id: Mapped[int] = pk_column()
+    board_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    board_name: Mapped[str | None] = mapped_column(String(255))
+    return_location: Mapped[str] = mapped_column(String(20), nullable=False)
+    route_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="board_rule")
+    customer_scope: Mapped[str] = mapped_column(String(20), nullable=False, server_default="domestic")
+    # Compatibility columns. New business logic must use the explicit board/route
+    # fields above; these columns remain for one migration window.
     material_code: Mapped[str] = mapped_column(String(100), nullable=False)
     material_name: Mapped[str | None] = mapped_column(String(255))
     need_ship_to_beijing: Mapped[bool] = bool_column(False)
@@ -93,6 +103,10 @@ class CustomerServicePolicy(TimestampMixin, Base):
     customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
     customer_name: Mapped[str | None] = mapped_column(String(255))
     policy_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    charge_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="manual_confirmation"
+    )
+    customer_scope: Mapped[str | None] = mapped_column(String(20))
     effective_from: Mapped[date | None] = mapped_column(mysql.DATE)
     effective_until: Mapped[date | None] = mapped_column(mysql.DATE)
     repair_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default="0")

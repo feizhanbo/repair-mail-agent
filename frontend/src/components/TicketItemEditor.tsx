@@ -5,6 +5,8 @@ export type TicketItemForm = {
   line_no?: number;
   material_code?: string;
   material_name?: string;
+  board_code?: string;
+  board_name?: string;
   sn?: string;
   quantity?: number;
   failure_description?: string;
@@ -38,6 +40,8 @@ export default function TicketItemEditor({ editingItem, onSubmit, loading, onCan
         line_no: editingItem?.line_no,
         material_code: editingItem?.material_code ?? undefined,
         material_name: editingItem?.material_name ?? undefined,
+        board_code: editingItem?.board_code ?? undefined,
+        board_name: editingItem?.board_name ?? undefined,
         sn: editingItem?.sn ?? undefined,
         quantity: editingItem?.quantity ?? 1,
         failure_description: editingItem?.failure_description ?? undefined,
@@ -54,8 +58,10 @@ export default function TicketItemEditor({ editingItem, onSubmit, loading, onCan
         <Form.Item label="数量" name="quantity"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item>
       </div>
       <Form.Item label="SN" name="sn"><Input /></Form.Item>
-      <Form.Item label="物料编码" name="material_code"><Input /></Form.Item>
-      <Form.Item label="物料名称" name="material_name"><Input /></Form.Item>
+      <Form.Item label="SAP 物料代码（SN 主数据）" name="material_code"><Input /></Form.Item>
+      <Form.Item label="SAP 物料名称（SN 主数据）" name="material_name"><Input /></Form.Item>
+      <Form.Item label="板卡型号（邮件/附件）" name="board_code"><Input /></Form.Item>
+      <Form.Item label="板卡名称（邮件/附件）" name="board_name"><Input /></Form.Item>
       <Form.Item label="故障描述" name="failure_description"><Input.TextArea rows={3} /></Form.Item>
       <Form.Item label="故障信息" name="failure_information"><Input.TextArea rows={2} /></Form.Item>
       <Form.Item label="数据信息" name="data_info"><Input.TextArea rows={2} /></Form.Item>
