@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.request_context import get_client_ip, get_correlation_id, get_user_agent
 from app.models import NotificationEvent, NotificationUserState, OperationLog, Role, SystemEventLog, User, UserRole
 from app.services.logging_safety import sanitize_log_payload
+from app.services.notifications import event_requires_attention
 
 
 async def log_operation(
@@ -56,17 +57,33 @@ async def create_notification(
     recipient_user_id: int | None = None,
     recipient_role_code: str | None = "operator",
     metadata: dict[str, Any] | None = None,
+    ticket_id: int | None = None,
+    requires_attention: bool | None = None,
 ) -> NotificationEvent:
+    metadata = metadata or None
+    resolved_ticket_id = ticket_id
+    if resolved_ticket_id is None and target_type in {"repair_ticket", "ticket"}:
+        resolved_ticket_id = target_id
+    if resolved_ticket_id is None and isinstance(metadata, dict):
+        candidate = metadata.get("ticket_id")
+        if isinstance(candidate, int):
+            resolved_ticket_id = candidate
     event = NotificationEvent(
         event_type=event_type,
         target_type=target_type,
         target_id=target_id,
+        ticket_id=resolved_ticket_id,
         title=title,
         content=content,
         priority=priority,
         recipient_user_id=recipient_user_id,
         recipient_role_code=recipient_role_code,
         metadata_json=metadata,
+        requires_attention=(
+            event_requires_attention(event_type)
+            if requires_attention is None
+            else requires_attention
+        ),
     )
     session.add(event)
     await session.flush()

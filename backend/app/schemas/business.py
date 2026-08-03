@@ -310,7 +310,7 @@ class UserCreateRequest(BaseModel):
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=50)
     status: Literal["active", "disabled"] = "active"
-    roles: list[Literal["admin", "supervisor", "operator"]] = Field(default_factory=list)
+    roles: list[Literal["admin", "operator"]] = Field(default_factory=list)
 
 
 class UserUpdateRequest(BaseModel):
@@ -324,7 +324,7 @@ class UserStatusRequest(BaseModel):
 
 
 class UserRolesRequest(BaseModel):
-    roles: list[Literal["admin", "supervisor", "operator"]] = Field(default_factory=list)
+    roles: list[Literal["admin", "operator"]] = Field(default_factory=list)
 
 
 class UserResetPasswordRequest(BaseModel):

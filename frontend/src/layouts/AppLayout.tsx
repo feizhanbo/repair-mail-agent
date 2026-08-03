@@ -45,10 +45,11 @@ export default function AppLayout() {
   const { token, user, clearSession } = useAuthStore();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('repair_mail_sidebar_collapsed') === 'true');
   const notificationsQuery = useQuery({
-    queryKey: ['notifications', 'pending'],
-    queryFn: () => api.notifications({ page: 1, page_size: 20, delivery_status: 'pending' }),
+    queryKey: ['notification-center-summary'],
+    queryFn: api.notificationCenterSummary,
     enabled: Boolean(token),
     staleTime: 30_000,
+    refetchInterval: 60_000,
   });
 
   if (!token) {
@@ -56,8 +57,8 @@ export default function AppLayout() {
   }
 
   const canAdmin = hasRole(user?.roles, 'admin');
-  const canSupervise = hasAnyRole(user?.roles, ['admin', 'supervisor']);
-  const canOperate = hasAnyRole(user?.roles, ['admin', 'supervisor', 'operator']);
+  const canSupervise = hasAnyRole(user?.roles, ['admin']);
+  const canOperate = hasAnyRole(user?.roles, ['admin', 'operator']);
   const toggleCollapsed = () => {
     const next = !collapsed;
     setCollapsed(next);
@@ -102,11 +103,16 @@ export default function AppLayout() {
             onClick={toggleCollapsed}
           />
           <Space size="middle">
-            <Badge count={notificationsQuery.data?.total ?? 0} size="small">
+            <Badge count={notificationsQuery.data?.attention_count ?? 0} size="small">
               <Button aria-label="通知中心" icon={<BellOutlined />} shape="circle" onClick={() => navigate('/notification-center')} />
             </Badge>
             <Button type="text" onClick={() => navigate('/profile')}>{user?.real_name ?? user?.username}</Button>
-            <Button aria-label="退出" icon={<LogoutOutlined />} shape="circle" onClick={clearSession} />
+            <Button
+              aria-label="退出"
+              icon={<LogoutOutlined />}
+              shape="circle"
+              onClick={() => { void api.logout().finally(clearSession); }}
+            />
           </Space>
         </Header>
         <Content className="app-content">

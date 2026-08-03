@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""
-Standalone script: send a test warranty email from rmatest2 to rmatest1
-bypassing the app's mail_safety security gates.
+"""Standalone, explicitly invoked SMTP smoke-test helper.
 
-Usage:
-    cd backend
-    python tests\send_test_email.py
+Credentials and message endpoints must be supplied through environment
+variables. This file is not collected as an automated pytest test and must
+never contain production or test-account secrets.
 """
 
 from __future__ import annotations
@@ -18,78 +16,45 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ---------------------------------------------------------------------------
-# SMTP credentials — rmatest2 独立凭据（不可用 rmatest1 代发）
-# ---------------------------------------------------------------------------
-_SMTP_HOST = "smtphz.qiye.163.com"
-_SMTP_PORT = 465
-_SMTP_USER = "rmatest2@accotest.com"
-_SMTP_PASSWORD = "SL@M9S5@zXWJ2nM1"
 
-_FROM = "rmatest2@accotest.com"
-_TO = "rmatest1@accotest.com"
-
-_ATTACHMENT_PATH = r"D:\refile\emlattachment\05_15个SN_动态扩展测试.xlsx"
-
-# ---------------------------------------------------------------------------
-# Email body (plain text, Chinese)
-# ---------------------------------------------------------------------------
-_BODY = (
-    "您好，\n"
-    "\n"
-    "我司有3块同型号设备出现故障需要报修，详细信息如下：\n"
-    "\n"
-    "客户名称: 成都保鼎科技有限公司\n"
-    "联系人: 张三\n"
-    "联系电话: 13800138000\n"
-    "邮箱: zhangsan@test.com\n"
-    "寄件地址: 北京市朝阳区测试路100号\n"
-    "\n"
-    "故障描述: 设备上电后无任何反应，电源指示灯不亮，疑似电源模块损坏。\n"
-    "\n"
-    "详见附件清单。"
-)
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"required environment variable is missing: {name}")
+    return value
 
 
-# ===================================================================
 def main() -> None:
-    """Construct the MIME message, attach the Excel file, and send."""
+    smtp_host = _required_env("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+    smtp_user = _required_env("SMTP_USER")
+    smtp_password = _required_env("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_TEST_FROM", smtp_user).strip()
+    recipient = _required_env("SMTP_TEST_TO")
+    attachment_path = _required_env("SMTP_TEST_ATTACHMENT_PATH")
 
-    # -- Build multipart message ------------------------------------
     msg = MIMEMultipart()
-    msg["From"] = _FROM
-    msg["To"] = _TO
-    msg["Subject"] = "报修申请 - 3块STM32测试板故障 [E2E TEST]"
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = os.environ.get("SMTP_TEST_SUBJECT", "Repair mail SMTP smoke test")
+    msg.attach(MIMEText("This is an explicitly requested SMTP smoke test.", "plain", "utf-8"))
 
-    msg.attach(MIMEText(_BODY, "plain", "utf-8"))
-
-    # -- Attach Excel file ------------------------------------------
-    filename = os.path.basename(_ATTACHMENT_PATH)
-    with open(_ATTACHMENT_PATH, "rb") as fh:
+    filename = os.path.basename(attachment_path)
+    with open(attachment_path, "rb") as file_handle:
         part = MIMEBase("application", "octet-stream")
-        part.set_payload(fh.read())
+        part.set_payload(file_handle.read())
     encoders.encode_base64(part)
-    # Use RFC 2231 encoding for the Chinese filename
-    part.add_header(
-        "Content-Disposition",
-        "attachment",
-        filename=("utf-8", "", filename),
-    )
+    part.add_header("Content-Disposition", "attachment", filename=("utf-8", "", filename))
     msg.attach(part)
 
-    # -- Send via SMTP_SSL (port 465) --------------------------------
-    print(f"Sending from {_FROM} to {_TO} via {_SMTP_HOST}:{_SMTP_PORT} ...")
-    with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT) as server:
-        server.login(_SMTP_USER, _SMTP_PASSWORD)
+    with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+        server.login(smtp_user, smtp_password)
         server.send_message(msg)
 
-    print("Email sent successfully!")
 
-
-# ===================================================================
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"Error: {exc}")
+        print(f"SMTP smoke test failed: {exc}")
         sys.exit(1)

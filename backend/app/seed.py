@@ -168,6 +168,13 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "from_status_code": "ready_for_export",
+        "to_status_code": "manual_review",
+        "trigger_event": "validated_data_changed",
+        "condition_desc": "已验证字段或明细发生变化，原导出快照失效。",
+        "require_manual": True,
+    },
+    {
+        "from_status_code": "ready_for_export",
         "to_status_code": "rma_sent",
         "trigger_event": "rma_reply_sent",
         "condition_desc": "SAP回填合法RMA编号且模板回复实际发送成功。",
@@ -220,7 +227,6 @@ WORKFLOW_TRANSITIONS = _build_workflow_transitions()
 
 ROLES: tuple[dict[str, str], ...] = (
     {"role_code": "admin", "role_name": "系统管理员", "description": "用户管理、角色分配、系统配置、基础资料维护、权限配置、全部数据查看和全部业务兜底操作。"},
-    {"role_code": "supervisor", "role_name": "主管", "description": "查看全部业务数据，任务分配、转派、释放，查看工单、通知和日志摘要，审核回复，处理异常任务。"},
     {"role_code": "operator", "role_name": "一般操作员", "description": "处理本人可见或已领取任务，修正字段、SN 校验、采纳解析、生成追问和提交回复草稿。"},
 )
 

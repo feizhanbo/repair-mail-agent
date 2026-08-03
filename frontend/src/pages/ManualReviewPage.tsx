@@ -82,8 +82,8 @@ type ReturnRouteForm = {
 };
 
 const taskStatusOptions = [
-  { value: 'pending', label: '待处理' },
-  { value: 'assigned', label: '待处理' },
+  { value: 'pending', label: '待分配' },
+  { value: 'assigned', label: '已分配待处理' },
   { value: 'claimed', label: '处理中' },
   { value: 'resolved', label: '已解决' },
 ];
@@ -875,7 +875,7 @@ function ManualEvidencePane({
                     { title: '板卡型号', dataIndex: 'board_code', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '板卡名称', dataIndex: 'board_name', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '寄回地点', dataIndex: 'return_location', width: 90, render: (v?: string) => v === 'beijing' ? '北京' : v === 'tianjin' ? '天津' : '-' },
-                    { title: '地址匹配', dataIndex: 'return_route_status', width: 100, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: '地址匹配', dataIndex: 'return_route_status', width: 100, render: (v?: string) => <StatusTag value={v || 'pending'} kind="route" /> },
                     { title: '维修寄回地址', dataIndex: 'return_address', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '数量', dataIndex: 'quantity', width: 60 },
                     { title: '故障描述', dataIndex: 'failure_description', ellipsis: true, render: (v?: string) => compactText(v) },

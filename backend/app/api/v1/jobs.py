@@ -41,7 +41,7 @@ _EXPORT_FILTERS = {
 
 
 def _can_access_job(current_user: CurrentUser, job: JobRunLog) -> bool:
-    if {"admin", "supervisor"} & set(current_user.roles):
+    if "admin" in current_user.roles:
         return True
     metadata = job.metadata_json if isinstance(job.metadata_json, dict) else {}
     return metadata.get("user_id") == current_user.id
@@ -53,7 +53,7 @@ async def create_export_job(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    if not ({"admin", "supervisor"} & set(current_user.roles)):
+    if "admin" not in current_user.roles:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
     allowed = _EXPORT_FILTERS.get(payload.kind)
     if allowed is None:
@@ -85,7 +85,7 @@ async def list_jobs(
     job_type: str | None = None,
     job_status: str | None = Query(default=None, alias="status"),
 ) -> dict:
-    if not ({"admin", "supervisor"} & set(current_user.roles)):
+    if "admin" not in current_user.roles:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
     statement = select(JobRunLog)
     if job_type:

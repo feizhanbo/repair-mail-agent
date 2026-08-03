@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.services.audit import create_notification, log_operation
 from app.services.common import utcnow
+from app.services.notifications import resolve_notifications_for_ticket
 from app.services.routing import choose_available_operator
 
 OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
@@ -373,6 +374,56 @@ async def transition_ticket(
         before_data={"status": from_status_code},
         after_data={"status": to_status_code, "trigger_event": trigger_event},
     )
+
+    # A ticket-status notification is the source event for workflow states
+    # that need attention but do not create a manual-review task themselves.
+    if to_status_code == "need_customer_info":
+        await create_notification(
+            session,
+            event_type="ticket_customer_info_required",
+            target_type="repair_ticket",
+            target_id=ticket.id,
+            ticket_id=ticket.id,
+            title="工单等待客户补充信息",
+            content=reason or f"工单 {ticket.ticket_no} 缺少继续处理所需的客户信息。",
+            priority="normal",
+            recipient_user_id=ticket.assigned_user_id,
+            recipient_role_code=None if ticket.assigned_user_id else "operator",
+            metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "status": to_status_code},
+            requires_attention=True,
+        )
+    elif to_status_code == "error":
+        await create_notification(
+            session,
+            event_type="ticket_system_error",
+            target_type="repair_ticket",
+            target_id=ticket.id,
+            ticket_id=ticket.id,
+            title="工单处理发生系统异常",
+            content=reason or f"工单 {ticket.ticket_no} 需要人工检查系统异常。",
+            priority="high",
+            recipient_user_id=ticket.assigned_user_id,
+            recipient_role_code=None if ticket.assigned_user_id else "operator",
+            metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "status": to_status_code},
+            requires_attention=True,
+        )
+
+    if trigger_event == "customer_info_completed" or (
+        from_status_code == "auto_replied" and to_status_code != "auto_replied"
+    ):
+        await resolve_notifications_for_ticket(
+            session,
+            ticket_id=ticket.id,
+            event_types={"ticket_customer_info_required"},
+        )
+    if from_status_code == "error" and to_status_code != "error":
+        await resolve_notifications_for_ticket(
+            session,
+            ticket_id=ticket.id,
+            event_types={"ticket_system_error"},
+        )
+    if to_status_code == "closed":
+        await resolve_notifications_for_ticket(session, ticket_id=ticket.id)
 
     if to_status_code == "manual_review":
         await create_manual_task_if_missing(

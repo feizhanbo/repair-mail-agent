@@ -351,7 +351,7 @@ async def fetch_imap_status(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    if not ({"admin", "operator", "supervisor"} & set(current_user.roles)):
+    if not ({"admin", "operator"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
     latest = await session.scalar(
         select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
@@ -673,7 +673,7 @@ async def fetch_imap_job(
     message_id: str | None = Query(default=None, max_length=500),
     auto_parse: bool = Query(True),
 ) -> dict:
-    if not ({"admin", "operator", "supervisor"} & set(current_user.roles)):
+    if not ({"admin", "operator"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
     if await recover_stale_jobs(session):
         await session.commit()

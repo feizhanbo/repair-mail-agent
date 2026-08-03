@@ -36,8 +36,8 @@ export default function RepliesPage() {
   const [draftOpen, setDraftOpen] = useState(false);
   const queryClient = useQueryClient();
   const currentRoles = useAuthStore((state) => state.user?.roles);
-  const canDraftReplies = hasAnyRole(currentRoles, ['admin', 'supervisor', 'operator']);
-  const canReviewReplies = hasAnyRole(currentRoles, ['admin', 'supervisor', 'operator']);
+  const canDraftReplies = hasAnyRole(currentRoles, ['admin', 'operator']);
+  const canReviewReplies = hasAnyRole(currentRoles, ['admin', 'operator']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({

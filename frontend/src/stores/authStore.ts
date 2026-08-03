@@ -8,19 +8,17 @@ type AuthState = {
   clearSession: () => void;
 };
 
-const storedToken = localStorage.getItem('repair_mail_token');
 const storedUser = localStorage.getItem('repair_mail_user');
+localStorage.removeItem('repair_mail_token');
 
 export const useAuthStore = create<AuthState>((set) => ({
-  token: storedToken,
+  token: storedUser ? 'http-only-cookie' : null,
   user: storedUser ? (JSON.parse(storedUser) as CurrentUser) : null,
-  setSession: (token, user) => {
-    localStorage.setItem('repair_mail_token', token);
+  setSession: (_token, user) => {
     localStorage.setItem('repair_mail_user', JSON.stringify(user));
-    set({ token, user });
+    set({ token: 'http-only-cookie', user });
   },
   clearSession: () => {
-    localStorage.removeItem('repair_mail_token');
     localStorage.removeItem('repair_mail_user');
     set({ token: null, user: null });
   },

@@ -230,7 +230,7 @@ async def transition(
     ticket_id: int,
     payload: TicketTransitionRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     if payload.to_status_code in {"ready_for_export", "rma_sent", "closed"}:
         from fastapi import HTTPException, status
@@ -256,7 +256,7 @@ async def transition(
 async def export_safety(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     return ok(await build_safety_report(session, ticket_id=ticket_id))
@@ -266,7 +266,7 @@ async def export_safety(
 async def validate_export(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=current_user.id)
     await session.commit()
@@ -289,7 +289,7 @@ async def resolve_ticket_policy(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[
-        CurrentUser, Depends(require_roles("operator", "supervisor"))
+        CurrentUser, Depends(require_roles("operator"))
     ],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -317,7 +317,7 @@ async def manually_override_ticket_policy(
     payload: TicketPolicyOverrideRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[
-        CurrentUser, Depends(require_roles("operator", "supervisor"))
+        CurrentUser, Depends(require_roles("operator"))
     ],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -347,7 +347,7 @@ async def resolve_return_routes(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[
-        CurrentUser, Depends(require_roles("operator", "supervisor"))
+        CurrentUser, Depends(require_roles("operator"))
     ],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -372,7 +372,7 @@ async def manually_select_return_route(
     payload: TicketReturnRouteManualRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[
-        CurrentUser, Depends(require_roles("operator", "supervisor"))
+        CurrentUser, Depends(require_roles("operator"))
     ],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -407,7 +407,7 @@ async def manually_select_return_route(
 async def retry_sap_export(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
     export = await session.scalar(
@@ -436,7 +436,7 @@ async def retry_sap_export(
 async def poll_sap_export(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -458,7 +458,7 @@ async def poll_sap_export(
 async def confirm_late_sap_result(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
     export = await session.scalar(
@@ -486,7 +486,7 @@ async def reconcile_sap_submission(
     line_id: int,
     payload: SapSubmitReconcileRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     line = await session.get(ExportSap, line_id)
     if line is None or line.ticket_id != ticket_id:
@@ -509,7 +509,7 @@ async def reconcile_sap_submission(
 async def retry_rma_send(
     ticket_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     ticket = await ticket_service.get_ticket(session, ticket_id)
     rma_rows = list(
@@ -591,7 +591,7 @@ async def approve_rma_manual_policy(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[
         CurrentUser,
-        Depends(require_roles("operator", "supervisor")),
+        Depends(require_roles("operator")),
     ],
 ) -> dict:
     """Approve a special policy for controlled draft generation, never auto-send."""
@@ -695,7 +695,7 @@ async def confirm_ticket_device_received(
     ticket_id: int,
     payload: DeviceReceivedConfirmRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await confirm_device_received(
         session,
@@ -714,7 +714,7 @@ async def confirm_export(
     ticket_id: int,
     payload: TicketExportConfirmRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del ticket_id, payload, session, current_user
     from fastapi import HTTPException, status

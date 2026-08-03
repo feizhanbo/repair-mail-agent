@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     APP_ENV: str = "dev"
     APP_NAME: str = "repair-mail-agent"
     LOG_LEVEL: str = "INFO"
+    CORS_ALLOWED_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    TRUSTED_HOSTS: list[str] = ["localhost", "127.0.0.1", "testserver"]
+    API_DOCS_ENABLED: bool = False
 
     DB_NAME: str = "repair_system_test"
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
@@ -202,6 +205,25 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.startswith("mysql+aiomysql://"):
             return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
         return value
+
+    @model_validator(mode="after")
+    def reject_insecure_production_defaults(self) -> "Settings":
+        if self.APP_ENV.strip().lower() not in {"prod", "production"}:
+            return self
+        insecure: list[str] = []
+        if len(self.JWT_SECRET) < 32 or "change-me" in self.JWT_SECRET.lower():
+            insecure.append("JWT_SECRET")
+        if "change-me" in self.DATABASE_URL.lower():
+            insecure.append("DATABASE_URL")
+        if len(self.DEFAULT_ADMIN_PASSWORD) < 12 or "change-me" in self.DEFAULT_ADMIN_PASSWORD.lower():
+            insecure.append("DEFAULT_ADMIN_PASSWORD")
+        if not self.CORS_ALLOWED_ORIGINS or "*" in self.CORS_ALLOWED_ORIGINS:
+            insecure.append("CORS_ALLOWED_ORIGINS")
+        if not self.TRUSTED_HOSTS or "*" in self.TRUSTED_HOSTS:
+            insecure.append("TRUSTED_HOSTS")
+        if insecure:
+            raise ValueError(f"insecure production settings: {', '.join(insecure)}")
+        return self
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 

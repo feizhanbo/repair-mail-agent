@@ -116,8 +116,14 @@ def teardown_function() -> None:
 
 
 def test_expected_business_routes_are_registered() -> None:
-    routes = {f"{','.join(sorted(route.methods or []))} {route.path}" for route in app.routes}
+    routes = {
+        f"{method.upper()} {path}"
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+        if method.lower() in {"get", "post", "put", "patch", "delete"}
+    }
     assert "POST /api/v1/auth/login" in routes
+    assert "POST /api/v1/auth/logout" in routes
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
     assert "POST /api/v1/emails/{email_id}/reparse/jobs" in routes
     assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
@@ -446,7 +452,7 @@ def test_operator_can_approve_reply(monkeypatch) -> None:
     assert session.committed is True
 
 
-def test_supervisor_can_approve_reply(monkeypatch) -> None:
+def test_operator_can_approve_reply(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_approve(_session, *, reply_id: int, user_id: int):
@@ -456,7 +462,7 @@ def test_supervisor_can_approve_reply(monkeypatch) -> None:
 
     monkeypatch.setattr(reply_service, "approve_reply", fake_approve)
 
-    with make_client(session, roles=["supervisor"]) as client:
+    with make_client(session, roles=["operator"]) as client:
         response = client.post("/api/v1/replies/5/approve-send")
 
     payload = response.json()
@@ -483,7 +489,7 @@ def test_manual_task_structured_filters_are_forwarded(monkeypatch) -> None:
 
     monkeypatch.setattr(manual_review_service, "list_tasks", fake_list)
 
-    with make_client(roles=["supervisor"]) as client:
+    with make_client(roles=["operator"]) as client:
         response = client.get(
             "/api/v1/manual-review/tasks",
             params={
@@ -507,7 +513,7 @@ def test_manual_task_structured_filters_are_forwarded(monkeypatch) -> None:
     assert seen["created_end"] == date(2026, 7, 7)
 
 
-def test_supervisor_assign_endpoint_is_deprecated(monkeypatch) -> None:
+def test_admin_assign_endpoint_is_deprecated(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_assign(_session, *, task_id: int, assigned_user_id: int | None, operator_user_id: int, reason: str | None):
@@ -518,7 +524,7 @@ def test_supervisor_assign_endpoint_is_deprecated(monkeypatch) -> None:
 
     monkeypatch.setattr(manual_review_service, "assign_task", fake_assign)
 
-    with make_client(session, roles=["supervisor"]) as client:
+    with make_client(session, roles=["admin"]) as client:
         response = client.post("/api/v1/manual-review/tasks/9/assign", json={"assigned_user_id": 8, "reason": "测试分配"})
 
     payload = response.json()
@@ -545,7 +551,7 @@ def test_operator_cannot_patch_system_config() -> None:
     assert payload["message"] == "AUTH_FORBIDDEN"
 
 
-@pytest.mark.parametrize("role", ["operator", "admin", "supervisor"])
+@pytest.mark.parametrize("role", ["operator", "admin"])
 def test_supported_roles_reuse_active_imap_fetch_job(role: str) -> None:
     session = ActiveImapJobSession()
     with make_client(session, roles=[role]) as client:
@@ -678,8 +684,8 @@ def test_operator_can_query_statistics_summary() -> None:
     assert payload["success"] is True
 
 
-def test_supervisor_statistics_summary_empty_contract() -> None:
-    with make_client(roles=["supervisor"]) as client:
+def test_operator_statistics_summary_empty_contract() -> None:
+    with make_client(roles=["operator"]) as client:
         response = client.get("/api/v1/statistics/summary", params={"period": "week", "start_date": "2026-07-01", "end_date": "2026-07-07"})
 
     payload = response.json()
@@ -712,7 +718,7 @@ def test_master_data_filter_params_are_forwarded(monkeypatch) -> None:
 
     monkeypatch.setattr(master_data_service, "list_sn_assets", fake_list)
 
-    with make_client(roles=["supervisor"]) as client:
+    with make_client(roles=["operator"]) as client:
         response = client.get(
             "/api/v1/master-data/sn-assets",
             params={"sn": "SN", "customer": "Acme", "material": "MAT", "asset_status": "valid", "keyword": "compat"},
@@ -735,7 +741,7 @@ def test_master_data_selected_export_forwards_ids(monkeypatch) -> None:
 
     monkeypatch.setattr(master_data_service, "export_sn_assets_selected", fake_export)
 
-    with make_client(roles=["supervisor"]) as client:
+    with make_client(roles=["operator"]) as client:
         response = client.post("/api/v1/master-data/sn-assets/export-selected", json={"ids": [1, 2, 5]})
 
     assert response.status_code == 200

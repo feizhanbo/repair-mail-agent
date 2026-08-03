@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import ACTIVE_ROLE_CODES, CurrentUser, get_current_user
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
@@ -21,7 +21,11 @@ router = APIRouter()
 
 
 @router.post("/login")
-async def login(payload: LoginRequest, session: Annotated[AsyncSession, Depends(get_session)]) -> dict:
+async def login(
+    payload: LoginRequest,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
     result = await session.execute(select(User).where(User.username == payload.username, User.status == "active"))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
@@ -33,7 +37,7 @@ async def login(payload: LoginRequest, session: Annotated[AsyncSession, Depends(
         .where(UserRole.user_id == user.id)
         .order_by(Role.role_code)
     )
-    roles = list(roles_result.scalars().all())
+    roles = [role for role in roles_result.scalars().all() if role in ACTIVE_ROLE_CODES]
     user.last_login_at = utcnow()
     await log_operation(
         session,
@@ -44,9 +48,19 @@ async def login(payload: LoginRequest, session: Annotated[AsyncSession, Depends(
         description="用户登录。",
     )
     await session.commit()
+    access_token = create_access_token(user.id, roles)
+    response.set_cookie(
+        key="repair_mail_session",
+        value=access_token,
+        max_age=settings.JWT_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=settings.APP_ENV.lower() in {"prod", "production"},
+        samesite="strict",
+        path="/api/v1",
+    )
     return ok(
         {
-            "access_token": create_access_token(user.id, roles),
+            "access_token": access_token,
             "token_type": "bearer",
             "expires_in": settings.JWT_EXPIRE_MINUTES * 60,
             "user": {
@@ -60,6 +74,18 @@ async def login(payload: LoginRequest, session: Annotated[AsyncSession, Depends(
             },
         }
     )
+
+
+@router.post("/logout")
+async def logout(response: Response) -> dict:
+    response.delete_cookie(
+        key="repair_mail_session",
+        path="/api/v1",
+        secure=settings.APP_ENV.lower() in {"prod", "production"},
+        httponly=True,
+        samesite="strict",
+    )
+    return ok({}, "logged out")
 
 
 @router.get("/me")

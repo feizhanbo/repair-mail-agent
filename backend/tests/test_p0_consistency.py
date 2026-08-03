@@ -166,10 +166,10 @@ def test_job_access_is_limited_to_privileged_roles_or_creator() -> None:
 
     creator = user(7, "creator", ["operator"])
     other = user(8, "other", ["operator"])
-    supervisor = user(9, "supervisor", ["supervisor"])
+    admin = user(9, "admin", ["admin"])
     assert _can_access_job(creator, job) is True
     assert _can_access_job(other, job) is False
-    assert _can_access_job(supervisor, job) is True
+    assert _can_access_job(admin, job) is True
 
 
 def test_auto_apply_uses_dedicated_high_confidence_threshold(monkeypatch: pytest.MonkeyPatch) -> None:

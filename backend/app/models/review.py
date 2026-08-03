@@ -6,7 +6,7 @@ from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, CreatedAtMixin, TimestampMixin, datetime_column, pk_column
+from app.models.base import Base, CreatedAtMixin, TimestampMixin, bool_column, datetime_column, pk_column
 
 
 class ManualReviewTask(TimestampMixin, Base):
@@ -44,12 +44,17 @@ class NotificationEvent(CreatedAtMixin, Base):
         Index("idx_notifications_role", "recipient_role_code", "delivery_status", "created_at"),
         Index("idx_notifications_target", "target_type", "target_id"),
         Index("idx_notifications_event", "event_type", "created_at"),
+        Index("idx_notifications_ticket_attention", "ticket_id", "requires_attention", "created_at"),
     )
 
     id: Mapped[int] = pk_column()
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     target_type: Mapped[str] = mapped_column(String(50), nullable=False)
     target_id: Mapped[int] = mapped_column(mysql.BIGINT(unsigned=True), nullable=False)
+    ticket_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("repair_tickets.id", name="fk_notifications_ticket", ondelete="SET NULL"),
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[str | None] = mapped_column(String(1000))
     priority: Mapped[str] = mapped_column(String(20), nullable=False, server_default="normal")
@@ -60,6 +65,7 @@ class NotificationEvent(CreatedAtMixin, Base):
     read_at: Mapped[datetime | None] = datetime_column()
     metadata_json: Mapped[dict | None] = mapped_column("metadata", mysql.JSON)
     delivered_at: Mapped[datetime | None] = datetime_column()
+    requires_attention: Mapped[bool] = bool_column(False)
 
 
 class NotificationUserState(TimestampMixin, Base):

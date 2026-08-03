@@ -1013,25 +1013,17 @@ async def _invalidate_export_snapshot(
     ticket.relay_export_status = "not_required"
     ticket.rma_status = "not_required" if not ticket.rma_required else "pending"
     if ticket.current_status_code == "ready_for_export":
-        ticket.current_status_code = "manual_review"
-        session.add(
-            TicketStatusLog(
-                ticket_id=ticket.id,
-                from_status_code="ready_for_export",
-                to_status_code="manual_review",
-                trigger_event="validated_data_changed",
-                reason=reason,
-                operator_type="user" if user_id else "system",
-                operator_user_id=user_id,
-            )
-        )
-        await create_manual_task_if_missing(
+        await transition_ticket(
             session,
             ticket=ticket,
-            task_type="validated_data_changed",
-            trigger_reason=reason,
-            priority="high",
-            assigned_user_id=ticket.assigned_user_id,
+            to_status_code="manual_review",
+            trigger_event="validated_data_changed",
+            user_id=user_id,
+            operator_type="user" if user_id else "system",
+            reason=reason,
+            metadata={"invalidate_sn": invalidate_sn},
+            manual_task_type="validated_data_changed",
+            manual_task_priority="high",
         )
 
 

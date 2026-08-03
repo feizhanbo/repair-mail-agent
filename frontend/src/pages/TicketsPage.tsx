@@ -121,7 +121,7 @@ export default function TicketsPage() {
   const [returnRouteItem, setReturnRouteItem] = useState<TicketLine | null>(null);
   const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
-  const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'supervisor', 'operator']);
+  const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'operator']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
@@ -932,11 +932,11 @@ function TicketDetailView({
                     { title: '板卡型号', dataIndex: 'board_code', width: 120, render: (v?: string) => v || '-' },
                     { title: '板卡名称', dataIndex: 'board_name', width: 150, render: (v?: string) => v || '-' },
                     { title: '寄回地点', dataIndex: 'return_location', width: 100, render: (v?: string) => v === 'beijing' ? '北京' : v === 'tianjin' ? '天津' : '-' },
-                    { title: '地址匹配', dataIndex: 'return_route_status', width: 110, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: '地址匹配', dataIndex: 'return_route_status', width: 110, render: (v?: string) => <StatusTag value={v || 'pending'} kind="route" /> },
                     { title: '判断依据', dataIndex: 'return_route_source', width: 150, render: (v?: string) => v || '-' },
                     { title: '匹配说明', dataIndex: 'return_route_message', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '数量', dataIndex: 'quantity', width: 60 },
-                    { title: '校验', dataIndex: 'validation_status', width: 100, render: (v: string) => <StatusTag value={v} /> },
+                    { title: '校验', dataIndex: 'validation_status', width: 100, render: (v: string) => <StatusTag value={v} kind="validation" /> },
                     { title: '校验说明', dataIndex: 'validation_message', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '故障描述', dataIndex: 'failure_description', ellipsis: true, render: (v?: string) => compactText(v) },
                     {
@@ -1149,11 +1149,11 @@ function TicketDetailView({
                   scroll={{ x: 1450 }}
                   columns={[
                     { title: 'SN', dataIndex: 'sn', width: 150, fixed: 'left', render: (v?: string) => <CopyableField value={v || '-'} /> },
-                    { title: '状态', dataIndex: 'status', width: 120, render: (v: string) => <StatusTag value={v} /> },
+                    { title: '状态', dataIndex: 'status', width: 120, render: (v: string) => <StatusTag value={v} kind="sap" /> },
                     { title: 'CallID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: 'RMA', dataIndex: 'rma_no', width: 130, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '客户代码', dataIndex: 'customer_code', width: 120, render: (v?: string) => v || '-' },
-                    { title: '物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
+                    { title: 'SAP 物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
                     { title: '收费状态', dataIndex: 'charge_status', width: 130, render: (v?: string) => v || '-' },
                     { title: '客户方邮寄地址', dataIndex: 'mailing_address', width: 220, ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '维修费', dataIndex: 'repair_fee', width: 100, render: (v?: number | string) => v ?? '-' },
@@ -1193,10 +1193,10 @@ function TicketDetailView({
                   pagination={false}
                   columns={[
                     { title: 'RMA 编号', dataIndex: 'rma_no', width: 150, render: (v: string) => <CopyableField value={v} /> },
-                    { title: '状态', dataIndex: 'status', width: 130, render: (v: string) => <StatusTag value={v} /> },
+                    { title: '状态', dataIndex: 'status', width: 130, render: (v: string) => <StatusTag value={v} kind="rma" /> },
                     { title: '接收时间', dataIndex: 'received_at', width: 170, render: formatTime },
                     { title: '发送时间', dataIndex: 'sent_at', width: 170, render: formatTime },
-                    { title: 'PDF校验', dataIndex: 'pdf_validation_status', width: 120, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
+                    { title: 'PDF校验', dataIndex: 'pdf_validation_status', width: 120, render: (v?: string) => <StatusTag value={v || 'pending'} kind="validation" /> },
                     { title: 'PDF归档', dataIndex: 'pdf_archive_status', width: 120, render: (v?: string) => <StatusTag value={v || 'pending'} /> },
                     { title: '归档时间', dataIndex: 'pdf_archived_at', width: 170, render: formatTime },
                     { title: '签发完成', dataIndex: 'issued_at', width: 170, render: formatTime },

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +12,8 @@ from app.core.database import get_session
 from app.core.security import TokenDecodeError, decode_access_token
 from app.models import Role, User, UserRole
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+ACTIVE_ROLE_CODES = frozenset({"admin", "operator"})
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,8 @@ class CurrentUser:
 
 
 async def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
+    request: Request,
+    token: Annotated[str | None, Depends(oauth2_scheme)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CurrentUser:
     credentials_error = HTTPException(
@@ -37,7 +39,10 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = decode_access_token(token)
+        session_token = token or request.cookies.get("repair_mail_session")
+        if not session_token:
+            raise TokenDecodeError("missing token")
+        payload = decode_access_token(session_token)
         user_id = int(payload.get("sub", "0"))
     except (TokenDecodeError, TypeError, ValueError):
         raise credentials_error
@@ -53,7 +58,7 @@ async def get_current_user(
         .where(UserRole.user_id == user.id)
         .order_by(Role.role_code)
     )
-    roles = list(roles_result.scalars().all())
+    roles = [role for role in roles_result.scalars().all() if role in ACTIVE_ROLE_CODES]
     return CurrentUser(
         id=user.id,
         username=user.username,

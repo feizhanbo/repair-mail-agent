@@ -59,7 +59,7 @@ def serialize_ai_log(ai_log: AiCallLog) -> dict:
 async def get_ai_log_detail(
     ai_log_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     ai_log = await session.get(AiCallLog, ai_log_id)
     if ai_log is None:
@@ -88,7 +88,7 @@ async def get_ai_log_detail(
 @router.get("")
 async def list_ai_logs(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ticket_id: int | None = None,

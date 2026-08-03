@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ManualReviewTask, NotificationEvent, NotificationUserState, RepairTicket, Role, User, UserRole
 from app.services.audit import create_notification
 from app.services.common import utcnow
-from app.services.notifications import resolve_notifications_for_target
+from app.services.notifications import event_requires_attention, resolve_notifications_for_target
 from app.services.routing import choose_available_operator
 
 
@@ -53,6 +53,20 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
 
     events = (await session.execute(select(NotificationEvent).order_by(NotificationEvent.id))).scalars().all()
     for event in events:
+        expected_ticket_id = event.ticket_id
+        if event.target_type in {"repair_ticket", "ticket"}:
+            expected_ticket_id = event.target_id
+        elif isinstance(event.metadata_json, dict) and isinstance(event.metadata_json.get("ticket_id"), int):
+            expected_ticket_id = event.metadata_json["ticket_id"]
+        if event.ticket_id != expected_ticket_id:
+            counts["ticket_links_backfilled"] += 1
+            if apply:
+                event.ticket_id = expected_ticket_id
+        expected_attention = event_requires_attention(event.event_type)
+        if event.requires_attention != expected_attention:
+            counts["attention_classification_backfilled"] += 1
+            if apply:
+                event.requires_attention = expected_attention
         existing_states = (
             await session.execute(
                 select(NotificationUserState).where(NotificationUserState.notification_id == event.id)

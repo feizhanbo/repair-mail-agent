@@ -1,6 +1,6 @@
 import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Upload, message } from 'antd';
+import { Button, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState, type Key } from 'react';
@@ -130,8 +130,8 @@ export default function MasterDataPage() {
       { title: 'SN', dataIndex: 'sn', width: 180 },
       { title: '客户代码', dataIndex: 'customer_code', width: 120 },
       { title: '客户名称', dataIndex: 'customer_name', ellipsis: true },
-      { title: '物料编码', dataIndex: 'material_code', width: 140 },
-      { title: '物料名称', dataIndex: 'material_name', ellipsis: true, render: (value?: string) => value || '-' },
+      { title: 'SAP 物料编码', dataIndex: 'material_code', width: 140 },
+      { title: 'SAP 物料名称', dataIndex: 'material_name', ellipsis: true, render: (value?: string) => value || '-' },
       { title: '服务追踪卡编号', dataIndex: 'service_tracking_card_no', width: 150, render: (value?: string) => value || '-' },
       { title: '上级 SN', dataIndex: 'parent_sn', width: 160, render: (value?: string) => value || '-' },
       { title: 'Top SN', dataIndex: 'top_sn', width: 160, render: (value?: string) => value || '-' },
@@ -187,9 +187,9 @@ export default function MasterDataPage() {
     { title: '税率', dataIndex: 'tax_rate', width: 75, render: (v: number | string) => `${v}%` },
     { title: '快递费规则', dataIndex: 'shipping_fee_text', width: 180 },
     { title: '称呼', dataIndex: 'reply_salutation', width: 110, render: (v?: string) => v || '-' },
-    { title: '隐藏公司名', dataIndex: 'hide_company_name', width: 100, render: (v: boolean) => <StatusTag value={v ? 'pass' : 'pending'} /> },
-    { title: '强制复核', dataIndex: 'force_manual_review', width: 90, render: (v: boolean) => <StatusTag value={v ? 'warning' : 'pass'} /> },
-    { title: '启用', dataIndex: 'enabled', width: 75, render: (v: boolean) => <StatusTag value={v ? 'active' : 'disabled'} /> },
+    { title: '公司名展示', dataIndex: 'hide_company_name', width: 110, render: (v: boolean) => <Tag color={v ? 'orange' : 'green'}>{v ? '隐藏' : '显示'}</Tag> },
+    { title: '强制复核', dataIndex: 'force_manual_review', width: 90, render: (v: boolean) => <Tag color={v ? 'orange' : 'default'}>{v ? '是' : '否'}</Tag> },
+    { title: '启用', dataIndex: 'enabled', width: 75, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag> },
     { title: '操作', width: 80, fixed: 'right', render: (_: unknown, row) => <Button type="link" size="small" onClick={() => openPolicyEditor(row)}>编辑</Button> },
   ];
 

@@ -2,17 +2,21 @@ import { Tag } from 'antd';
 import {
   parseStatusLabels,
   reviewStatusLabels,
+  rmaStatusLabels,
+  routeStatusLabels,
+  sapStatusLabels,
   sendStatusLabels,
   taskPriorityColors,
   taskStatusColors,
   taskStatusLabels,
   ticketStatusColors,
   ticketStatusLabels,
+  validationStatusLabels,
 } from '../utils/status';
 
 type StatusTagProps = {
   value?: string | null;
-  kind?: 'ticket' | 'parse' | 'task' | 'review' | 'priority' | 'send' | 'plain';
+  kind?: 'ticket' | 'parse' | 'task' | 'review' | 'priority' | 'send' | 'route' | 'sap' | 'rma' | 'validation' | 'plain';
 };
 
 const defaultColors: Record<string, string> = {
@@ -83,6 +87,10 @@ function getLabel(value: string, kind: StatusTagProps['kind']) {
   if (kind === 'task') return taskStatusLabels[value] ?? value;
   if (kind === 'review') return reviewStatusLabels[value] ?? value;
   if (kind === 'send') return sendStatusLabels[value] ?? value;
+  if (kind === 'route') return routeStatusLabels[value] ?? value;
+  if (kind === 'sap') return sapStatusLabels[value] ?? value;
+  if (kind === 'rma') return rmaStatusLabels[value] ?? value;
+  if (kind === 'validation') return validationStatusLabels[value] ?? value;
   return defaultLabels[value] ?? value;
 }
 

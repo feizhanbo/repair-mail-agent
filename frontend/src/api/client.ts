@@ -27,6 +27,8 @@ import type {
   ManualTaskReparseResponse,
   MailTestPreflightResult,
   NotificationEvent,
+  NotificationCenterPage,
+  NotificationCenterSummary,
   ObjectDownloadUrl,
   PageData,
   ReplyTemplate,
@@ -46,6 +48,7 @@ import type {
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? '/api/v1',
   timeout: 15000,
+  withCredentials: true,
 });
 
 function friendlyServerMessage(status?: number, code?: string): string {
@@ -157,10 +160,6 @@ export function apiErrorMessage(error: unknown): string {
 }
 
 apiClient.interceptors.request.use((config) => {
-  const token = useAuthStore.getState().token;
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
   if (!config.headers['X-Correlation-ID']) {
     config.headers['X-Correlation-ID'] = crypto.randomUUID();
   }
@@ -194,6 +193,7 @@ async function patchData<T, B = unknown>(url: string, body?: B): Promise<T> {
 
 export const api = {
   login: (body: LoginRequest) => postData<LoginResponse, LoginRequest>('/auth/login', body),
+  logout: () => postData<Record<string, never>, Record<string, never>>('/auth/logout', {}),
   me: () => getData<{ user: Omit<CurrentUser, 'roles'>; roles: string[] }>('/auth/me'),
   updateProfile: (body: UserUpdateRequest) => patchData<UserAccount>('/auth/me/profile', body),
   changePassword: (body: { old_password: string; new_password: string }) => patchData<UserAccount>('/auth/me/password', body),
@@ -339,6 +339,9 @@ export const api = {
   aiLogs: (params: Record<string, unknown>) => getData<PageData<AiLog>>('/ai-logs', { params }),
   aiLogDetail: (id: number) => getData<Record<string, unknown>>(`/ai-logs/${id}/detail`),
   notifications: (params: Record<string, unknown>) => getData<PageData<NotificationEvent>>('/notifications', { params }),
+  notificationCenter: (params: Record<string, unknown> = {}) => getData<NotificationCenterPage>('/notifications/center', { params }),
+  notificationCenterSummary: () => getData<NotificationCenterSummary>('/notifications/center/summary'),
+  markNotificationCenterGroupRead: (ticketId: number) => postData<{ ticket_id: number }>(`/notifications/center/${ticketId}/read`),
   markNotificationRead: (id: number) => postData<NotificationEvent>(`/notifications/${id}/read`),
   systemInfo: () => getData<SystemInfo>('/system/info'),
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),

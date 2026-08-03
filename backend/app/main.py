@@ -8,6 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
@@ -193,14 +194,18 @@ app = FastAPI(
     description="Repair mail automation backend",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if settings.API_DOCS_ENABLED or settings.APP_ENV.lower() not in {"prod", "production"} else None,
+    redoc_url="/redoc" if settings.API_DOCS_ENABLED or settings.APP_ENV.lower() not in {"prod", "production"} else None,
+    openapi_url="/openapi.json" if settings.API_DOCS_ENABLED or settings.APP_ENV.lower() not in {"prod", "production"} else None,
 )
 
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.TRUSTED_HOSTS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
 )
 
 
@@ -215,6 +220,10 @@ async def correlation_id_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         response.headers["X-Correlation-ID"] = correlation_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return response
     finally:
         reset_request_context(tokens)

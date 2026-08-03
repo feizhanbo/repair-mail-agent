@@ -41,7 +41,7 @@ export type DatabaseRowsResponse = {
   columns: string[];
 };
 
-export type RoleCode = 'admin' | 'supervisor' | 'operator';
+export type RoleCode = 'admin' | 'operator';
 
 export type LoginRequest = {
   username: string;
@@ -702,9 +702,6 @@ export type BoardCard = {
   return_location: 'beijing' | 'tianjin';
   route_type: 'board_rule' | 'scope_default';
   customer_scope: 'domestic' | 'overseas';
-  /** @deprecated Compatibility fields. */
-  material_code: string;
-  material_name?: string | null;
   need_ship_to_beijing: boolean;
   shipping_address?: string | null;
   shipping_contact?: string | null;
@@ -754,6 +751,7 @@ export type NotificationEvent = {
   event_type: string;
   target_type: string;
   target_id: number;
+  ticket_id?: number | null;
   title: string;
   content?: string | null;
   priority: string;
@@ -761,12 +759,46 @@ export type NotificationEvent = {
   recipient_role_code?: string | null;
   delivery_channel?: string;
   delivery_status: string;
+  status?: string;
+  requires_attention?: boolean;
   read_at?: string | null;
   resolved_at?: string | null;
+  state_user_id?: number;
+  state_username?: string | null;
+  state_user_real_name?: string | null;
   metadata?: JsonRecord | null;
   metadata_json?: JsonRecord | null;
   delivered_at?: string | null;
   created_at?: string;
+};
+
+export type NotificationCenterItem = {
+  group_key: string;
+  ticket_id?: number | null;
+  ticket_no?: string | null;
+  title: string;
+  content?: string | null;
+  event_type: string;
+  priority: string;
+  latest_event_id: number;
+  latest_created_at?: string | null;
+  target_type: string;
+  target_id: number;
+  active_event_count: number;
+  unread_event_count: number;
+  status: 'unread' | 'read';
+  state_user_id: number;
+  state_username?: string | null;
+  state_user_real_name?: string | null;
+};
+
+export type NotificationCenterPage = PageData<NotificationCenterItem> & {
+  unread_total: number;
+};
+
+export type NotificationCenterSummary = {
+  attention_count: number;
+  unread_attention_count: number;
 };
 
 export type WorkflowStatus = {

@@ -18,7 +18,7 @@ router = APIRouter()
 @router.get("/tasks")
 async def list_tasks(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     page_no: Annotated[int, Query(alias="page", ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status: str | None = None,
@@ -53,7 +53,7 @@ async def list_tasks(
 async def get_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     return ok(await manual_review_service.get_task_detail(session, task_id))
@@ -63,7 +63,7 @@ async def get_task(
 async def claim_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del task_id, session, current_user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
@@ -74,7 +74,7 @@ async def assign_task(
     task_id: int,
     payload: ManualTaskAssignRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del task_id, payload, session, current_user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
@@ -84,7 +84,7 @@ async def assign_task(
 async def release_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del task_id, session, current_user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
@@ -95,7 +95,7 @@ async def resolve_task(
     task_id: int,
     payload: ManualTaskResolveRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await manual_review_service.resolve_task(
         session,
@@ -115,7 +115,7 @@ async def reparse_task(
     task_id: int,
     payload: ManualTaskReparseRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await manual_review_service.reparse_task(
         session,

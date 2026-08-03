@@ -42,11 +42,45 @@ export const reviewStatusLabels: Record<string, string> = {
 };
 
 export const taskStatusLabels: Record<string, string> = {
-  pending: '待处理',
-  assigned: '已分配',
+  pending: '待分配',
+  assigned: '已分配待处理',
   claimed: '处理中',
   resolved: '已解决',
   closed: '已关闭',
+};
+
+export const routeStatusLabels: Record<string, string> = {
+  pending: '待匹配',
+  resolved: '已匹配',
+  needs_manual: '需人工确认',
+};
+
+export const sapStatusLabels: Record<string, string> = {
+  pending: '待提交 SAP',
+  submitting: '提交 SAP 中',
+  submitted: '已提交 SAP',
+  accepted: 'SAP 已受理',
+  waiting_rma: '等待 RMA 回填',
+  rma_received: 'RMA 已回填',
+  failed: 'SAP 处理失败',
+  timed_out: 'SAP 回填超时',
+};
+
+export const rmaStatusLabels: Record<string, string> = {
+  pending: '待生成 RMA',
+  not_required: '无需 RMA',
+  generated: 'RMA 已生成',
+  sent: 'RMA 已发送',
+  failed: 'RMA 处理失败',
+  manual_review: 'RMA 需人工复核',
+};
+
+export const validationStatusLabels: Record<string, string> = {
+  pending: '待校验',
+  pass: '校验通过',
+  passed: '校验通过',
+  failed: '校验失败',
+  stale: '需重新校验',
 };
 
 export const taskPriorityColors: Record<string, string> = {

@@ -54,8 +54,6 @@ BOARD_CARD_FIELDS = (
     "return_location",
     "route_type",
     "customer_scope",
-    "material_code",
-    "material_name",
     "need_ship_to_beijing",
     "shipping_address",
     "shipping_contact",

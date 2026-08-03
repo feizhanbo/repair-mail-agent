@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, DatePicker, Descriptions, Drawer, Form, Input, Select, Space, Table, Tag, message } from 'antd';
+import { Button, DatePicker, Descriptions, Drawer, Form, Input, Select, Space, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -11,6 +11,7 @@ import SectionPanel from '../components/SectionPanel';
 import type { NotificationEvent } from '../types/api';
 import { filtersWithDateRange } from '../utils/filters';
 import { formatTime } from '../utils/format';
+import { useAuthStore } from '../stores/authStore';
 
 type NotificationFilters = {
   delivery_status?: string;
@@ -22,6 +23,7 @@ type NotificationFilters = {
 };
 
 export default function NotificationsPage() {
+  const currentUserId = useAuthStore((state) => state.user?.id);
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [selected, setSelected] = useState<NotificationEvent | null>(null);
@@ -44,7 +46,7 @@ export default function NotificationsPage() {
 
   const jumpToTarget = async (record: NotificationEvent) => {
     try {
-      if (record.delivery_status === 'unread' || record.delivery_status === 'pending') {
+      if (record.state_user_id === currentUserId && (record.delivery_status === 'unread' || record.delivery_status === 'pending')) {
         await api.markNotificationRead(record.id);
       }
       void queryClient.invalidateQueries({ queryKey: ['notifications'] });
@@ -58,7 +60,9 @@ export default function NotificationsPage() {
   };
 
   const columns: ColumnsType<NotificationEvent> = [
+    { title: '所属用户', width: 130, render: (_, record) => record.state_user_real_name || record.state_username || `用户 #${record.state_user_id}` },
     { title: '标题', dataIndex: 'title', ellipsis: true },
+    { title: '工单', dataIndex: 'ticket_id', width: 90, render: (value: number | null | undefined) => value ? `#${value}` : '-' },
     { title: '类型', dataIndex: 'event_type', width: 150 },
     { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <Tag color={value === 'high' ? 'orange' : 'blue'}>{value}</Tag> },
     {
@@ -78,7 +82,7 @@ export default function NotificationsPage() {
       render: (_, record) => (
         <Space>
           <Button size="small" onClick={() => setSelected(record)}>详情</Button>
-          <Button size="small" disabled={record.delivery_status === 'read' || record.delivery_status === 'resolved'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
+          <Button size="small" disabled={record.state_user_id !== currentUserId || record.delivery_status === 'read' || record.delivery_status === 'resolved'} onClick={() => readMutation.mutate(record.id)}>已读</Button>
           <Button size="small" onClick={() => void jumpToTarget(record)}>跳转</Button>
         </Space>
       ),
@@ -89,6 +93,7 @@ export default function NotificationsPage() {
     <div className="page-stack">
       <PageTitle title="站内消息" />
       <SectionPanel>
+        <Typography.Text type="secondary">这里汇总所有通知事件，包括业务结果、待处理问题和已解决历史。</Typography.Text>
         <Form<NotificationFilters>
           form={filterForm}
           layout="inline"
@@ -103,7 +108,7 @@ export default function NotificationsPage() {
             <Select
               allowClear
               style={{ width: 140 }}
-              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }]}
+              options={[{ value: 'pending', label: '未读' }, { value: 'read', label: '已读' }, { value: 'resolved', label: '已解决' }]}
               placeholder="消息状态"
             />
           </Form.Item>
@@ -159,9 +164,11 @@ export default function NotificationsPage() {
           <div className="drawer-stack">
             <Descriptions bordered column={1} size="small">
               <Descriptions.Item label="标题">{selected.title}</Descriptions.Item>
+              <Descriptions.Item label="所属用户">{selected.state_user_real_name || selected.state_username || `用户 #${selected.state_user_id}`}</Descriptions.Item>
               <Descriptions.Item label="内容">{selected.content || '-'}</Descriptions.Item>
               <Descriptions.Item label="事件类型">{selected.event_type}</Descriptions.Item>
               <Descriptions.Item label="目标">{selected.target_type} #{selected.target_id}</Descriptions.Item>
+              <Descriptions.Item label="关联工单">{selected.ticket_id ? `#${selected.ticket_id}` : '-'}</Descriptions.Item>
               <Descriptions.Item label="状态">{selected.delivery_status}</Descriptions.Item>
               <Descriptions.Item label="已读时间">{formatTime(selected.read_at)}</Descriptions.Item>
               <Descriptions.Item label="解决时间">{formatTime(selected.resolved_at)}</Descriptions.Item>

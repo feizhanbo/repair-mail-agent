@@ -28,7 +28,7 @@ from app.models import (
 from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars
 
-ROLE_CODES = ("admin", "supervisor", "operator")
+ROLE_CODES = ("admin", "operator")
 USER_FIELDS = (
     "id",
     "username",

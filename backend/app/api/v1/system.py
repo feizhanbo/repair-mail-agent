@@ -68,7 +68,7 @@ def _config_payload() -> dict:
 @router.get("/info")
 async def system_info(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     statuses = (await session.execute(select(WorkflowStatus).order_by(WorkflowStatus.sort_order, WorkflowStatus.id))).scalars().all()
@@ -107,7 +107,7 @@ async def system_info(
 @router.get("/runtime-status")
 async def runtime_status(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     latest_imap = await session.scalar(
@@ -150,14 +150,14 @@ async def runtime_status(
 
 
 @router.get("/config")
-async def get_config(current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))]) -> dict:
+async def get_config(current_user: Annotated[CurrentUser, Depends(require_roles("admin"))]) -> dict:
     del current_user
     return ok(_config_payload())
 
 
 @router.get("/integrations/sqlserver/status")
 async def sqlserver_status(
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator", "supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     return ok(relay_configuration_status())
@@ -234,7 +234,7 @@ def _reply_template_payload(template: ReplyTemplate) -> dict:
 @router.get("/reply-templates")
 async def list_reply_templates(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("supervisor"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     rows = (
