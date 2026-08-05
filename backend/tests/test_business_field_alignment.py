@@ -179,6 +179,35 @@ async def test_domestic_board_can_resolve_beijing() -> None:
 
 
 @pytest.mark.anyio
+async def test_revalidation_preserves_valid_manually_selected_route() -> None:
+    ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
+    selected = board("M8107", "tianjin", name="CBIT128")
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        board_name="CBIT128",
+        matched_board_card_id=selected.id,
+        return_location="tianjin",
+        return_route_source="manual_selected",
+        return_route_status="resolved",
+    )
+    session = QueueSession(
+        get_values={(BoardCard, selected.id): selected},
+    )
+
+    result = await business_resolution.resolve_item_return_route(
+        session,
+        ticket=ticket,
+        item=item,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["route_source"] == "manual_selected"
+    assert result["matched_board_card_id"] == selected.id
+
+
+@pytest.mark.anyio
 async def test_domestic_code_with_two_locations_requires_manual() -> None:
     ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
     item = RepairTicketItem(id=2, ticket_id=1, line_no=1, board_code="M1")

@@ -272,6 +272,50 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "template_code": "all_replies_domestic_company_base_zh",
+        "template_name": "所有回复邮件基础模板（Miya 完整签名）",
+        "template_type": "domestic_company_base",
+        "language": "zh-CN",
+        "version": "v2",
+        "subject_template": None,
+        "body_template": (
+            "{{ content }}\n\n\n"
+            "Best Regards!\n"
+            "-----------------------------------------------------\n"
+            "Miya Fang (方菲)\n\n"
+            "AccoTEST Business Unit of Beijing Huafeng Test & Control Technology Co.,Ltd\n"
+            "Tel: +86-512-67678157/62982753*801\n"
+            "Cell Phone: 86-15001161080\n"
+            "E-mail:miya.fang@accotest.com\n"
+            "Address: Room309, A1 Building, #388 XinPing Street, Suzhou, 215123 P.R. China\n"
+            "地址:江苏省苏州市工业园区新平街388号 腾飞创新园 塔楼A1-309室\n"
+            "www.accotest.com\n"
+            "本电邮所包含或其随附的信息可能属于保密信息，仅供指定收件方使用。如阁下并非本电邮指明的收件方，"
+            "请将阁下拥有的本电邮及其所有备份（包括所有附件）删除并销毁，并将阁下误收本电邮一事通知发件方或华峰测控；"
+            "在此特提请阁下注意不得泄露、复制或散发本电邮，并不得倚赖本电邮而采取任何行动。\n"
+            "The information contained in and accompanying this email may be confidential, and is intended solely for the use of the intended recipient(s).  "
+            "If you are not the intended recipient of this email, please delete and destroy all copies (including any attachments) in your possession, "
+            "notify the sender or Beijing Huafeng Test & Control Technology Co., Ltd. that you have received this email in error, and you are hereby notified "
+            "that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited."
+        ),
+        "html_body_template": (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">{{ content }}<br><br><br>'
+            'Best Regards!<br>-----------------------------------------------------<br>'
+            'Miya Fang (方菲)<br><br>'
+            'AccoTEST Business Unit of Beijing Huafeng Test &amp; Control Technology Co.,Ltd<br>'
+            'Tel: +86-512-67678157/62982753*801<br>Cell Phone: 86-15001161080<br>'
+            'E-mail:miya.fang@accotest.com<br>'
+            'Address: Room309, A1 Building, #388 XinPing Street, Suzhou, 215123 P.R. China<br>'
+            '地址:江苏省苏州市工业园区新平街388号 腾飞创新园 塔楼A1-309室<br>www.accotest.com<br>'
+            '本电邮所包含或其随附的信息可能属于保密信息，仅供指定收件方使用。如阁下并非本电邮指明的收件方，请将阁下拥有的本电邮及其所有备份（包括所有附件）删除并销毁，并将阁下误收本电邮一事通知发件方或华峰测控；在此特提请阁下注意不得泄露、复制或散发本电邮，并不得倚赖本电邮而采取任何行动。<br>'
+            'The information contained in and accompanying this email may be confidential, and is intended solely for the use of the intended recipient(s).  '
+            'If you are not the intended recipient of this email, please delete and destroy all copies (including any attachments) in your possession, '
+            'notify the sender or Beijing Huafeng Test &amp; Control Technology Co., Ltd. that you have received this email in error, and you are hereby notified '
+            'that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited.'
+            '</div>'
+        ),
+    },
+    {
         "template_code": "missing_info_zh",
         "template_name": "补充报修信息",
         "template_type": "missing_fields",
@@ -350,6 +394,35 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "2. 请妥善包装设备，并寄送至以下地址：\n"
             "{{ return_address_block }}\n"
             "3. 维修工期预计为 10 个工作日，实际进度以维修检测结果为准。\n\n谢谢。"
+        ),
+    },
+    {
+        "template_code": "rma_authorization_domestic_zh",
+        "template_name": "国内 RMA 维修授权回复（参考邮件 v2）",
+        "template_type": "rma_authorization_domestic",
+        "language": "zh-CN",
+        "version": "rma_reply_zh_v2",
+        "subject_template": "{{ rma_attachment_basename }}",
+        "body_template": (
+            "Dear {{ contact_person }} ：\n"
+            "RMA表格见附件。\n"
+            "为了不耽误贵司维修进度，请注意以下事项：\n"
+            "1.请务必打印出RMA表，并与报修板一起寄出。\n"
+            "2.请务必注意板子的包装良好及核对板子的返回地址是否正确,如若中途改地址请提前告知\n"
+            "3.维修工期：10个工作日\n"
+            "  请寄如下地址：(寄错会延长返修时效）\n"
+            "{{ return_address_block }}"
+        ),
+        "html_body_template": (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">'
+            'Dear {{ contact_person }} ：<br>'
+            'RMA表格见附件。<br>'
+            '为了不耽误贵司维修进度，请注意以下事项：<br>'
+            '1.请务必打印出RMA表，并与报修板一起寄出。<br>'
+            '2.请务必注意板子的包装良好及核对板子的返回地址是否正确,如若中途改地址请提前告知<br>'
+            '3.维修工期：10个工作日<br>'
+            '请寄如下地址：(寄错会延长返修时效）<br>'
+            '<span style="white-space:pre-line">{{ return_address_block }}</span></div>'
         ),
     },
     {
@@ -658,6 +731,7 @@ async def _seed_reply_templates(session: AsyncSession, creator_user_id: int) -> 
             "language": values["language"],
             "subject_template": values.get("subject_template"),
             "body_template": values["body_template"],
+            "html_body_template": values.get("html_body_template"),
             "enabled": values.get("enabled", True),
             "created_by_user_id": creator_user_id,
         }

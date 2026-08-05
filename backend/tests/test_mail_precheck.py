@@ -83,3 +83,43 @@ async def test_precheck_keeps_unknown_email_for_review() -> None:
     assert result.accepted is True
     assert result.status == "accepted"
     assert result.intent_type == "unknown"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recipient_field", ["to_addresses", "cc_addresses", "delivered_to_addresses", "x_original_to_addresses"])
+async def test_imap_precheck_accepts_target_from_supported_recipient_headers(monkeypatch, recipient_field: str) -> None:
+    monkeypatch.setattr("app.services.mail_precheck.settings.IMAP_USER", "rmatest1@accotest.com")
+    payload = _payload(subject="Repair SN001", text_body="Please repair SN001")
+    payload.to_addresses = "customer@example.com"
+    setattr(payload, recipient_field, "RMA Test <rmatest1@accotest.com>")
+
+    result = await precheck_email_payload(FakeSession(), payload, enforce_target_mailbox=True)
+
+    assert result.accepted is True
+
+
+@pytest.mark.anyio
+async def test_imap_precheck_rejects_mail_sent_by_target_account(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.mail_precheck.settings.IMAP_USER", "rmatest1@accotest.com")
+    payload = _payload(subject="Repair SN001", text_body="Please repair SN001")
+    payload.from_address = "RMA Test <rmatest1@accotest.com>"
+    payload.to_addresses = "rmatest2@accotest.com"
+
+    result = await precheck_email_payload(FakeSession(), payload, enforce_target_mailbox=True)
+
+    assert result.accepted is False
+    assert result.status == "self_sent_mail_skipped"
+    assert result.reason == "SELF_SENT_MAIL_SKIPPED"
+
+
+@pytest.mark.anyio
+async def test_imap_precheck_rejects_mail_not_delivered_to_target_account(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.mail_precheck.settings.IMAP_USER", "rmatest1@accotest.com")
+    payload = _payload(subject="Repair SN001", text_body="Please repair SN001")
+    payload.to_addresses = "someone-else@example.com"
+
+    result = await precheck_email_payload(FakeSession(), payload, enforce_target_mailbox=True)
+
+    assert result.accepted is False
+    assert result.status == "recipient_not_target_mailbox"
+    assert result.reason == "RECIPIENT_NOT_TARGET_MAILBOX"

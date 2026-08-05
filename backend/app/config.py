@@ -164,7 +164,7 @@ class Settings(BaseSettings):
 
     RMA_AUTHORIZATION_ENABLED: bool = True
     RMA_PDF_TEMPLATE_PATH: str = str(
-        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_v1.pdf"
+        BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_auto_v3_1.pdf"
     )
     RMA_PDF_LAYOUT_PATH: str = str(
         BACKEND_DIR / "app" / "resources" / "rma_pdf" / "layout_v3_2_reference.yaml"
@@ -174,8 +174,10 @@ class Settings(BaseSettings):
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
     RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
-    RMA_PDF_MAILING_CONTACT_PERSON: str = "牛世磊"
-    RMA_PDF_MAILING_CONTACT_PHONE: str = "086-15101248952"
+    RMA_PDF_MAILING_CONTACT_PERSON: str = ""
+    RMA_PDF_MAILING_CONTACT_PHONE: str = ""
+    RMA_PDF_TYPICAL_MAX_BYTES: int = 500_000
+    RMA_PDF_MAX_BYTES: int = 2_000_000
     RMA_DEFAULT_BEIJING_COMPANY: str = "北京华峰测控技术股份有限公司"
     RMA_DEFAULT_BEIJING_ADDRESS: str = "北京市海淀区丰豪东路9号院5号楼"
     RMA_DEFAULT_BEIJING_CONTACT: str = "李连荣"

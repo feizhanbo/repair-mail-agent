@@ -31,11 +31,18 @@ class _ScalarRows:
 
 
 class _PollSession:
-    def __init__(self, export: TicketRelayExport, ticket: RepairTicket, lines: list[ExportSap]):
+    def __init__(
+        self,
+        export: TicketRelayExport,
+        ticket: RepairTicket,
+        lines: list[ExportSap],
+        scalar_results: list[object | None] | None = None,
+    ):
         self.export = export
         self.ticket = ticket
         self.lines = lines
         self.added: list[object] = []
+        self.scalar_results = list(scalar_results or [])
 
     async def get(self, model, object_id, **_kwargs):
         if model is TicketRelayExport and object_id == self.export.id:
@@ -48,7 +55,7 @@ class _PollSession:
         return _ScalarRows(self.lines)
 
     async def scalar(self, _statement):
-        return None
+        return self.scalar_results.pop(0) if self.scalar_results else None
 
     def add(self, value):
         self.added.append(value)
@@ -165,6 +172,48 @@ def test_two_sn_with_same_rma_create_one_ticket_rma(monkeypatch: pytest.MonkeyPa
     assert len([row for row in session.added if isinstance(row, TicketRmaItem)]) == 2
     assert {line.rma_no for line in lines} == {"2026072801"}
     enqueue.assert_awaited_once()
+
+
+def test_unsent_existing_rma_uses_latest_export_policy_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export, ticket, lines = _batch_fixture()
+    for line in lines:
+        line.policy_snapshot = {
+            **(line.policy_snapshot or {}),
+            "policy_type": "default",
+        }
+    existing = TicketRma(
+        id=70,
+        ticket_id=ticket.id,
+        rma_no="2026072801",
+        status="received",
+        policy_snapshot={"lines": [{"policy_type": "special_out_of_warranty"}]},
+    )
+    session = _PollSession(
+        export,
+        ticket,
+        lines,
+        scalar_results=[None, None, existing, None, None],
+    )
+
+    async def poll(_call_id: str):
+        return {"status": "rma_received", "rma_no": "2026072801"}
+
+    monkeypatch.setattr(sap_rma, "poll_rma_from_relay", poll)
+    monkeypatch.setattr(
+        sap_rma,
+        "enqueue_job",
+        AsyncMock(return_value=SimpleNamespace(id=88)),
+    )
+    monkeypatch.setattr(sap_rma, "notify_ticket_once", AsyncMock())
+
+    result = asyncio.run(sap_rma.poll_export_batch(session, export_id=export.id))
+
+    assert result["status"] == "rma_received"
+    assert existing.policy_snapshot == {
+        "lines": [line.policy_snapshot for line in lines]
+    }
 
 
 def test_two_sn_with_different_rma_require_manual_review(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -88,6 +88,7 @@ async def test_rma_issue_closes_only_after_all_archive_gates_pass(
 
     assert closed is True
     assert ticket.current_status_code == "closed"
+    assert ticket.rma_status == "issued"
     assert reply.archive_status == "archived"
     assert reply.archive_verified_at is not None
     assert rma.status == "issued"
@@ -147,6 +148,51 @@ async def test_archive_retry_never_calls_smtp(
     assert result["status"] == "closed"
     assert result["idempotent_reuse"] is False
     replies._send_reply_via_smtp.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_closed_archive_retry_normalizes_ticket_rma_status_without_smtp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="T-1",
+        current_status_code="closed",
+        rma_status="sent",
+    )
+    reply = ReplyRecord(
+        id=2,
+        ticket_id=1,
+        reply_type="rma_authorization",
+        to_addresses="rmatest2@accotest.com",
+        send_status="sent",
+    )
+    rma = TicketRma(
+        id=3,
+        ticket_id=1,
+        rma_no="2026070910",
+        status="issued",
+        issued_at=replies.utcnow(),
+    )
+
+    async def get(model, _object_id, **_kwargs):
+        return reply if model is ReplyRecord else ticket if model is RepairTicket else None
+
+    session = SimpleNamespace(get=get, scalar=AsyncMock(return_value=rma))
+    monkeypatch.setattr(
+        replies,
+        "_send_reply_via_smtp",
+        Mock(side_effect=AssertionError("closed archive retry must never call SMTP")),
+    )
+
+    result = await replies.retry_rma_archive(
+        session,
+        reply_id=reply.id,
+        user_id=8,
+    )
+
+    assert result["idempotent_reuse"] is True
+    assert ticket.rma_status == "issued"
 
 
 @pytest.mark.anyio

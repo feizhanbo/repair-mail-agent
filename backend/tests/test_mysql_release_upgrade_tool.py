@@ -110,7 +110,7 @@ def test_upgrade_step_timeout_is_reported_and_process_is_killed(
 def test_schema_audit_constants_match_release_head_and_models() -> None:
     from app.models import Base
 
-    assert check_sap_schema.EXPECTED_REVISION == "k8f3a4b5c6d7"
+    assert check_sap_schema.EXPECTED_REVISION == "m0h5c6d7e8f9"
     assert check_sap_schema.EXPECTED_BUSINESS_TABLE_COUNT == len(Base.metadata.tables)
     assert audit_mail_release.REQUIRED_REVISION == check_sap_schema.EXPECTED_REVISION
 
@@ -147,7 +147,7 @@ def test_full_migration_chain_can_render_offline_sql() -> None:
 
     assert result.returncode == 0, result.stderr[-2000:]
     assert "PRECONDITION: export_sap must contain zero legacy rows" in result.stdout
-    assert "k8f3a4b5c6d7" in result.stdout
+    assert "m0h5c6d7e8f9" in result.stdout
 
 
 def test_settings_normalize_legacy_aiomysql_url_without_changing_target() -> None:

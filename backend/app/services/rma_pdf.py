@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import re
@@ -8,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import fitz
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,7 +21,7 @@ from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 TEMPLATE_VERSION = "rma_authorization_v3_2_reference"
-TEMPLATE_SHA256 = "35c70a98f0c3256e21dfe3776cf516883f14d9b44becb6c846ca0f0311bb0e6e"
+TEMPLATE_SHA256 = "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0"
 LEGACY_TEMPLATE_VERSIONS = {"v1", "rma_authorization_v1", "rma_authorization_zh_v1"}
 CODE39_PATTERN = re.compile(r"^[0-9A-Z\-. $/+%]+$")
 
@@ -115,20 +116,18 @@ class _FieldSpec:
 
 
 class _FixedBoxTextWriter:
-    def __init__(self, font_path: str | Path | None) -> None:
-        self.font_path = Path(font_path) if font_path else None
-        if self.font_path:
-            if not self.font_path.is_file():
-                raise RmaPdfError("RMA_CJK_FONT_UNAVAILABLE")
-            self.font = fitz.Font(fontfile=str(self.font_path))
+    def __init__(self, font_buffer: bytes | None) -> None:
+        self.font_buffer = font_buffer
+        if self.font_buffer:
+            self.font = fitz.Font(fontbuffer=self.font_buffer)
             self.font_name = "RMA_CJK"
         else:
             self.font = fitz.Font(fontname="china-s")
             self.font_name = "china-s"
 
     def register(self, page: fitz.Page) -> None:
-        if self.font_path:
-            page.insert_font(fontname=self.font_name, fontfile=str(self.font_path))
+        if self.font_buffer:
+            page.insert_font(fontname=self.font_name, fontbuffer=self.font_buffer)
         else:
             page.insert_font(fontname=self.font_name)
 
@@ -230,6 +229,47 @@ def _resolve_cjk_font_path() -> Path | None:
         Path("C:/Windows/Fonts/msyh.ttc"),
     )
     return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _subset_cjk_font(font_path: Path | None, text: str) -> bytes | None:
+    if font_path is None:
+        return None
+    try:
+        from fontTools import subset
+        from fontTools.ttLib import TTFont
+
+        kwargs = {"fontNumber": 0} if font_path.suffix.lower() in {".ttc", ".otc"} else {}
+        font = TTFont(str(font_path), **kwargs)
+        options = subset.Options()
+        options.recalc_average_width = True
+        subsetter = subset.Subsetter(options=options)
+        subsetter.populate(text=text)
+        subsetter.subset(font)
+        output = io.BytesIO()
+        font.save(output)
+        result = output.getvalue()
+        if not result:
+            raise ValueError("empty subset")
+        return result
+    except Exception as exc:
+        raise RmaPdfError("RMA_FONT_SUBSET_FAILED") from exc
+
+
+def _dynamic_text(data: RmaPdfData) -> str:
+    values: list[str] = [
+        data.rma_no,
+        f"{data.request_date.year}/{data.request_date.month}/{data.request_date.day}",
+        data.currency,
+        data.customer_name,
+        data.mailing_address,
+        data.mailing_contact,
+        data.delivery_fee_paid_by_customer,
+        data.repair_fee_paid_by_customer,
+        format(data.total_cost.normalize(), "f"),
+    ]
+    for row_number, item in enumerate(data.items, start=1):
+        values.extend(str(value) for value in _row_values(data, item, row_number).values())
+    return "\n".join(values)
 
 
 def _load_layout(path: str | Path | None = None) -> dict[str, Any]:
@@ -345,6 +385,15 @@ def _validate_snapshot(
             raise RmaPdfError("RMA_SAFETY_SNAPSHOT_MISMATCH")
 
 
+def _latest_export_rows_by_item(rows: Iterable[ExportSap]) -> dict[int, ExportSap]:
+    latest: dict[int, ExportSap] = {}
+    for row in rows:
+        current = latest.get(row.ticket_item_id)
+        if current is None or (row.id or 0) > (current.id or 0):
+            latest[row.ticket_item_id] = row
+    return latest
+
+
 async def build_rma_pdf_data(
     session: AsyncSession,
     *,
@@ -395,18 +444,24 @@ async def build_rma_pdf_data(
                     ExportSap.ticket_id == ticket.id,
                     ExportSap.rma_no == rma_record.rma_no,
                     ExportSap.status == "rma_received",
-                )
+                ).order_by(ExportSap.id)
             )
         ).scalars().all()
     )
-    export_by_item = {row.ticket_item_id: row for row in export_rows}
+    # A ticket may be exported again after a policy or route correction while
+    # SAP legitimately keeps the same RMA number.  In that case historical
+    # rma_received rows remain as immutable audit evidence.  The PDF must use
+    # only the newest accepted row for each ticket item; summing every export
+    # row would double-charge the customer.
+    export_by_item = _latest_export_rows_by_item(export_rows)
     if len(export_by_item) != len(items):
         raise RmaPdfError("RMA_EXPORT_ITEMS_INCOMPLETE")
-    currencies = {str(row.currency or "").upper() for row in export_rows}
+    selected_export_rows = list(export_by_item.values())
+    currencies = {str(row.currency or "").upper() for row in selected_export_rows}
     if len(currencies) != 1:
         raise RmaPdfError("RMA_CURRENCY_CONFLICT")
     currency = next(iter(currencies))
-    total_cost = sum((row.repair_fee or Decimal("0")) for row in export_rows)
+    total_cost = sum((row.repair_fee or Decimal("0")) for row in selected_export_rows)
     normalized_sns = [(item.sn or "").strip().casefold() for item in items]
     if len(normalized_sns) != len(set(normalized_sns)):
         raise RmaPdfError("RMA_DUPLICATE_SN")
@@ -624,7 +679,7 @@ def render_rma_pdf(
         if document.page_count != rma_pdf_page_count(len(data.items)):
             raise RmaPdfError("RMA_PAGINATION_FAILED")
 
-        writer = _FixedBoxTextWriter(_resolve_cjk_font_path())
+        writer = _FixedBoxTextWriter(_subset_cjk_font(_resolve_cjk_font_path(), _dynamic_text(data)))
         for page in document:
             writer.register(page)
         specs = _field_specs(layout)
@@ -671,15 +726,10 @@ def render_rma_pdf(
         # Test safety is enforced by the mail envelope/subject gate, never by
         # modifying the customer-facing PDF.
         del test_only
-        try:
-            import fontTools.subset  # noqa: F401
-        except ModuleNotFoundError:
-            # The production image installs fonttools; keep offline development
-            # functional while preserving the embedded licensed font.
-            pass
-        else:
-            document.subset_fonts(fallback=True)
-        return document.tobytes(garbage=4, deflate=True, clean=True)
+        result = document.tobytes(garbage=4, deflate=True, clean=True)
+        if len(result) > settings.RMA_PDF_MAX_BYTES:
+            raise RmaPdfError("RMA_PDF_TOO_LARGE")
+        return result
     except RmaPdfError:
         raise
     except Exception as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from email.utils import getaddresses, parseaddr
 from typing import Any
 
 from sqlalchemy import or_, select
@@ -107,9 +108,40 @@ async def precheck_imap_uid(
 async def precheck_email_payload(
     session: AsyncSession,
     payload: EmailIngestRequest,
+    *,
+    enforce_target_mailbox: bool = False,
 ) -> MailPrecheckResult:
     message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
     payload.message_id = message_id
+
+    if enforce_target_mailbox:
+        target = parseaddr(settings.IMAP_USER or "")[1].strip().lower()
+        sender = parseaddr(payload.from_address or "")[1].strip().lower()
+        recipient_headers = (
+            payload.to_addresses,
+            payload.cc_addresses,
+            payload.delivered_to_addresses,
+            payload.x_original_to_addresses,
+        )
+        recipients = {
+            address.strip().lower()
+            for _name, address in getaddresses([value for value in recipient_headers if value])
+            if address.strip()
+        }
+        if target and sender == target:
+            return MailPrecheckResult(
+                accepted=False,
+                status="self_sent_mail_skipped",
+                reason="SELF_SENT_MAIL_SKIPPED",
+                message_id=message_id,
+            )
+        if target and target not in recipients:
+            return MailPrecheckResult(
+                accepted=False,
+                status="recipient_not_target_mailbox",
+                reason="RECIPIENT_NOT_TARGET_MAILBOX",
+                message_id=message_id,
+            )
 
     duplicate_predicates = [Email.message_id == message_id]
     if payload.raw_eml_sha256:

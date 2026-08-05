@@ -41,12 +41,12 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
     zh_type, zh_version = replies._rma_reply_template_type(_ticket(language_code="zh-CN"))
     en_type, en_version = replies._rma_reply_template_type(_ticket())
 
-    assert zh_version == "rma_reply_zh_v1"
+    assert zh_version == "rma_reply_zh_v2"
     assert en_version == "overseas_in_warranty_v1"
     assert zh_type == "rma_authorization_domestic"
     assert en_type == "rma_authorization_overseas_in_warranty"
     templates = {item["template_type"]: item for item in REPLY_TEMPLATES}
-    assert "RMA维修授权表见附件" in templates[zh_type]["body_template"]
+    assert "RMA表格见附件" in templates[zh_type]["body_template"]
     assert "RMA authorization form is attached" in templates[en_type]["body_template"]
     assert TEMPLATE_VERSION not in {zh_version, en_version}
     assert all(
@@ -54,6 +54,39 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
         for item in REPLY_TEMPLATES
         if item["template_type"].startswith("rma_authorization")
     )
+
+
+def test_domestic_rma_v2_contains_reference_body_and_full_miya_signature_in_both_formats() -> None:
+    rma = next(
+        item for item in REPLY_TEMPLATES
+        if item["template_type"] == "rma_authorization_domestic" and item["version"] == "rma_reply_zh_v2"
+    )
+    base = next(
+        item for item in REPLY_TEMPLATES
+        if item["template_type"] == "domestic_company_base" and item["version"] == "v2"
+    )
+    required_rma_phrases = (
+        "Dear {{ contact_person }}",
+        "RMA表格见附件",
+        "请务必打印出RMA表",
+        "维修工期：10个工作日",
+        "{{ return_address_block }}",
+    )
+    required_signature_phrases = (
+        "Miya Fang (方菲)",
+        "+86-512-67678157/62982753*801",
+        "86-15001161080",
+        "miya.fang@accotest.com",
+        "江苏省苏州市工业园区新平街388号",
+        "The information contained in and accompanying this email may be confidential",
+    )
+
+    for phrase in required_rma_phrases:
+        assert phrase in rma["body_template"]
+        assert phrase in rma["html_body_template"]
+    for phrase in required_signature_phrases:
+        assert phrase in base["body_template"]
+        assert phrase in base["html_body_template"]
 
 
 def test_return_address_blocks_match_confirmed_business_text() -> None:

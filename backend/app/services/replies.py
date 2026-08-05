@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import re
 import smtplib
@@ -26,10 +27,11 @@ from app.models import (
     ReplyRecord,
     ReplyTemplate,
     RepairTicket,
+    RepairTicketItem,
     TicketRma,
 )
 from app.services.audit import log_operation, log_system_event
-from app.services.business_rules import is_followup_reply_type
+from app.services.business_rules import is_followup_reply_type, required_missing_for_ticket
 from app.services.business_notifications import notify_ticket_once
 from app.services.common import model_to_dict, utcnow
 from app.services.external_operations import (
@@ -98,6 +100,10 @@ REPLY_FIELDS = (
     "subject",
     "draft_body",
     "final_body",
+    "draft_html_body",
+    "final_html_body",
+    "thread_history_hash",
+    "render_hash",
     "generate_source",
     "ai_call_log_id",
     "rma_pdf_oss_object_id",
@@ -259,7 +265,7 @@ async def _require_reply_parent(
     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-RMA_REPLY_ZH_VERSION = "rma_reply_zh_v1"
+RMA_REPLY_ZH_VERSION = "rma_reply_zh_v2"
 OVERSEAS_WARRANTY_IN_VERSION = "overseas_in_warranty_v1"
 OVERSEAS_WARRANTY_OUT_VERSION = "overseas_out_warranty_v1"
 OVERSEAS_WARRANTY_ST_VERSION = "overseas_st_pickup_v1"
@@ -324,6 +330,70 @@ def _missing_fields_text(missing_fields: dict[str, Any] | None) -> str:
     return "\n".join(f"- {key}: {value}" for key, value in missing_fields.items())
 
 
+THREAD_HISTORY_SEPARATOR = "\n\n________________________________\n"
+
+
+def _plain_to_html(value: str) -> str:
+    return '<div style="font-family:Arial,Helvetica,sans-serif;white-space:normal">' + html.escape(value).replace("\n", "<br>\n") + "</div>"
+
+
+def _render_hash(*, subject: str | None, plain: str | None, html_body: str | None, history_hash: str | None) -> str:
+    payload = "\x1f".join((subject or "", plain or "", html_body or "", history_hash or ""))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def _thread_history(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    language: str,
+) -> tuple[str, str, str]:
+    rows = list(
+        (
+            await session.execute(
+                select(Email)
+                .where(Email.thread_id == ticket.thread_id)
+                .order_by(Email.sent_at.asc(), Email.received_at.asc(), Email.id.asc())
+            )
+        ).scalars().all()
+    ) if ticket.thread_id else []
+    attachment_rows = list(
+        (
+            await session.execute(
+                select(EmailAttachment).where(EmailAttachment.email_id.in_([row.id for row in rows]))
+            )
+        ).scalars().all()
+    ) if rows else []
+    attachments: dict[int, list[str]] = {}
+    for attachment in attachment_rows:
+        attachments.setdefault(attachment.email_id, []).append(attachment.file_name)
+
+    blocks: list[str] = []
+    for row in rows:
+        timestamp = row.sent_at or row.received_at or row.created_at
+        body = (row.latest_reply_segment or row.clean_body or row.text_body or "").strip()
+        names = sorted(set(attachments.get(row.id, [])))
+        if language == "zh-CN":
+            labels = ("发件人", "发送时间", "收件人", "抄送", "主题", "附件")
+        else:
+            labels = ("From", "Sent", "To", "Cc", "Subject", "Attachments")
+        header = [
+            f"{labels[0]}： {row.from_address}",
+            f"{labels[1]}： {timestamp.strftime('%Y-%m-%d %H:%M') if timestamp else ''}",
+            f"{labels[2]}： {row.to_addresses or ''}",
+        ]
+        if row.cc_addresses:
+            header.append(f"{labels[3]}： {row.cc_addresses}")
+        header.append(f"{labels[4]}： {row.subject or ''}")
+        if names:
+            header.append(f"{labels[5]}： {', '.join(names)}")
+        blocks.append("\n".join((*header, body)).strip())
+    plain = THREAD_HISTORY_SEPARATOR.join(blocks)
+    html_body = "<br><br>".join(_plain_to_html(block) for block in blocks)
+    digest = hashlib.sha256(plain.encode("utf-8")).hexdigest()
+    return plain, html_body, digest
+
+
 def _render_template(
     template: str,
     *,
@@ -332,15 +402,19 @@ def _render_template(
     content: str = "",
     original_subject: str = "",
     return_address_block: str = "",
+    escape_values: bool = False,
 ) -> str:
+    def value(item: str) -> str:
+        return html.escape(item) if escape_values else item
+
     return (
-        template.replace("{{ ticket_no }}", ticket.ticket_no)
-        .replace("{{ missing_fields }}", _missing_fields_text(missing_fields))
-        .replace("{{ customer_name }}", ticket.customer_name or "")
-        .replace("{{ contact_person }}", ticket.contact_person or "Customer")
-        .replace("{{ content }}", content)
-        .replace("{{ original_subject }}", original_subject)
-        .replace("{{ return_address_block }}", return_address_block)
+        template.replace("{{ ticket_no }}", value(ticket.ticket_no))
+        .replace("{{ missing_fields }}", value(_missing_fields_text(missing_fields)))
+        .replace("{{ customer_name }}", value(ticket.customer_name or ""))
+        .replace("{{ contact_person }}", value(ticket.contact_person or "Customer"))
+        .replace("{{ content }}", content if escape_values else value(content))
+        .replace("{{ original_subject }}", value(original_subject))
+        .replace("{{ return_address_block }}", value(return_address_block))
     )
 
 
@@ -448,6 +522,9 @@ def _build_reply_message(
     if reply.references_header:
         message["References"] = reply.references_header
     message.set_content(reply.final_body or reply.draft_body or "")
+    rendered_html = getattr(reply, "final_html_body", None) or getattr(reply, "draft_html_body", None)
+    if rendered_html:
+        message.add_alternative(rendered_html, subtype="html")
     if attachment_content is not None:
         message.add_attachment(
             attachment_content,
@@ -545,7 +622,7 @@ async def _render_reply_templates(
     missing_fields: dict[str, Any] | None,
     parent: Email,
     customer_policy: dict[str, Any] | None = None,
-) -> tuple[str, str, ReplyTemplate | None]:
+) -> tuple[str, str, str, ReplyTemplate | None, str, str]:
     original_subject = (parent.subject or f"Repair request {ticket.ticket_no}").strip()
     policy = customer_policy or {}
     return_address_block = _return_address_block(
@@ -584,7 +661,45 @@ async def _render_reply_templates(
         if base_template is not None
         else content
     )
-    return _reply_subject(parent.subject, ticket.ticket_no), body, base_template
+    if content_template.html_body_template:
+        html_content = _render_template(
+            content_template.html_body_template,
+            ticket=ticket,
+            missing_fields=missing_fields,
+            original_subject=original_subject,
+            return_address_block=return_address_block,
+            escape_values=True,
+        )
+        if base_template is not None and base_template.html_body_template:
+            html_body = _render_template(
+                base_template.html_body_template,
+                ticket=ticket,
+                missing_fields=missing_fields,
+                content=html_content,
+                original_subject=original_subject,
+                return_address_block=return_address_block,
+                escape_values=True,
+            )
+        else:
+            html_body = html_content
+    else:
+        html_body = _plain_to_html(body)
+
+    history_plain, history_html, history_hash = await _thread_history(
+        session,
+        ticket=ticket,
+        language=content_template.language,
+    )
+    if history_plain:
+        body = body.rstrip() + THREAD_HISTORY_SEPARATOR + history_plain
+        html_body = html_body.rstrip() + '<hr style="border:0;border-top:1px solid #999">' + history_html
+    subject = _reply_subject(parent.subject, ticket.ticket_no)
+    return subject, body, html_body, base_template, history_hash, _render_hash(
+        subject=subject,
+        plain=body,
+        html_body=html_body,
+        history_hash=history_hash,
+    )
 
 
 async def _archive_outbound_email(
@@ -604,6 +719,8 @@ async def _archive_outbound_email(
         reply.outgoing_email_id = existing.id
         return existing
     body = reply.final_body or reply.draft_body or ""
+    latest_segment = body.split(THREAD_HISTORY_SEPARATOR, 1)[0].rstrip()
+    transport_subject = test_only_subject(reply.subject)
     email = Email(
         thread_id=ticket.thread_id,
         mail_direction="outbound",
@@ -619,13 +736,17 @@ async def _archive_outbound_email(
         from_address=settings.SMTP_USER or "system@repair.local",
         to_addresses=reply.to_addresses,
         cc_addresses=reply.cc_addresses,
-        subject=reply.subject,
-        normalized_subject=reply.subject,
+        # Persist the subject that was actually serialized and accepted by
+        # SMTP.  The reply record intentionally keeps the business subject so
+        # the RMA subject and PDF basename remain comparable.
+        subject=transport_subject,
+        normalized_subject=transport_subject,
         sent_at=reply.sent_at,
         received_at=reply.sent_at,
         text_body=body,
+        html_body=reply.final_html_body or reply.draft_html_body,
         clean_body=body,
-        latest_reply_segment=body,
+        latest_reply_segment=latest_segment,
         parse_status="sent",
         processing_stage="completed",
         intent_type="outbound_reply",
@@ -742,6 +863,7 @@ async def _finalize_rma_issue(
     rma_record.pdf_archived_at = now
     rma_record.status = "issued"
     rma_record.issued_at = now
+    ticket.rma_status = "issued"
     if ticket.current_status_code == "rma_sent":
         await transition_ticket(
             session,
@@ -784,6 +906,17 @@ async def retry_rma_archive(
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
     if ticket.current_status_code == "closed":
+        issued_rma = await session.scalar(
+            select(TicketRma)
+            .where(
+                TicketRma.ticket_id == ticket.id,
+                TicketRma.status == "issued",
+                TicketRma.issued_at.is_not(None),
+            )
+            .order_by(TicketRma.id.desc())
+        )
+        if issued_rma is not None:
+            ticket.rma_status = "issued"
         return {
             "status": "closed",
             "ticket_id": ticket.id,
@@ -1007,6 +1140,19 @@ async def _reply_send_guard_error(
     ticket: RepairTicket,
     reply: ReplyRecord,
 ) -> str | None:
+    if is_followup_reply_type(reply.reply_type):
+        ticket_items = list(
+            (
+                await session.execute(
+                    select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket.id)
+                )
+            ).scalars().all()
+        )
+        current_missing = required_missing_for_ticket(ticket, ticket_items)
+        if not current_missing:
+            return "FOLLOWUP_NO_LONGER_REQUIRED"
+        if current_missing != (reply.missing_fields or {}):
+            return "FOLLOWUP_MISSING_FIELDS_CHANGED_REGENERATE_REQUIRED"
     if reply.template_id is None:
         return "REPLY_TEMPLATE_REQUIRED"
     template = await session.get(ReplyTemplate, reply.template_id)
@@ -1035,6 +1181,13 @@ async def _reply_send_guard_error(
         and reply.thread_version != thread.thread_version
     ):
         return "REPLY_THREAD_CHANGED_REGENERATE_REQUIRED"
+    _history_plain, _history_html, current_history_hash = await _thread_history(
+        session,
+        ticket=ticket,
+        language=template.language,
+    )
+    if not reply.thread_history_hash or reply.thread_history_hash != current_history_hash:
+        return "REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED"
     parent_message_id = _message_id_chain(parent.message_id)
     if _message_id_chain(reply.in_reply_to) != parent_message_id:
         return "REPLY_IN_REPLY_TO_INVALID"
@@ -1064,6 +1217,16 @@ async def _reply_send_guard_error(
         return "REPLY_SUBJECT_NOT_ORIGINAL_THREAD"
     if reply.final_body not in {None, reply.draft_body}:
         return "REPLY_TEMPLATE_BODY_MODIFIED"
+    if reply.final_html_body not in {None, reply.draft_html_body}:
+        return "REPLY_TEMPLATE_HTML_BODY_MODIFIED"
+    expected_render_hash = _render_hash(
+        subject=reply.subject,
+        plain=reply.final_body or reply.draft_body,
+        html_body=reply.final_html_body or reply.draft_html_body,
+        history_hash=reply.thread_history_hash,
+    )
+    if not reply.render_hash or reply.render_hash != expected_render_hash:
+        return "REPLY_RENDER_EVIDENCE_INVALID"
     return None
 
 
@@ -1468,7 +1631,19 @@ async def create_reply_draft(
 
     template = await _select_template(session, reply_kind, language)
 
-    effective_missing_fields = missing_fields if missing_fields is not None else ticket.missing_fields
+    if is_followup_reply_type(reply_kind):
+        ticket_items = list(
+            (
+                await session.execute(
+                    select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket.id)
+                )
+            ).scalars().all()
+        )
+        effective_missing_fields = required_missing_for_ticket(ticket, ticket_items)
+        if not effective_missing_fields:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="FOLLOWUP_NO_LONGER_REQUIRED")
+    else:
+        effective_missing_fields = missing_fields if missing_fields is not None else ticket.missing_fields
     if template is None:
         await create_manual_task_if_missing(
             session,
@@ -1480,7 +1655,7 @@ async def create_reply_draft(
         )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_NOT_FOUND")
     try:
-        subject, body, base_template = await _render_reply_templates(
+        subject, body, html_body, base_template, history_hash, render_hash = await _render_reply_templates(
             session,
             content_template=template,
             ticket=ticket,
@@ -1514,6 +1689,10 @@ async def create_reply_draft(
         subject=subject,
         draft_body=body,
         final_body=body,
+        draft_html_body=html_body,
+        final_html_body=html_body,
+        thread_history_hash=history_hash,
+        render_hash=render_hash,
         generate_source=generate_source,
         ai_call_log_id=ai_call_log_id,
         review_status="pending",
@@ -2033,7 +2212,7 @@ async def create_and_send_rma_authorization(
             )
         reply_template_version = template.version
     try:
-        subject, body, base_template = await _render_reply_templates(
+        subject, body, html_body, base_template, history_hash, render_hash = await _render_reply_templates(
             session,
             content_template=template,
             ticket=ticket,
@@ -2060,6 +2239,12 @@ async def create_and_send_rma_authorization(
             pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=False)
             file_name = rma_pdf_file_name(data)
             subject = file_name.removesuffix(".pdf")
+            render_hash = _render_hash(
+                subject=subject,
+                plain=body,
+                html_body=html_body,
+                history_hash=history_hash,
+            )
             pdf_object = await upload_bytes_to_oss(
                 session,
                 content=pdf_content,
@@ -2086,6 +2271,10 @@ async def create_and_send_rma_authorization(
         subject=subject,
         draft_body=body,
         final_body=body,
+        draft_html_body=html_body,
+        final_html_body=html_body,
+        thread_history_hash=history_hash,
+        render_hash=render_hash,
         generate_source="template",
         rma_pdf_oss_object_id=pdf_object.id if pdf_object else None,
         reply_template_version=reply_template_version,

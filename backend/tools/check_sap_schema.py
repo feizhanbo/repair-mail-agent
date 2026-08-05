@@ -4,7 +4,7 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "k8f3a4b5c6d7"
+EXPECTED_REVISION = "m0h5c6d7e8f9"
 EXPECTED_BUSINESS_TABLE_COUNT = 35
 
 EXPECTED = {

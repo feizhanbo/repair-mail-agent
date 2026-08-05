@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     BoardCard,
     FieldAuditLog,
+    ManualReviewTask,
     RepairTicket,
     RepairTicketItem,
     SnAsset,
@@ -19,7 +20,7 @@ from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.services.audit import log_operation
 from app.services.common import to_plain, utcnow
 from app.services.customer_policies import resolve_customer_policy
-from app.services.workflow import create_manual_task_if_missing
+from app.services.workflow import OPEN_TASK_STATUSES, create_manual_task_if_missing
 
 
 def _normalized_name(value: str | None) -> str:
@@ -152,6 +153,40 @@ async def resolve_and_snapshot_ticket_policy(
     ticket.service_policy_id = snapshot.get("policy_id")
     ticket.policy_resolution_status = "resolved"
     ticket.policy_snapshot = snapshot
+    has_special_rma_rules = bool(
+        str(snapshot.get("policy_type") or "") == "special_out_of_warranty"
+        or str(snapshot.get("currency") or "CNY").upper() != "CNY"
+        or str(snapshot.get("reply_salutation") or "").strip()
+        or snapshot.get("hide_company_name")
+        or snapshot.get("force_manual_review")
+    )
+    if not has_special_rma_rules:
+        stale_tasks = (
+            await session.execute(
+                select(ManualReviewTask).where(
+                    ManualReviewTask.ticket_id == ticket.id,
+                    ManualReviewTask.task_type == "rma_special_policy_review",
+                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                )
+            )
+        ).scalars().all()
+        for task in stale_tasks:
+            task.status = "resolved"
+            task.resolved_by_user_id = user_id
+            task.resolved_at = utcnow()
+            task.resolution = "Customer policy was recalculated without special RMA rules."
+            await log_operation(
+                session,
+                user_id=user_id,
+                operation_type="manual_task_resolved",
+                target_type="manual_review_task",
+                target_id=task.id,
+                description=task.resolution,
+                after_data={
+                    "resolution_type": "policy_recalculated",
+                    "next_action": "revalidate_export_snapshot",
+                },
+            )
     return {"status": "resolved", "policy": snapshot}
 
 
@@ -206,6 +241,25 @@ async def resolve_item_return_route(
     row: BoardCard | None = None
     source: str | None = None
     message: str | None = None
+
+    if (
+        item.return_route_source == "manual_selected"
+        and item.return_route_status == "resolved"
+        and item.matched_board_card_id
+    ):
+        selected = await session.get(BoardCard, item.matched_board_card_id)
+        if (
+            selected is not None
+            and selected.status == "active"
+            and _route_complete(selected)
+            and selected.return_location == item.return_location
+        ):
+            return _route_payload(
+                selected,
+                route_source="manual_selected",
+                board_code=board_code,
+                board_name=board_name,
+            )
 
     if scope == "overseas":
         matches = list(
@@ -362,6 +416,31 @@ async def resolve_ticket_return_routes(
             priority="high",
             assigned_user_id=ticket.assigned_user_id,
         )
+    else:
+        route_tasks = (
+            await session.execute(
+                select(ManualReviewTask).where(
+                    ManualReviewTask.ticket_id == ticket.id,
+                    ManualReviewTask.task_type == "return_route_review",
+                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                )
+            )
+        ).scalars().all()
+        for task in route_tasks:
+            task.status = "resolved"
+            task.resolved_at = utcnow()
+            task.resolution = "All ticket item return routes are resolved."
+            await log_operation(
+                session,
+                operation_type="manual_task_resolved",
+                target_type="manual_review_task",
+                target_id=task.id,
+                description=task.resolution,
+                after_data={
+                    "resolution_type": "return_routes_revalidated",
+                    "next_action": "continue_current_business_stage",
+                },
+            )
     return {
         "status": "resolved" if not failed and results else "needs_manual",
         "items": results,
@@ -448,6 +527,42 @@ async def manually_select_item_route(
         description=reason,
         after_data=result,
     )
+    await session.flush()
+    unresolved_route_id = await session.scalar(
+        select(RepairTicketItem.id)
+        .where(
+            RepairTicketItem.ticket_id == ticket.id,
+            RepairTicketItem.return_route_status != "resolved",
+        )
+        .limit(1)
+    )
+    if unresolved_route_id is None:
+        route_tasks = (
+            await session.execute(
+                select(ManualReviewTask).where(
+                    ManualReviewTask.ticket_id == ticket.id,
+                    ManualReviewTask.task_type == "return_route_review",
+                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                )
+            )
+        ).scalars().all()
+        for task in route_tasks:
+            task.status = "resolved"
+            task.resolved_by_user_id = user_id
+            task.resolved_at = utcnow()
+            task.resolution = reason
+            await log_operation(
+                session,
+                user_id=user_id,
+                operation_type="manual_task_resolved",
+                target_type="manual_review_task",
+                target_id=task.id,
+                description=reason,
+                after_data={
+                    "resolution_type": "return_route_manually_selected",
+                    "next_action": "revalidate_export_snapshot",
+                },
+            )
     return result
 
 

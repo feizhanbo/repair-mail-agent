@@ -837,8 +837,8 @@ async def poll_export_batch(
         )
     for rma_no in distinct_rmas:
         rma = existing_rmas[str(rma_no)]
+        matching = [line for line in lines if line.rma_no == rma_no]
         if rma is None:
-            matching = [line for line in lines if line.rma_no == rma_no]
             rma = TicketRma(
                 ticket_id=ticket.id,
                 rma_no=rma_no or "",
@@ -848,6 +848,21 @@ async def poll_export_batch(
             )
             session.add(rma)
             await session.flush()
+        elif (
+            rma.status == "received"
+            and rma.reply_record_id is None
+            and rma.pdf_oss_object_id is None
+            and rma.sent_at is None
+            and rma.issued_at is None
+        ):
+            # A newer, still-unsent export snapshot may legitimately reuse the
+            # same SAP RMA number after policy or return-route correction. Keep
+            # the mutable RMA draft aligned with the latest accepted lines;
+            # issued/sent RMA evidence remains immutable.
+            rma.policy_snapshot = {
+                "lines": [line.policy_snapshot for line in matching]
+            }
+            rma.received_at = now
         for line in (line for line in lines if line.rma_no == rma_no):
             existing_link = await session.scalar(
                 select(TicketRmaItem).where(TicketRmaItem.ticket_item_id == line.ticket_item_id)

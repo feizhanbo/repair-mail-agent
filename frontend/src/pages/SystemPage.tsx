@@ -28,6 +28,7 @@ type TemplateForm = {
   version: string;
   subject_template?: string | null;
   body_template: string;
+  html_body_template?: string | null;
   enabled: boolean;
 };
 
@@ -74,6 +75,7 @@ export default function SystemPage() {
         template_name: values.template_name,
         subject_template: values.subject_template,
         body_template: values.body_template,
+        html_body_template: values.html_body_template,
         enabled: values.enabled,
       }),
     onSuccess: () => {
@@ -160,6 +162,7 @@ export default function SystemPage() {
                 version: record.version,
                 subject_template: record.subject_template ?? undefined,
                 body_template: record.body_template,
+                html_body_template: record.html_body_template,
                 enabled: record.enabled,
               });
               setTemplateModalOpen(true);
@@ -386,6 +389,9 @@ export default function SystemPage() {
               <Input />
             </Form.Item>
             <Form.Item label="正文模板" name="body_template" rules={[{ required: true }]}>
+              <Input.TextArea rows={10} />
+            </Form.Item>
+            <Form.Item label="HTML 正文模板" name="html_body_template" extra="可选；留空时系统会由纯文本模板安全生成 HTML。">
               <Input.TextArea rows={10} />
             </Form.Item>
             <Form.Item label="启用" name="enabled" valuePropName="checked">

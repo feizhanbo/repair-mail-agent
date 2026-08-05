@@ -17,7 +17,9 @@ from app.services.rma_pdf import (
     rma_pdf_page_count,
     rma_pdf_snapshot,
     validate_rma_template_integrity,
+    _latest_export_rows_by_item,
 )
+from app.models import ExportSap
 
 
 _CODE39_DECODE = {
@@ -81,6 +83,32 @@ def test_duplicate_sn_is_case_insensitive_and_quantity_must_equal_one() -> None:
     with pytest.raises(ValueError, match="RMA_DUPLICATE_SN"):
         RmaPdfData.model_validate(values)
 
+
+def test_latest_export_row_per_item_prevents_duplicate_cost_after_reexport() -> None:
+    historical = ExportSap(
+        id=10,
+        ticket_item_id=101,
+        repair_fee=Decimal("1200.00"),
+        currency="CNY",
+    )
+    latest = ExportSap(
+        id=20,
+        ticket_item_id=101,
+        repair_fee=Decimal("1200.00"),
+        currency="CNY",
+    )
+    second_item = ExportSap(
+        id=21,
+        ticket_item_id=102,
+        repair_fee=Decimal("1200.00"),
+        currency="CNY",
+    )
+
+    selected = _latest_export_rows_by_item([latest, second_item, historical])
+
+    assert selected == {101: latest, 102: second_item}
+    assert sum(row.repair_fee or Decimal("0") for row in selected.values()) == Decimal("2400.00")
+
     values = _data(1).model_dump()
     values["items"][0]["quantity"] = 2
     with pytest.raises(ValueError, match="RMA_ITEM_QUANTITY_SN_CONFLICT"):
@@ -101,6 +129,27 @@ def test_test_only_flag_cannot_add_a_watermark() -> None:
     pdf = render_rma_pdf(_data(7), test_only=True)
     with fitz.open(stream=pdf, filetype="pdf") as document:
         assert all("TESTONLY" not in "".join(page.get_text().split()) for page in document)
+
+
+def test_typical_chinese_rma_uses_subset_font_and_stays_small() -> None:
+    data = _data(1)
+    data.customer_name = "上海林众电子科技有限公司"
+    data.mailing_address = "北京市海淀区丰豪东路9号院5号楼"
+    data.items[0].part_description = "测试板卡"
+    data.items[0].failure_description = "自检失败，无法正常启动"
+
+    pdf = render_rma_pdf(data)
+
+    assert len(pdf) <= 500_000
+    with fitz.open(stream=pdf, filetype="pdf") as document:
+        assert "上海林众电子科技有限公司" in "".join(page.get_text() for page in document)
+
+
+def test_pdf_size_hard_limit_blocks_delivery(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.rma_pdf.settings.RMA_PDF_MAX_BYTES", 10)
+
+    with pytest.raises(RmaPdfError, match="RMA_PDF_TOO_LARGE"):
+        render_rma_pdf(_data(1))
 
 
 def test_rma_filename_and_contact_follow_fixed_template_format() -> None:
@@ -132,6 +181,20 @@ def test_realistic_dotted_material_code_wraps_inside_part_number_cell() -> None:
 
     assert "Z.SM.8123V120A" in compact_text
     assert "20260720085727251439" in compact_text
+
+
+def test_realistic_chinese_failure_description_fits_without_truncation() -> None:
+    data = _data(1)
+    failure = (
+        "版本不能匹配当前测试机使用，需将CBIT128升级成gan版本，硬件要加电容，"
+        "升级的逻辑版本请按照出厂最新版本升级"
+    )
+    data.items[0].failure_description = failure
+
+    with fitz.open(stream=render_rma_pdf(data), filetype="pdf") as document:
+        compact_text = "".join(page.get_text() for page in document).replace(" ", "").replace("\n", "")
+
+    assert failure in compact_text
 
 
 def test_template_integrity_and_snapshot_record_hashes() -> None:

@@ -1,6 +1,6 @@
 {
   "template_version": "rma_authorization_v3_2_reference",
-  "template_sha256": "35c70a98f0c3256e21dfe3776cf516883f14d9b44becb6c846ca0f0311bb0e6e",
+  "template_sha256": "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0",
   "template_page_count": 2,
   "page_width": 842.0,
   "page_height": 595.0,
@@ -40,7 +40,7 @@
     "item_price": {"rect": [398.5, 359.75, 489.5, 390.6], "font_size": 9.0, "min_font_size": 6.0, "align": "center", "max_lines": 1, "padding": 1.0},
     "item_program": {"rect": [489.5, 359.75, 577.5, 390.6], "font_size": 8.0, "min_font_size": 5.8, "align": "center", "max_lines": 2, "padding": 2.0},
     "item_advance": {"rect": [577.5, 359.75, 688.0, 390.6], "font_size": 10.0, "min_font_size": 6.0, "align": "center", "max_lines": 2, "padding": 2.0},
-    "item_failure": {"rect": [688.0, 359.75, 783.15, 390.6], "font_size": 8.0, "min_font_size": 5.5, "align": "center", "max_lines": 2, "padding": 2.0},
+    "item_failure": {"rect": [688.0, 359.75, 783.15, 390.6], "font_size": 8.0, "min_font_size": 4.5, "align": "center", "max_lines": 5, "padding": 2.0},
     "item_delivery": {"rect": [783.15, 359.75, 832.25, 390.6], "font_size": 7.15, "min_font_size": 5.5, "align": "center", "max_lines": 2, "padding": 1.0},
     "customer_name": {"rect": [180.0, 16.9, 434.0, 47.4], "font_size": 10.0, "min_font_size": 7.0, "align": "center", "max_lines": 2, "padding": 2.0},
     "mailing_address": {"rect": [180.0, 76.9, 434.0, 107.4], "font_size": 10.0, "min_font_size": 6.5, "align": "center", "max_lines": 2, "padding": 2.0},

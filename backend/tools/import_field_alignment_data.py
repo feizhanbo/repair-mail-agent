@@ -29,7 +29,7 @@ from app.services.master_data import import_board_cards, parse_board_cards_file
 
 
 EXPECTED_DATABASE = "repair_system_test"
-EXPECTED_REVISION = "k8f3a4b5c6d7"
+EXPECTED_REVISION = "m0h5c6d7e8f9"
 OVERSEAS_DEFAULT_CODE = "*"
 OVERSEAS_DEFAULT_NAME = "OVERSEAS_DEFAULT_BEIJING"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

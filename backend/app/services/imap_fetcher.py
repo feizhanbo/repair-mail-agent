@@ -80,9 +80,9 @@ def _uid_search(client: imaplib.IMAP4_SSL, *, message_id: str | None, unseen_onl
     if message_id:
         typ, data = client.uid("SEARCH", None, "HEADER", "Message-ID", message_id)
     elif unseen_only:
-        typ, data = client.uid("SEARCH", None, "UNSEEN")
+        typ, data = client.uid("SEARCH", None, "UNSEEN", "NOT", "FROM", settings.IMAP_USER)
     else:
-        typ, data = client.uid("SEARCH", None, "ALL")
+        typ, data = client.uid("SEARCH", None, "ALL", "NOT", "FROM", settings.IMAP_USER)
     if typ != "OK":
         raise ImapFetchError("IMAP_SEARCH_FAILED")
     raw = data[0] if data else b""
@@ -362,7 +362,7 @@ async def fetch_imap_emails(
                 payload.fetch_job_run_id = job.id
                 blobs = attachment_blobs_from_eml_bytes(raw)
                 blobs, _attachment_precheck = filter_decorative_attachments(payload, blobs)
-                payload_precheck = await precheck_email_payload(session, payload)
+                payload_precheck = await precheck_email_payload(session, payload, enforce_target_mailbox=True)
                 if not payload_precheck.accepted:
                     skipped_count += 1
                     await _save_fetch_result(

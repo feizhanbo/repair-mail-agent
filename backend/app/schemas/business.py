@@ -22,6 +22,8 @@ class EmailIngestRequest(BaseModel):
     from_address: str = Field(max_length=500)
     to_addresses: str | None = None
     cc_addresses: str | None = None
+    delivered_to_addresses: str | None = None
+    x_original_to_addresses: str | None = None
     subject: str | None = Field(default=None, max_length=500)
     text_body: str | None = None
     html_body: str | None = None
@@ -293,6 +295,7 @@ class ReplyTemplateCreateRequest(BaseModel):
     version: str = Field(default="1", min_length=1, max_length=30)
     subject_template: str | None = Field(default=None, max_length=500)
     body_template: str = Field(min_length=1)
+    html_body_template: str | None = None
     enabled: bool = True
 
 
@@ -300,6 +303,7 @@ class ReplyTemplateUpdateRequest(BaseModel):
     template_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_template: str | None = Field(default=None, max_length=500)
     body_template: str | None = Field(default=None, min_length=1)
+    html_body_template: str | None = None
     enabled: bool | None = None
 
 

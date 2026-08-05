@@ -637,6 +637,10 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "subject",
                     "draft_body",
                     "final_body",
+                    "draft_html_body",
+                    "final_html_body",
+                    "thread_history_hash",
+                    "render_hash",
                     "generate_source",
                     "reply_template_version",
                     "rma_template_version",
@@ -1206,6 +1210,7 @@ async def ensure_manual_review_ticket_from_parse_result(
                 operator_type="system",
                 reason=reason,
                 metadata={"email_id": email.id, "parse_result_id": parse_result.id},
+                manual_task_type=task_type,
             )
     parse_result.ticket_id = ticket.id
     parse_result.apply_status = "needs_manual_review"
@@ -1560,7 +1565,23 @@ async def apply_parse_result(
         after_data={"ticket_id": ticket.id, "changed_fields": changed, "apply_status": result_status, "action": action},
     )
 
-    if ticket.current_status_code == "auto_replied" and parse_result.intent_type in {
+    if (
+        ticket.current_status_code == "auto_replied"
+        and parse_result.intent_type == "new_repair"
+        and ticket.source_email_id == email.id
+        and not ticket.missing_fields
+    ):
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="parsed",
+            trigger_event="source_email_reparse_completed",
+            user_id=user_id,
+            operator_type="user" if user_id else "system",
+            reason="Corrected source-email parsing is complete; resume validation.",
+            metadata={"parse_result_id": parse_result.id, "email_id": email.id},
+        )
+    elif ticket.current_status_code == "auto_replied" and parse_result.intent_type in {
         "normal_reply",
         "customer_supplement",
     }:

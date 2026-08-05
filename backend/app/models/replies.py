@@ -24,6 +24,7 @@ class ReplyTemplate(TimestampMixin, Base):
     version: Mapped[str] = mapped_column(String(30), nullable=False)
     subject_template: Mapped[str | None] = mapped_column(String(500))
     body_template: Mapped[str] = mapped_column(mysql.MEDIUMTEXT, nullable=False)
+    html_body_template: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
     enabled: Mapped[bool] = bool_column(True)
     created_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_reply_templates_user"))
 
@@ -58,6 +59,10 @@ class ReplyRecord(TimestampMixin, Base):
     subject: Mapped[str | None] = mapped_column(String(500))
     draft_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
     final_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
+    draft_html_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
+    final_html_body: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
+    thread_history_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    render_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     generate_source: Mapped[str] = mapped_column(String(30), nullable=False, server_default="system")
     ai_call_log_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("ai_call_logs.id", name="fk_reply_records_ai_log"))
     rma_pdf_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_reply_records_rma_pdf"))

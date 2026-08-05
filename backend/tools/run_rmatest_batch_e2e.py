@@ -24,6 +24,7 @@ from app.models import (
     BoardCard,
     CustomerServicePolicy,
     JobRunLog,
+    RepairTicket,
     RepairTicketItem,
     SnAsset,
     SnValidationResult,
@@ -40,6 +41,7 @@ from tools.run_new_repair_mail_e2e import (
     assert_database_preflight,
     current_config,
     exact_recipient,
+    exact_test_transport_subject,
     fetch_exact_message,
     find_email,
     login,
@@ -67,6 +69,7 @@ SEND_MODES = {
     "auto_rma",
     "auto_followup_recovery",
 }
+RECOVERY_READY_OR_COMPLETED_STATUSES = {"ready_for_export", "rma_sent", "closed"}
 MESSAGE_ID_PATTERN = re.compile(r"^<[^<>\s]+>$")
 
 
@@ -216,14 +219,16 @@ def inventory(
                         "expected_outbound_count": 0,
                         "temporary_sn_assets": [],
                         "temporary_board_cards": [],
+                        "temporary_customer_policies": [],
                         "expected_final_status": None,
+                        "expected_rma_status": None,
                         "expected_manual_action": None,
                     },
                 }
             )
         frozen = [str(item["uid"]).encode("ascii") for item in messages]
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "batch_id": batch_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "mailbox": TEST_MAIL_SENDER,
@@ -267,6 +272,8 @@ def inventory(
 def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str, Any]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     errors: list[str] = []
+    if manifest.get("schema_version") != 2:
+        errors.append("SCHEMA_VERSION_MUST_EQUAL_2")
     if manifest.get("mailbox", "").lower() != TEST_MAIL_SENDER:
         errors.append("MAILBOX_MUST_BE_RMATEST1")
     if manifest.get("recipient_only", "").lower() != TEST_MAIL_RECIPIENT:
@@ -287,6 +294,10 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
             errors.append(f"{prefix}.message_id_DUPLICATE")
         ids.add(message_id)
         gold = item.get("gold") if isinstance(item.get("gold"), dict) else {}
+        if not str(item.get("uid") or "").isdigit():
+            errors.append(f"{prefix}.uid_REQUIRED")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("header_sha256") or "")):
+            errors.append(f"{prefix}.header_sha256_INVALID")
         intent = gold.get("expected_intent")
         subtype = gold.get("expected_subtype")
         if intent not in INTENTS:
@@ -308,9 +319,24 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
             errors.append(f"{prefix}.expected_outbound_count_INVALID")
             expected_outbound_count = 0
         planned_sends += expected_outbound_count
+        if not isinstance(gold.get("expected_fields", {}), dict):
+            errors.append(f"{prefix}.expected_fields_INVALID")
+        if not isinstance(gold.get("expected_items", []), list):
+            errors.append(f"{prefix}.expected_items_INVALID")
+        if not isinstance(gold.get("missing_fields", []), list):
+            errors.append(f"{prefix}.missing_fields_INVALID")
+        if gold.get("reply_allowed") is False and expected_outbound_count:
+            errors.append(f"{prefix}.REPLY_FORBIDDEN_BUT_SEND_PLANNED")
+        if mode == "none" and expected_outbound_count:
+            errors.append(f"{prefix}.SEND_MODE_NONE_BUT_SEND_PLANNED")
         if mode == "auto_canary":
             auto_canaries += 1
-            if intent != "new_repair" or gold.get("expected_final_status") != "rma_sent":
+            if (
+                intent != "new_repair"
+                or gold.get("expected_final_status") != "closed"
+                or gold.get("expected_rma_status") != "issued"
+                or expected_outbound_count != 1
+            ):
                 errors.append(f"{prefix}.auto_canary_MUST_BE_COMPLETE_NEW_REPAIR")
     maximum = manifest.get("max_actual_sends")
     if not isinstance(maximum, int) or maximum != planned_sends:
@@ -447,7 +473,29 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
                 if existing.source_file_name == batch_id and existing.id in created["board_card_ids"]:
                     continue
                 raise BatchError(f"TEMPORARY_BOARD_CARD_ALREADY_EXISTS:{material}")
+            required = (
+                "board_code",
+                "return_location",
+                "route_type",
+                "customer_scope",
+                "shipping_address",
+                "shipping_contact",
+                "shipping_phone",
+            )
+            missing = [field for field in required if not str(row.get(field) or "").strip()]
+            if missing:
+                raise BatchError(
+                    "TEMPORARY_BOARD_CARD_FIELDS_REQUIRED:"
+                    + material
+                    + ":"
+                    + ",".join(missing)
+                )
             card = BoardCard(
+                board_code=str(row["board_code"]).strip(),
+                board_name=str(row.get("board_name") or "").strip() or None,
+                return_location=str(row["return_location"]).strip(),
+                route_type=str(row["route_type"]).strip(),
+                customer_scope=str(row["customer_scope"]).strip(),
                 material_code=material,
                 material_name=str(row.get("material_name") or "").strip() or None,
                 need_ship_to_beijing=bool(row.get("need_ship_to_beijing", True)),
@@ -484,6 +532,8 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
                 "customer_code",
                 "customer_name",
                 "policy_type",
+                "charge_status",
+                "customer_scope",
                 "repair_price",
                 "currency",
                 "tax_rate",
@@ -501,6 +551,8 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
                 customer_code=str(row["customer_code"]).strip(),
                 customer_name=str(row["customer_name"]).strip(),
                 policy_type=str(row["policy_type"]).strip(),
+                charge_status=str(row["charge_status"]).strip(),
+                customer_scope=str(row["customer_scope"]).strip(),
                 effective_from=row.get("effective_from"),
                 effective_until=row.get("effective_until"),
                 repair_price=row["repair_price"],
@@ -566,6 +618,11 @@ async def cleanup_temporary_master_data(manifest_path: Path) -> dict[str, Any]:
             ).scalars().all()
             if any(card.source_file_name != batch_id for card in cards):
                 raise BatchError("TEMPORARY_BOARD_CLEANUP_SCOPE_MISMATCH")
+            await session.execute(
+                update(RepairTicketItem)
+                .where(RepairTicketItem.matched_board_card_id.in_(board_ids))
+                .values(matched_board_card_id=None)
+            )
             await session.execute(delete(BoardCard).where(BoardCard.id.in_(board_ids)))
         if policy_ids:
             policies = (
@@ -577,6 +634,11 @@ async def cleanup_temporary_master_data(manifest_path: Path) -> dict[str, Any]:
             ).scalars().all()
             if any(policy.source_file_name != batch_id for policy in policies):
                 raise BatchError("TEMPORARY_CUSTOMER_POLICY_CLEANUP_SCOPE_MISMATCH")
+            await session.execute(
+                update(RepairTicket)
+                .where(RepairTicket.service_policy_id.in_(policy_ids))
+                .values(service_policy_id=None)
+            )
             await session.execute(
                 delete(CustomerServicePolicy).where(
                     CustomerServicePolicy.id.in_(policy_ids)
@@ -688,7 +750,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             patch_config(
                 client,
                 auto_send_enabled=True,
-                auto_followup_enabled=False,
+                auto_followup_enabled=True,
                 rma_auto_send_enabled=True,
             )
             existing_detail = client.data("GET", f"/api/v1/tickets/{ticket_id}")
@@ -700,7 +762,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 and row.get("send_status") == "sent"
             ]
             if (
-                existing_ticket.get("current_status_code") == "rma_sent"
+                existing_ticket.get("current_status_code") == "closed"
                 and len(already_sent) == 1
             ):
                 normalized = client.data(
@@ -735,6 +797,10 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                     ),
                     "processed_at": datetime.now(timezone.utc).isoformat(),
                 }
+                # The prior attempt may have completed SMTP + archive but
+                # crashed before persisting its counter.  This branch is only
+                # entered for a message absent from state and exactly one
+                # verified sent RMA, so reconcile that real outbound once.
                 state["actual_send_count"] = int(
                     state.get("actual_send_count") or 0
                 ) + 1
@@ -926,17 +992,11 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                         "GET", f"/api/v1/tickets/{ticket_id}"
                     )
                     post_ticket = post_resolution.get("ticket") or {}
-                    if post_ticket.get("current_status_code") not in {
-                        "ready_for_export",
-                        "rma_sent",
-                    }:
+                    if post_ticket.get("current_status_code") not in RECOVERY_READY_OR_COMPLETED_STATUSES:
                         raise BatchError(
                             "RECOVERY_TICKET_NOT_READY_FOR_EXPORT"
                         )
-            elif ticket.get("current_status_code") not in {
-                "ready_for_export",
-                "rma_sent",
-            }:
+            elif ticket.get("current_status_code") not in RECOVERY_READY_OR_COMPLETED_STATUSES:
                 raise BatchError(
                     "RECOVERY_TICKET_STATUS_UNSUPPORTED:"
                     + str(ticket.get("current_status_code"))
@@ -967,7 +1027,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             completed = wait_for_ticket(
                 client,
                 email_id,
-                expected_status="rma_sent",
+                expected_status="closed",
                 expected_reply_type="rma_authorization",
             )
             verified = validate_complete_path(completed)
@@ -1014,18 +1074,15 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
         elif phase in {"canary", "auto-rma"}:
             if os.getenv("E2E_CANARY_APPROVED") != "1":
                 raise BatchError("E2E_CANARY_APPROVED_MUST_EQUAL_1")
+            expected_mode = "auto_canary" if phase == "canary" else "auto_rma"
             candidates = [
                 item for item in manifest["messages"]
-                if item["gold"]["send_mode"] in {"auto_canary", "auto_rma"}
+                if item["gold"]["send_mode"] == expected_mode
                 and item["message_id"] not in state["messages"]
             ]
             if not candidates:
                 raise BatchError("NO_PENDING_AUTO_RMA_MESSAGE")
-            canary_pending = [
-                item for item in candidates
-                if item["gold"]["send_mode"] == "auto_canary"
-            ]
-            target = canary_pending[0] if canary_pending else candidates[0]
+            target = candidates[0]
             if target["gold"]["send_mode"] != "auto_canary":
                 required_canaries = [
                     item["message_id"] for item in manifest["messages"]
@@ -1041,14 +1098,14 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             patch_config(
                 client,
                 auto_send_enabled=True,
-                auto_followup_enabled=False,
+                auto_followup_enabled=True,
                 rma_auto_send_enabled=True,
             )
             email_id = fetch_exact_message(client, message_id)
             completed = wait_for_ticket(
                 client,
                 email_id,
-                expected_status="rma_sent",
+                expected_status="closed",
                 expected_reply_type="rma_authorization",
             )
             verified = validate_complete_path(completed)
@@ -1210,7 +1267,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             patch_config(
                 client,
                 auto_send_enabled=True,
-                auto_followup_enabled=False,
+                auto_followup_enabled=True,
                 rma_auto_send_enabled=True,
             )
             archived = find_email(client, supplement_message_id)
@@ -1222,7 +1279,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             completed = wait_for_ticket(
                 client,
                 supplement_email_id,
-                expected_status="rma_sent",
+                expected_status="closed",
                 expected_reply_type="rma_authorization",
             )
             supplement_email = (
@@ -1247,9 +1304,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             reply = sent_rma_replies[0]
             if (
                 not exact_recipient(reply)
-                or not test_only_subject(
-                    reply.get("subject")
-                ).upper().startswith("[TEST ONLY]")
+                or not exact_test_transport_subject(detail, reply)
                 or reply.get("in_reply_to") != supplement_message_id
                 or supplement_message_id
                 not in str(reply.get("references_header") or "")
@@ -1291,9 +1346,9 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
     finally:
         patch_config(
             client,
-            auto_send_enabled=False,
-            auto_followup_enabled=False,
-            rma_auto_send_enabled=True,
+            auto_send_enabled=bool(initial.get("auto_send_enabled")),
+            auto_followup_enabled=bool(initial.get("auto_followup_enabled")),
+            rma_auto_send_enabled=bool(initial.get("rma_auto_send_enabled")),
         )
 
 
@@ -1311,24 +1366,56 @@ def relay_reset(base_url: str, token: str) -> None:
 def write_report(manifest_path: Path) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     root = manifest_path.parent
+    state_path = root / "execution-state.json"
+    state = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if state_path.exists()
+        else {"messages": {}, "actual_send_count": 0}
+    )
     evidence_files = sorted(
         str(path.relative_to(root)) for path in root.rglob("*") if path.is_file() and path != manifest_path
     )
+    batch_id = str(manifest.get("batch_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,100}", batch_id):
+        raise BatchError("BATCH_ID_INVALID_FOR_REPORT")
+    message_lines: list[str] = []
+    for item in manifest.get("messages") or []:
+        message_id = str(item.get("message_id") or "")
+        gold = item.get("gold") or {}
+        actual = (state.get("messages") or {}).get(message_id) or {}
+        message_lines.extend(
+            [
+                f"### `{message_id}`",
+                "",
+                f"- 金标意图：`{gold.get('expected_intent')}`",
+                f"- 预期最终状态：`{gold.get('expected_final_status')}`",
+                f"- 实际最终状态：`{actual.get('final_status') or actual.get('parse_status') or '未执行'}`",
+                f"- 工单 ID：`{actual.get('ticket_id') or '无'}`",
+                f"- 回复 ID：`{actual.get('reply_id') or actual.get('rma_reply_id') or '无'}`",
+                "",
+            ]
+        )
+    report_status = "已执行" if state_path.exists() else "仅完成批次冻结"
     lines = [
-        f"# rmatest1 真实邮件全链路测试报告（{manifest['batch_id']}）",
+        f"# rmatest1 单封金标邮件全链路复测报告（{batch_id}）",
         "",
-        "## 当前结论",
+        "## 执行摘要",
         "",
-        "- 当前阶段：只读冻结批次，等待业务金标确认。",
-        "- 实际发送数量：0。",
-        "- 未执行邮件解析、建单、中转提交、RMA 生成或回复。",
+        f"- 当前阶段：{report_status}",
+        f"- 实际发送数量：`{int(state.get('actual_send_count') or 0)}`",
+        f"- 计划发送上限：`{int(manifest.get('max_actual_sends') or 0)}`",
+        f"- 金标批准：`{bool(manifest.get('business_gold_approved'))}`",
         "",
         "## 冻结批次",
         "",
-        f"- 邮件数量：{len(manifest.get('messages', []))}",
+        f"- 邮件数量：`{len(manifest.get('messages', []))}`",
         f"- UIDVALIDITY：`{manifest.get('uid_validity')}`",
         f"- 冻结 UID 上限：`{manifest.get('frozen_uid_max')}`",
-        f"- 金标批准：`{bool(manifest.get('business_gold_approved'))}`",
+        "",
+        "## 逐封结果",
+        "",
+        *message_lines,
+        "## 安全与隐私",
         "",
         "报告不包含邮件全文、附件内容、完整个人信息、密码、Token 或 OSS 签名 URL。",
         "",
@@ -1337,7 +1424,12 @@ def write_report(manifest_path: Path) -> Path:
         *[f"- `{name}`" for name in evidence_files],
         "",
     ]
-    report = Path(__file__).parents[2] / "docs" / "08-rmatest1真实邮件全链路测试报告-20260729.md"
+    report_date = datetime.now().astimezone().strftime("%Y%m%d")
+    report = (
+        Path(__file__).parents[2]
+        / "docs"
+        / f"08-rmatest1单封金标邮件全链路复测报告-{report_date}.md"
+    )
     report.write_text("\n".join(lines), encoding="utf-8")
     return report
 

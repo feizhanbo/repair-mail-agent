@@ -172,6 +172,8 @@ def payload_from_eml_bytes(
         from_address=from_address,
         to_addresses=_addresses(message, "To"),
         cc_addresses=_addresses(message, "Cc"),
+        delivered_to_addresses=_addresses(message, "Delivered-To"),
+        x_original_to_addresses=_addresses(message, "X-Original-To"),
         subject=_header_text(message, "Subject"),
         text_body=plain,
         html_body=html,

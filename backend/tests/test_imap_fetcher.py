@@ -92,7 +92,7 @@ class MultiUidImapClient(FakeImapClient):
             self.fetched_uids.append(uid)
             message = EmailMessage()
             message["From"] = "Customer <customer@example.com>"
-            message["To"] = "Repair <repair@example.com>"
+            message["To"] = "RMA Test <imap-test@example.com>"
             message["Subject"] = f"Repair SN{uid}"
             message["Message-ID"] = f"<imap-{uid}@example.com>"
             message.set_content(f"Please repair SN{uid}")
@@ -100,10 +100,27 @@ class MultiUidImapClient(FakeImapClient):
         raise AssertionError(command)
 
 
+def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple] = []
+
+    class SearchClient:
+        def uid(self, *args):
+            calls.append(args)
+            return "OK", [b"101"]
+
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "rmatest1@accotest.com")
+    client = SearchClient()
+
+    assert imap_fetcher._uid_search(client, message_id=None, unseen_only=True) == ["101"]
+    assert calls[-1] == ("SEARCH", None, "UNSEEN", "NOT", "FROM", "rmatest1@accotest.com")
+    assert imap_fetcher._uid_search(client, message_id="<recover@example.com>", unseen_only=False) == ["101"]
+    assert calls[-1] == ("SEARCH", None, "HEADER", "Message-ID", "<recover@example.com>")
+
+
 def _raw_eml() -> bytes:
     message = EmailMessage()
     message["From"] = "Customer <customer@example.com>"
-    message["To"] = "Repair <repair@example.com>"
+    message["To"] = "RMA Test <imap-test@example.com>"
     message["Subject"] = "Repair SN001"
     message["Message-ID"] = "<imap-101@example.com>"
     message.set_content("Please repair SN001")
@@ -114,7 +131,7 @@ def _raw_eml() -> bytes:
 def _raw_irrelevant_eml() -> bytes:
     message = EmailMessage()
     message["From"] = "News <news@example.com>"
-    message["To"] = "Repair <repair@example.com>"
+    message["To"] = "RMA Test <imap-test@example.com>"
     message["Subject"] = "Newsletter"
     message["Message-ID"] = "<imap-newsletter@example.com>"
     message.set_content("unsubscribe from this newsletter")

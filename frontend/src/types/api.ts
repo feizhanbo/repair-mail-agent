@@ -652,6 +652,10 @@ export type ReplyRecord = {
   subject?: string | null;
   draft_body?: string | null;
   final_body?: string | null;
+  draft_html_body?: string | null;
+  final_html_body?: string | null;
+  thread_history_hash?: string | null;
+  render_hash?: string | null;
   generate_source: string;
   reply_template_version?: string | null;
   rma_template_version?: string | null;
@@ -922,6 +926,7 @@ export type ReplyTemplate = {
   version: string;
   subject_template?: string | null;
   body_template: string;
+  html_body_template?: string | null;
   enabled: boolean;
   created_by_user_id?: number | null;
   created_at?: string;

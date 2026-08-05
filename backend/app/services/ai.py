@@ -943,14 +943,37 @@ async def _enrich_ai_quality(
             missing.setdefault("sn", "缺少设备 SN，无法校验资产。")
         else:
             invalid_sns: list[str] = []
+            resolved_assets: list[SnAsset] = []
             for sn in item_sns:
                 asset = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
                 if asset is None:
                     invalid_sns.append(f"{sn}: 资产库不存在")
                 elif asset.asset_status != "valid":
                     invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
+                else:
+                    resolved_assets.append(asset)
             if invalid_sns:
                 conflicts.setdefault("sn", "；".join(invalid_sns))
+            elif len(resolved_assets) == len(item_sns) and not fields.get("customer_name"):
+                customer_names = {
+                    str(getattr(asset, "customer_name", "") or "").strip()
+                    for asset in resolved_assets
+                    if str(getattr(asset, "customer_name", "") or "").strip()
+                }
+                customer_codes = {
+                    str(getattr(asset, "customer_code", "") or "").strip()
+                    for asset in resolved_assets
+                    if str(getattr(asset, "customer_code", "") or "").strip()
+                }
+                if len(customer_names) == 1:
+                    fields["customer_name"] = next(iter(customer_names))
+                    if len(customer_codes) == 1 and not fields.get("customer_code"):
+                        fields["customer_code"] = next(iter(customer_codes))
+                    field_confidences["customer_name"] = 1.0
+                    evidence.setdefault("derived_fields", {})["customer_name"] = {
+                        "source": "sn_asset_consensus",
+                        "sn_count": len(resolved_assets),
+                    }
 
     if parsed.intent_type in {"new_repair", "customer_supplement"}:
         source_email, existing_ticket = await _request_date_source(

@@ -223,6 +223,7 @@ def _reply_template_payload(template: ReplyTemplate) -> dict:
             "version",
             "subject_template",
             "body_template",
+            "html_body_template",
             "enabled",
             "created_by_user_id",
             "created_at",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -35,7 +36,10 @@ class RelayControl(BaseModel):
 
 class TestRelayStore:
     def __init__(self, path: Path):
-        self.path = path
+        self.path = path.resolve()
+        self.call_id_namespace = hashlib.sha256(
+            str(self.path).casefold().encode("utf-8")
+        ).hexdigest()[:10].upper()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -116,7 +120,7 @@ class TestRelayStore:
                     "idempotent_reuse": True,
                 }
             record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
-            call_id = f"TESTCALL-{record_id:08d}"
+            call_id = f"TESTCALL-{self.call_id_namespace}-{record_id:08d}"
             scenario = self._setting(db, "default_scenario", "normal")
             delay = int(self._setting(db, "default_delay_seconds", "0"))
             ticket_key = str(payload.ticket_id or payload.relay_export_id or payload.submission_key)

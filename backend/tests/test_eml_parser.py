@@ -13,6 +13,8 @@ def _sample_eml() -> bytes:
     message["From"] = "Customer <customer@example.com>"
     message["To"] = "Repair <repair@example.com>"
     message["Cc"] = "cc@example.com"
+    message["Delivered-To"] = "Inbox <inbox@example.com>"
+    message["X-Original-To"] = "original-inbox@example.com"
     message["Subject"] = "Repair SN001"
     message["Message-ID"] = "<sample-1@example.com>"
     message["Date"] = "Mon, 13 Jul 2026 10:00:00 +0800"
@@ -39,6 +41,8 @@ def test_payload_from_eml_bytes_extracts_headers_body_and_attachment_metadata() 
     assert payload.from_address == "customer@example.com"
     assert payload.to_addresses == "repair@example.com"
     assert payload.cc_addresses == "cc@example.com"
+    assert payload.delivered_to_addresses == "inbox@example.com"
+    assert payload.x_original_to_addresses == "original-inbox@example.com"
     assert payload.subject == "Repair SN001"
     assert payload.text_body and "SN001" in payload.text_body
     assert payload.html_body and "<b>SN001</b>" in payload.html_body

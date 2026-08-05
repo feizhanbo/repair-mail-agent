@@ -12,7 +12,6 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from app.services.business_rules import CUSTOMER_REQUIRED_FIELD_SET
-from app.services.mail_safety import test_only_subject
 
 
 BASE_URL = os.getenv("E2E_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -234,6 +233,24 @@ def exact_recipient(reply: dict[str, Any]) -> bool:
     return to_addresses == [TEST_RECIPIENT] and not cc_addresses
 
 
+def exact_test_transport_subject(detail: dict[str, Any], reply: dict[str, Any]) -> bool:
+    outgoing_email_id = int(reply.get("outgoing_email_id") or 0)
+    if not outgoing_email_id:
+        return False
+    outgoing = next(
+        (
+            row
+            for row in detail.get("email_timeline", [])
+            if int(row.get("id") or 0) == outgoing_email_id
+        ),
+        None,
+    )
+    return bool(
+        outgoing
+        and str(outgoing.get("subject") or "").strip().upper().startswith("[TEST ONLY]")
+    )
+
+
 def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     email_detail = value["email_detail"]
     detail = value["ticket_detail"]
@@ -241,15 +258,15 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     ticket = detail.get("ticket") or {}
     if email.get("intent_type") != "new_repair":
         raise E2EFailure("Complete fixture was not classified as new_repair")
-    if ticket.get("current_status_code") != "rma_sent":
-        raise E2EFailure("Complete ticket is not rma_sent")
+    if ticket.get("current_status_code") != "closed":
+        raise E2EFailure("Complete ticket is not closed after RMA issue archival")
     sent_rmas = [
         row
         for row in detail.get("rma_records") or []
-        if row.get("status") == "sent"
+        if row.get("status") == "issued"
     ]
     if len(sent_rmas) != 1:
-        raise E2EFailure("Complete ticket does not have exactly one sent RMA")
+        raise E2EFailure("Complete ticket does not have exactly one issued RMA")
     if ticket.get("missing_fields") or not ticket.get("customer_code"):
         raise E2EFailure("Complete ticket still has missing fields or lacks SN-derived customer code")
     if not ticket.get("safety_check_hash") or not ticket.get("sn_validation_hash"):
@@ -257,9 +274,7 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     if not detail.get("items") or any(not item.get("sn") or not item.get("material_code") for item in detail["items"]):
         raise E2EFailure("Complete ticket items were not enriched from SN master data")
     reply = single_sent_reply(detail, "rma_authorization")
-    if not exact_recipient(reply) or not test_only_subject(
-        reply.get("subject")
-    ).upper().startswith("[TEST ONLY]"):
+    if not exact_recipient(reply) or not exact_test_transport_subject(detail, reply):
         raise E2EFailure("RMA reply did not preserve the exact test envelope and subject prefix")
     parent_message_id = str(email.get("message_id") or "")
     if (
@@ -269,6 +284,52 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
         raise E2EFailure("RMA reply did not preserve the original message thread")
     if not reply.get("rma_pdf_oss_object_id") or not reply.get("rma_pdf_data_snapshot"):
         raise E2EFailure("RMA reply does not contain an archived PDF and snapshot")
+    if (
+        reply.get("archive_status") != "archived"
+        or not reply.get("archive_verified_at")
+        or not reply.get("outgoing_email_id")
+        or not reply.get("smtp_message_id")
+    ):
+        raise E2EFailure("RMA reply archive evidence is incomplete")
+    rma = sent_rmas[0]
+    if (
+        rma.get("pdf_validation_status") != "passed"
+        or rma.get("pdf_archive_status") != "archived"
+        or not rma.get("pdf_sha256")
+        or not rma.get("pdf_archived_at")
+        or not rma.get("issued_at")
+    ):
+        raise E2EFailure("Issued RMA PDF evidence is incomplete")
+    issue_summary = detail.get("rma_issue_summary") or {}
+    required_issue_facts = {
+        "rma_received",
+        "pdf_validated",
+        "smtp_sent",
+        "message_id_saved",
+        "pdf_archived",
+        "outbound_archived",
+        "closed",
+    }
+    missing_issue_facts = sorted(
+        fact for fact in required_issue_facts if issue_summary.get(fact) is not True
+    )
+    if missing_issue_facts:
+        raise E2EFailure(
+            "RMA issue closure evidence is incomplete: " + ",".join(missing_issue_facts)
+        )
+    status_logs = detail.get("status_logs") or []
+    if not any(
+        row.get("to_status_code") == "rma_sent"
+        and row.get("trigger_event") == "rma_reply_sent"
+        for row in status_logs
+    ):
+        raise E2EFailure("Complete ticket lacks the rma_sent transition evidence")
+    if not any(
+        row.get("to_status_code") == "closed"
+        and row.get("trigger_event") == "rma_issued_and_archived"
+        for row in status_logs
+    ):
+        raise E2EFailure("Complete ticket lacks the archival close transition evidence")
     return {"ticket": ticket, "thread": detail.get("thread") or {}, "reply": reply}
 
 
@@ -290,9 +351,7 @@ def validate_missing_path(value: dict[str, Any]) -> dict[str, Any]:
     if (
         not exact_recipient(reply)
         or reply.get("rma_pdf_oss_object_id")
-        or not test_only_subject(reply.get("subject")).upper().startswith(
-            "[TEST ONLY]"
-        )
+        or not exact_test_transport_subject(detail, reply)
     ):
         raise E2EFailure("Missing-field reply envelope or attachment state is invalid")
     parent_message_id = str(email.get("message_id") or "")
@@ -355,7 +414,7 @@ def run() -> int:
             lambda: patch_config(
                 client,
                 auto_send_enabled=True,
-                auto_followup_enabled=False,
+                auto_followup_enabled=True,
                 rma_auto_send_enabled=True,
             ),
         )
@@ -363,7 +422,7 @@ def run() -> int:
         complete_value = wait_for_ticket(
             client,
             complete_email_id,
-            expected_status="rma_sent",
+            expected_status="closed",
             expected_reply_type="rma_authorization",
         )
         complete = validate_complete_path(complete_value)
@@ -429,9 +488,9 @@ def run() -> int:
         return 0
     finally:
         safe_values = {
-            "auto_send_enabled": True if success else False,
-            "auto_followup_enabled": False,
-            "rma_auto_send_enabled": True,
+            "auto_send_enabled": bool(initial.get("auto_send_enabled")),
+            "auto_followup_enabled": bool(initial.get("auto_followup_enabled")),
+            "rma_auto_send_enabled": bool(initial.get("rma_auto_send_enabled")),
         }
         try:
             final_config = patch_config(client, **safe_values)

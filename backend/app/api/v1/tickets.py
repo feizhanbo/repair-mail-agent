@@ -14,6 +14,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import (
     ExportSap,
+    JobRunLog,
     ManualReviewTask,
     ParseResult,
     RepairTicketItem,
@@ -533,7 +534,9 @@ async def retry_rma_send(
     if ticket.current_status_code in {"rma_sent", "closed"} and sent_reply is not None:
         from app.services.replies import resolve_completed_rma_tasks, retry_rma_archive
 
-        ticket.rma_status = "sent"
+        ticket.rma_status = (
+            "issued" if ticket.current_status_code == "closed" else "sent"
+        )
         rma_rows[0].status = (
             "issued" if ticket.current_status_code == "closed" else "sent"
         )
@@ -564,12 +567,41 @@ async def retry_rma_send(
         )
         or 0
     )
+    active_job = await session.scalar(
+        select(JobRunLog)
+        .where(
+            JobRunLog.job_type == "rma_authorization",
+            JobRunLog.resource_type == "repair_ticket",
+            JobRunLog.resource_id == ticket.id,
+            JobRunLog.status.in_(("queued", "running", "retry_wait")),
+        )
+        .order_by(JobRunLog.id.desc())
+    )
+    if active_job is not None:
+        return ok(serialize_job(active_job), "active RMA send retry reused")
+    retry_sequence = int(
+        (
+            await session.scalar(
+                select(func.count())
+                .select_from(JobRunLog)
+                .where(
+                    JobRunLog.job_type == "rma_authorization",
+                    JobRunLog.resource_type == "repair_ticket",
+                    JobRunLog.resource_id == ticket.id,
+                )
+            )
+        )
+        or 0
+    )
     job = await enqueue_job(
         session,
         job_type="rma_authorization",
         resource_type="repair_ticket",
         resource_id=ticket.id,
-        idempotency_key=f"rma_authorization_retry:{ticket.id}:{ticket.version}:{rma_rows[0].rma_no}:{reply_count}",
+        idempotency_key=(
+            f"rma_authorization_retry:{ticket.id}:{ticket.version}:"
+            f"{rma_rows[0].rma_no}:{reply_count}:{retry_sequence}"
+        ),
         metadata={
             "user_id": current_user.id,
             "ticket_version": ticket.version,

@@ -352,7 +352,7 @@ export const api = {
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
   createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>
     postData<ReplyTemplate>('/system/reply-templates', body),
-  updateReplyTemplate: (id: number, body: Partial<Pick<ReplyTemplate, 'template_name' | 'subject_template' | 'body_template' | 'enabled'>>) =>
+  updateReplyTemplate: (id: number, body: Partial<Pick<ReplyTemplate, 'template_name' | 'subject_template' | 'body_template' | 'html_body_template' | 'enabled'>>) =>
     patchData<ReplyTemplate>(`/system/reply-templates/${id}`, body),
   deleteReplyTemplate: (id: number) => apiClient.delete<ApiResponse<{ deleted: boolean; template: ReplyTemplate }>, ApiResponse<{ deleted: boolean; template: ReplyTemplate }>>(`/system/reply-templates/${id}`).then((response) => response.data),
   statistics: (params: Record<string, unknown>) => getData<StatisticsSummary>('/statistics/summary', { params }),

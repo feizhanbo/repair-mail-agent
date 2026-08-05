@@ -338,6 +338,51 @@ async def test_missing_field_email_uses_failure_description_and_email_date() -> 
     assert set(enriched.missing_fields) == {"customer_name", "contact_person", "mailing_address"}
 
 
+@pytest.mark.anyio
+async def test_customer_name_uses_unanimous_valid_sn_asset_master_data() -> None:
+    class Session:
+        async def scalar(self, _statement):
+            return SimpleNamespace(
+                asset_status="valid",
+                customer_code="E2E-CBIT-20260804",
+                customer_name="上海林众电子科技有限公司",
+            )
+
+    email = Email(
+        id=71,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 7, 29, 10, 57),
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={
+            "contact_person": "test contact",
+            "contact_email": "rmatest2@accotest.com",
+            "mailing_address": "test mailing address",
+            "problem_description": "CBIT128 upgrade",
+        },
+        extracted_items=[
+            {"sn": "M81072420200031", "failure_description": "CBIT128 upgrade"},
+            {"sn": "M81072420200030", "failure_description": "CBIT128 upgrade"},
+        ],
+        missing_fields={"customer_name": "missing"},
+        confidence_score=0.85,
+    )
+
+    enriched = await _enrich_ai_quality(
+        Session(), parsed=parsed, email=email, attachments=[]
+    )
+
+    assert enriched.extracted_fields["customer_name"] == "上海林众电子科技有限公司"
+    assert enriched.extracted_fields["customer_code"] == "E2E-CBIT-20260804"
+    assert enriched.evidence["derived_fields"]["customer_name"] == {
+        "source": "sn_asset_consensus",
+        "sn_count": 2,
+    }
+    assert enriched.missing_fields == {}
+
+
 def test_ai_reply_schema_accepts_sample_output() -> None:
     parsed = AiReplyDraftResponse.model_validate(
         {

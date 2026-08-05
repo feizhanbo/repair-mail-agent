@@ -296,7 +296,16 @@ async def ingest_email(
         raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
         processing_trace_id=processing_trace_id,
         source_content_sha256=payload.raw_eml_sha256,
-        raw_headers={"raw_eml_sha256": payload.raw_eml_sha256} if payload.raw_eml_sha256 else None,
+        raw_headers={
+            key: value
+            for key, value in {
+                "raw_eml_sha256": payload.raw_eml_sha256,
+                "delivered_to": payload.delivered_to_addresses,
+                "x_original_to": payload.x_original_to_addresses,
+            }.items()
+            if value
+        }
+        or None,
         in_reply_to=payload.in_reply_to,
         references_header=payload.references_header,
         from_address=payload.from_address,
