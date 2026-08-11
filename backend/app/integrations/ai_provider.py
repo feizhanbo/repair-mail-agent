@@ -10,6 +10,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.repair_items import normalize_repair_item
+from app.core.email_classification import CLASSIFICATION_VERSION, INTENT_LEVEL, decision_for_intent
 
 
 class AiProviderError(RuntimeError):
@@ -19,6 +20,10 @@ class AiProviderError(RuntimeError):
 class AiExtractResponse(BaseModel):
     intent_type: str = "unknown"
     intent_subtype: str | None = None
+    handling_level: str | None = None
+    classification_version: str = CLASSIFICATION_VERSION
+    classification_reason_code: str | None = None
+    candidate_intents: list[str] = Field(default_factory=list)
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
     extracted_items: list[dict[str, Any]] = Field(default_factory=list)
     missing_fields: dict[str, Any] = Field(default_factory=dict)
@@ -59,11 +64,8 @@ def _as_string_list(value: Any) -> list[str]:
     return []
 
 
-_INTENT_ALIASES = {"customer_reply": "customer_supplement", "internal_forward": "normal_reply"}
-_ALLOWED_INTENTS = {
-    "new_repair", "customer_supplement", "normal_reply", "rma_sent",
-    "device_received", "irrelevant", "unknown",
-}
+_INTENT_ALIASES = {"customer_reply": "customer_supplement", "internal_forward": "repair_thread_other", "normal_reply": "repair_thread_other", "device_received": "device_intake_received"}
+_ALLOWED_INTENTS = set(INTENT_LEVEL) | {"irrelevant"}
 _ALLOWED_IRRELEVANT_SUBTYPES = {"general_irrelevant", "out_of_scope_repair"}
 
 
@@ -96,6 +98,19 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
             )
         else:
             normalized["intent_subtype"] = None
+        if normalized["intent_type"] == "irrelevant":
+            normalized["handling_level"] = None
+            normalized["classification_reason_code"] = normalized.get("classification_reason_code") or "AI_MAILBOX_IRRELEVANT"
+        else:
+            decision = decision_for_intent(normalized["intent_type"], reason_code="AI_SEMANTIC_CANDIDATE")
+            normalized["handling_level"] = decision.handling_level
+            normalized["classification_reason_code"] = normalized.get("classification_reason_code") or decision.reason_code
+        normalized["classification_version"] = CLASSIFICATION_VERSION
+        normalized["candidate_intents"] = [
+            str(_INTENT_ALIASES.get(str(item).strip().lower(), str(item).strip().lower()))
+            for item in normalized.get("candidate_intents", [])
+            if str(_INTENT_ALIASES.get(str(item).strip().lower(), str(item).strip().lower())) in INTENT_LEVEL
+        ]
         for field in ("extracted_fields", "missing_fields", "conflict_fields", "evidence"):
             normalized[field] = _as_mapping(normalized.get(field))
         normalized["missing_fields"] = _without_optional_phone_requirement(normalized["missing_fields"])

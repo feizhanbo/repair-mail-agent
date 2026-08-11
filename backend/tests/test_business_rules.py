@@ -26,7 +26,13 @@ def test_new_repair_missing_fields_use_business_required_matrix() -> None:
 
 
 def test_non_business_intents_never_create_customer_missing_fields() -> None:
-    for intent in ("normal_reply", "device_received", "rma_sent", "irrelevant", "unknown"):
+    for intent in (
+        "repair_thread_other",
+        "warranty_status_inquiry",
+        "device_intake_received",
+        "invoice",
+        "unknown",
+    ):
         assert required_missing_for_values(
             intent_type=intent,
             fields={},

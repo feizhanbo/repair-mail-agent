@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, pk_column
 
@@ -32,3 +32,22 @@ class OssObject(CreatedAtMixin, Base):
     upload_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     error_message: Mapped[str | None] = mapped_column(Text)
     created_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_oss_objects_created_by"))
+
+    raw_emails: Mapped[list["Email"]] = relationship(
+        "Email", foreign_keys="Email.raw_eml_oss_object_id", back_populates="raw_eml_oss_object", lazy="raise"
+    )
+    attachments: Mapped[list["EmailAttachment"]] = relationship(
+        "EmailAttachment", foreign_keys="EmailAttachment.oss_object_id", back_populates="oss_object", lazy="raise"
+    )
+    reply_pdf_records: Mapped[list["ReplyRecord"]] = relationship(
+        "ReplyRecord", foreign_keys="ReplyRecord.rma_pdf_oss_object_id", back_populates="rma_pdf_oss_object", lazy="raise"
+    )
+    ticket_rmas: Mapped[list["TicketRma"]] = relationship(
+        "TicketRma", foreign_keys="TicketRma.pdf_oss_object_id", back_populates="pdf_oss_object", lazy="raise"
+    )
+    input_jobs: Mapped[list["JobRunLog"]] = relationship(
+        "JobRunLog", foreign_keys="JobRunLog.input_oss_object_id", back_populates="input_oss_object", lazy="raise"
+    )
+    output_jobs: Mapped[list["JobRunLog"]] = relationship(
+        "JobRunLog", foreign_keys="JobRunLog.output_oss_object_id", back_populates="output_oss_object", lazy="raise"
+    )

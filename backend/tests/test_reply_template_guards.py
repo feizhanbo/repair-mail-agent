@@ -160,7 +160,6 @@ def test_seed_contains_all_runtime_reply_templates() -> None:
         "sn_invalid",
         "manual_review",
         "rma_attachment_disabled_receipt",
-        "device_received_ack",
     ):
         assert (template_type, "zh-CN") in keys
         assert (template_type, "en-US") in keys
@@ -168,6 +167,7 @@ def test_seed_contains_all_runtime_reply_templates() -> None:
     assert ("rma_authorization_overseas_in_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_out_of_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_st_pickup", "en-US") in keys
+    assert not any(item["template_type"] == "device_received_ack" for item in REPLY_TEMPLATES)
 
 
 def test_seed_template_versions_fit_database_column() -> None:

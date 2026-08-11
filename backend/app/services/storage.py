@@ -4,13 +4,14 @@ import asyncio
 import hashlib
 import mimetypes
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email, EmailAttachment, JobRunLog, OssObject, ReplyRecord
+from app.models import Email, EmailAttachment, JobRunLog, OssObject, ReplyRecord, TicketRma
 from app.services.common import utcnow
 
 
@@ -20,6 +21,22 @@ class StorageConfigurationError(RuntimeError):
 
 class StorageUploadError(RuntimeError):
     pass
+
+
+class StorageDeleteError(RuntimeError):
+    def __init__(self, code: str, *, retryable: bool = True) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class OssDeleteResult:
+    bucket: str
+    object_key: str
+    deleted: bool
+    already_missing: bool = False
+    error_code: str | None = None
 
 
 _oss_semaphore = asyncio.Semaphore(max(1, settings.OSS_IO_CONCURRENCY))
@@ -210,6 +227,112 @@ async def download_oss_object_bytes(
         raise StorageUploadError("OSS_DOWNLOAD_FAILED") from exc
 
 
+async def oss_object_exists(
+    *, bucket: str, object_key: str, endpoint: str | None = None
+) -> bool:
+    if not _oss_configured():
+        raise StorageConfigurationError("OSS_NOT_CONFIGURED")
+    try:
+        async with _oss_semaphore:
+            return bool(
+                await asyncio.to_thread(
+                    _build_bucket(
+                        endpoint=endpoint or settings.OSS_ENDPOINT,
+                        bucket_name=bucket,
+                    ).object_exists,
+                    object_key,
+                )
+            )
+    except Exception as exc:
+        raise StorageDeleteError("OSS_EXISTS_CHECK_FAILED") from exc
+
+
+async def delete_oss_object(
+    *,
+    bucket: str,
+    object_key: str,
+    endpoint: str | None = None,
+    object_version: str | None = None,
+) -> OssDeleteResult:
+    """Idempotently delete an OSS object using persisted identity fields."""
+    if not _oss_configured():
+        raise StorageConfigurationError("OSS_NOT_CONFIGURED")
+    try:
+        client = _build_bucket(
+            endpoint=endpoint or settings.OSS_ENDPOINT,
+            bucket_name=bucket,
+        )
+        async with _oss_semaphore:
+            existed = bool(await asyncio.to_thread(client.object_exists, object_key))
+            if not existed:
+                return OssDeleteResult(bucket, object_key, True, already_missing=True)
+            if object_version:
+                await asyncio.to_thread(
+                    client.delete_object,
+                    object_key,
+                    params={"versionId": object_version},
+                )
+                remains = False
+            else:
+                await asyncio.to_thread(client.delete_object, object_key)
+                remains = bool(await asyncio.to_thread(client.object_exists, object_key))
+        if remains:
+            raise StorageDeleteError("OSS_DELETE_NOT_CONFIRMED")
+        return OssDeleteResult(bucket, object_key, True)
+    except StorageDeleteError:
+        raise
+    except Exception as exc:
+        status_code = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+        provider_code = str(getattr(exc, "code", "") or getattr(exc, "error_code", ""))
+        code = (
+            "OSS_DELETE_FORBIDDEN"
+            if status_code == 403
+            or exc.__class__.__name__ in {"AccessDenied", "NoPermission"}
+            or provider_code in {"AccessDenied", "Forbidden", "NoPermission"}
+            else "OSS_DELETE_FAILED"
+        )
+        raise StorageDeleteError(code, retryable=code != "OSS_DELETE_FORBIDDEN") from exc
+
+
+async def delete_oss_objects(objects: list[dict]) -> list[OssDeleteResult]:
+    results: list[OssDeleteResult] = []
+    for item in objects:
+        try:
+            results.append(
+                await delete_oss_object(
+                    bucket=str(item["bucket"]),
+                    object_key=str(item["object_key"]),
+                    endpoint=item.get("endpoint"),
+                    object_version=item.get("object_version"),
+                )
+            )
+        except (StorageConfigurationError, StorageDeleteError) as exc:
+            results.append(
+                OssDeleteResult(
+                    str(item.get("bucket") or ""),
+                    str(item.get("object_key") or ""),
+                    False,
+                    error_code=str(exc),
+                )
+            )
+    return results
+
+
+async def oss_reference_summary(session: AsyncSession, oss_object_id: int) -> dict[str, int]:
+    checks = {
+        "emails.raw_eml_oss_object_id": select(Email.id).where(Email.raw_eml_oss_object_id == oss_object_id),
+        "email_attachments.oss_object_id": select(EmailAttachment.id).where(EmailAttachment.oss_object_id == oss_object_id),
+        "reply_records.rma_pdf_oss_object_id": select(ReplyRecord.id).where(ReplyRecord.rma_pdf_oss_object_id == oss_object_id),
+        "ticket_rmas.pdf_oss_object_id": select(TicketRma.id).where(TicketRma.pdf_oss_object_id == oss_object_id),
+        "job_run_logs.input_oss_object_id": select(JobRunLog.id).where(JobRunLog.input_oss_object_id == oss_object_id),
+        "job_run_logs.output_oss_object_id": select(JobRunLog.id).where(JobRunLog.output_oss_object_id == oss_object_id),
+    }
+    summary: dict[str, int] = {}
+    for name, statement in checks.items():
+        summary[name] = len((await session.execute(statement)).scalars().all())
+    return summary
+
+
 async def find_orphan_oss_objects(
     session: AsyncSession,
     *,
@@ -226,6 +349,7 @@ async def find_orphan_oss_objects(
             ~exists(select(JobRunLog.id).where(JobRunLog.input_oss_object_id == OssObject.id)),
             ~exists(select(JobRunLog.id).where(JobRunLog.output_oss_object_id == OssObject.id)),
             ~exists(select(ReplyRecord.id).where(ReplyRecord.rma_pdf_oss_object_id == OssObject.id)),
+            ~exists(select(TicketRma.id).where(TicketRma.pdf_oss_object_id == OssObject.id)),
         )
         .order_by(OssObject.created_at.asc())
         .limit(max(1, min(limit, 1000)))

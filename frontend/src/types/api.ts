@@ -170,6 +170,10 @@ export type EmailItem = {
   processing_stage?: string;
   intent_type?: string | null;
   intent_subtype?: string | null;
+  handling_level?: string | null;
+  classification_version?: string | null;
+  classification_confidence?: number | null;
+  classification_reason_code?: string | null;
   duplicate_of_email_id?: number | null;
   terminal_reason_code?: string | null;
   last_error_code?: string | null;
@@ -211,6 +215,10 @@ export type ParseResult = {
   parser_version?: string | null;
   intent_type?: string | null;
   intent_subtype?: string | null;
+  handling_level?: string | null;
+  classification_version?: string | null;
+  classification_confidence?: number | null;
+  classification_reason_code?: string | null;
   extracted_fields?: JsonRecord | null;
   extracted_items?: JsonRecord | null;
   missing_fields?: JsonRecord | null;
@@ -320,6 +328,9 @@ export type Ticket = {
   id: number;
   ticket_no: string;
   current_status_code: string;
+  ticket_category?: 'standard_repair' | 'manual_business' | string;
+  origin_handling_level?: string | null;
+  origin_intent_type?: string | null;
   source_email_id?: number | null;
   thread_id?: number | null;
   customer_code?: string | null;
@@ -355,15 +366,12 @@ export type Ticket = {
   safety_check_snapshot?: JsonRecord | null;
   safety_check_hash?: string | null;
   safety_checked_at?: string | null;
-  device_received_at?: string | null;
-  device_received_source?: string | null;
-  device_received_email_id?: number | null;
-  device_received_note?: string | null;
-  device_received_idempotency_key?: string | null;
-  device_receipt_ack_status?: string;
   terminal_reason_code?: string | null;
   terminal_reason?: string | null;
   closed_at?: string | null;
+  resolved_at?: string | null;
+  resolution_code?: string | null;
+  resolution_summary?: string | null;
   manual_locked: boolean;
   version: number;
   created_at?: string;
@@ -578,8 +586,9 @@ export type ExternalOperationRecord = {
 
 export type ManualTask = {
   id: number;
-  ticket_id: number;
+  ticket_id?: number | null;
   email_id?: number | null;
+  thread_id?: number | null;
   task_type: string;
   priority: string;
   status: string;
@@ -628,12 +637,25 @@ export type UserUpdateRequest = {
 
 export type ManualTaskDetail = {
   task: ManualTask;
-  ticket_context: TicketDetail;
+  ticket_context: TicketDetail | null;
+  email_context?: {
+    id: number;
+    thread_id?: number | null;
+    message_id?: string | null;
+    subject?: string | null;
+    from_address?: string | null;
+    intent_type?: string | null;
+    handling_level?: string | null;
+    classification_reason_code?: string | null;
+    clean_body?: string | null;
+    latest_reply_segment?: string | null;
+    attachments?: Attachment[];
+  } | null;
 };
 
 export type ManualTaskReparseResponse = {
   task: ManualTask;
-  ticket_context: TicketDetail;
+  ticket_context: TicketDetail | null;
   reparse_result: JsonRecord;
 };
 

@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, bool_column, created_at_column, datetime_column, pk_column
 
@@ -18,6 +18,7 @@ class ParseResult(CreatedAtMixin, Base):
         Index("idx_parse_results_ticket", "ticket_id"),
         Index("idx_parse_results_parser", "parser_type", "parser_version"),
         Index("idx_parse_results_intent_subtype", "intent_subtype"),
+        Index("idx_parse_results_handling_intent", "handling_level", "intent_type"),
         Index("idx_parse_results_apply_status", "apply_status"),
         Index("idx_parse_results_accepted", "accepted"),
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="confidence_between_0_and_1"),
@@ -31,6 +32,10 @@ class ParseResult(CreatedAtMixin, Base):
     parser_version: Mapped[str | None] = mapped_column(String(50))
     intent_type: Mapped[str | None] = mapped_column(String(50))
     intent_subtype: Mapped[str | None] = mapped_column(String(50))
+    handling_level: Mapped[str | None] = mapped_column(String(30))
+    classification_version: Mapped[str | None] = mapped_column(String(50))
+    classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
+    classification_reason_code: Mapped[str | None] = mapped_column(String(100))
     extracted_fields: Mapped[dict | None] = mapped_column(mysql.JSON)
     extracted_items: Mapped[dict | None] = mapped_column(mysql.JSON)
     missing_fields: Mapped[dict | None] = mapped_column(mysql.JSON)
@@ -45,6 +50,19 @@ class ParseResult(CreatedAtMixin, Base):
     accepted_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_parse_results_accepted_by"))
     accepted_at: Mapped[datetime | None] = datetime_column()
     error_message: Mapped[str | None] = mapped_column(Text)
+
+    email: Mapped["Email"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="parse_results", lazy="raise"
+    )
+    source_attachment: Mapped["EmailAttachment | None"] = relationship(
+        "EmailAttachment", foreign_keys=[source_attachment_id], back_populates="parse_results", lazy="raise"
+    )
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="parse_results", lazy="raise"
+    )
+    field_audit_logs: Mapped[list["FieldAuditLog"]] = relationship(
+        "FieldAuditLog", foreign_keys="FieldAuditLog.parse_result_id", back_populates="parse_result", lazy="raise"
+    )
 
 
 class SnValidationResult(Base):
@@ -75,4 +93,11 @@ class SnValidationResult(Base):
     source_system: Mapped[str] = mapped_column(String(30), nullable=False, server_default="local_sn_assets")
     evidence_json: Mapped[dict | None] = mapped_column(mysql.JSON)
     checked_at: Mapped[datetime] = created_at_column()
+
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="validation_results", lazy="raise"
+    )
+    ticket_item: Mapped["RepairTicketItem | None"] = relationship(
+        "RepairTicketItem", foreign_keys=[ticket_item_id], back_populates="validation_results", lazy="raise"
+    )
 

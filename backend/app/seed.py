@@ -78,10 +78,25 @@ WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
         "is_terminal": True,
         "sort_order": 90,
     },
+    {
+        "status_code": "resolved",
+        "status_name": "人工业务已完成",
+        "status_category": "terminal",
+        "description": "SECOND 人工业务已经处理并记录结果，不代表签发 RMA。",
+        "is_terminal": True,
+        "sort_order": 95,
+    },
 )
 
 
 BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
+    {
+        "from_status_code": "manual_review",
+        "to_status_code": "resolved",
+        "trigger_event": "manual_business_resolved",
+        "condition_desc": "SECOND 人工业务已通过现有业务渠道处理并记录结果。",
+        "require_manual": True,
+    },
     {
         "from_status_code": "new_email",
         "to_status_code": "parsed",
@@ -439,19 +454,6 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         ),
     },
     {
-        "template_code": "device_received_ack_zh",
-        "template_name": "设备收货确认",
-        "template_type": "device_received_ack",
-        "language": "zh-CN",
-        "version": "v1",
-        "subject_template": "Re: {{ original_subject }}",
-        "body_template": (
-            "您好，{{ contact_person }}：\n\n"
-            "我们已收到您寄送的待修设备及随附的 RMA 维修授权单（工单 {{ ticket_no }}）。"
-            "设备已进入后续维修处理流程。\n\n谢谢。"
-        ),
-    },
-    {
         "template_code": "rma_overseas_in_warranty_en",
         "template_name": "Overseas RMA - In Warranty",
         "template_type": "rma_authorization_overseas_in_warranty",
@@ -597,18 +599,6 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         "body_template": (
             "Dear {{ contact_person }},\n\nWe have received your repair request. Automatic delivery of the "
             "RMA authorization attachment is currently disabled and our team will continue handling it."
-        ),
-    },
-    {
-        "template_code": "device_received_ack_en",
-        "template_name": "Device Receipt Confirmation",
-        "template_type": "device_received_ack",
-        "language": "en-US",
-        "version": "v1",
-        "subject_template": "Re: {{ original_subject }}",
-        "body_template": (
-            "Dear {{ contact_person }},\n\nWe have received the device and accompanying RMA authorization "
-            "for ticket {{ ticket_no }}. The device has entered the repair process.\n\nThank you."
         ),
     },
 )

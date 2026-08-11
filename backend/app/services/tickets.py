@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.email_classification import AUTO_INTENTS, HandlingLevel
 from app.core.repair_items import normalize_repair_item
 from app.models import (
     Email,
@@ -39,6 +40,9 @@ TICKET_FIELDS = (
     "id",
     "ticket_no",
     "current_status_code",
+    "ticket_category",
+    "origin_handling_level",
+    "origin_intent_type",
     "source_email_id",
     "thread_id",
     "customer_code",
@@ -74,15 +78,12 @@ TICKET_FIELDS = (
     "safety_check_snapshot",
     "safety_check_hash",
     "safety_checked_at",
-    "device_received_at",
-    "device_received_source",
-    "device_received_email_id",
-    "device_received_note",
-    "device_received_idempotency_key",
-    "device_receipt_ack_status",
     "terminal_reason_code",
     "terminal_reason",
     "closed_at",
+    "resolved_at",
+    "resolution_code",
+    "resolution_summary",
     "manual_locked",
     "version",
     "created_at",
@@ -177,6 +178,10 @@ EMAIL_FIELDS = (
     "processing_stage",
     "intent_type",
     "intent_subtype",
+    "handling_level",
+    "classification_version",
+    "classification_confidence",
+    "classification_reason_code",
     "duplicate_of_email_id",
     "terminal_reason_code",
     "last_error_code",
@@ -265,6 +270,10 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "parser_version",
             "intent_type",
             "intent_subtype",
+            "handling_level",
+            "classification_version",
+            "classification_confidence",
+            "classification_reason_code",
             "extracted_fields",
             "extracted_items",
             "missing_fields",
@@ -1042,7 +1051,7 @@ async def create_ticket_from_parse_result(
     from app.services.routing import choose_system_owner
 
     fields = parse_result.extracted_fields or {}
-    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+    if parse_result.intent_type not in AUTO_INTENTS:
         fields = {}
     if selected_fields is not None:
         fields = {key: value for key, value in fields.items() if key in selected_fields}
@@ -1051,6 +1060,9 @@ async def create_ticket_from_parse_result(
     ticket = RepairTicket(
         ticket_no=ticket_no,
         current_status_code="new_email",
+        ticket_category="standard_repair",
+        origin_handling_level=parse_result.handling_level or str(HandlingLevel.AUTO_REPAIR),
+        origin_intent_type=parse_result.intent_type,
         source_email_id=email.id,
         thread_id=email.thread_id,
         customer_code=fields.get("customer_code"),
@@ -1157,7 +1169,7 @@ async def ensure_manual_review_ticket_from_parse_result(
 ) -> RepairTicket:
     ticket = await _existing_ticket_for_email(session, email, parse_result)
     fields = parse_result.extracted_fields or {}
-    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+    if parse_result.intent_type not in AUTO_INTENTS:
         fields = {}
     if ticket is None:
         from app.services.routing import choose_system_owner
@@ -1235,6 +1247,98 @@ async def ensure_manual_review_ticket_from_parse_result(
         target_id=ticket.id,
         description=reason,
         after_data={"email_id": email.id, "parse_result_id": parse_result.id, "task_type": task_type},
+    )
+    return ticket
+
+
+async def create_manual_business_ticket_from_email(
+    session: AsyncSession,
+    *,
+    email: Email,
+    parse_result: ParseResult,
+    reason: str,
+) -> RepairTicket:
+    """Create a SECOND side-car ticket without replacing the thread's FIRST ticket."""
+    existing_link = await session.scalar(
+        select(EmailTicketLink)
+        .join(RepairTicket, RepairTicket.id == EmailTicketLink.ticket_id)
+        .where(
+            EmailTicketLink.email_id == email.id,
+            RepairTicket.ticket_category == "manual_business",
+        )
+        .order_by(EmailTicketLink.id.desc())
+    )
+    if existing_link is not None:
+        existing = await session.get(RepairTicket, existing_link.ticket_id)
+        if existing is not None:
+            return existing
+
+    from app.services.routing import choose_system_owner
+
+    owner_id, language_code, routing_reason = await choose_system_owner(session, email)
+    ticket = RepairTicket(
+        ticket_no=await _next_ticket_no(session),
+        current_status_code="manual_review",
+        ticket_category="manual_business",
+        origin_handling_level=parse_result.handling_level or str(HandlingLevel.MANUAL_RMA_BUSINESS),
+        origin_intent_type=parse_result.intent_type,
+        source_email_id=email.id,
+        thread_id=email.thread_id,
+        contact_email=email.from_address,
+        assigned_user_id=owner_id,
+        language_code=language_code,
+        rma_required=False,
+        relay_export_status="not_required",
+        rma_status="not_required",
+        sn_validation_status="not_required",
+        policy_resolution_status="not_required",
+        confidence_score=parse_result.confidence_score,
+        conflict_fields=parse_result.conflict_fields,
+        max_followup_count=settings.MAX_FOLLOW_UP,
+    )
+    session.add(ticket)
+    await session.flush()
+    session.add(
+        TicketStatusLog(
+            ticket_id=ticket.id,
+            from_status_code=None,
+            to_status_code="manual_review",
+            trigger_event="manual_business_created",
+            reason=reason,
+            operator_type="system",
+            metadata_json={"email_id": email.id, "parse_result_id": parse_result.id, "routing": routing_reason},
+        )
+    )
+    session.add(
+        EmailTicketLink(
+            email_id=email.id,
+            ticket_id=ticket.id,
+            link_type="source",
+            link_reason="SECOND manual business side-car; does not replace FIRST active ticket",
+        )
+    )
+    parse_result.ticket_id = ticket.id
+    parse_result.apply_status = "needs_manual_review"
+    await create_manual_task_if_missing(
+        session,
+        ticket=ticket,
+        task_type=f"second_{parse_result.intent_type or 'manual_business'}",
+        trigger_reason=reason,
+        priority="normal",
+        email_id=email.id,
+        assigned_user_id=owner_id,
+        recovery_stage="manual_business",
+        recovery_action="人工处理后记录结果并将人工业务工单置为 resolved。",
+    )
+    await log_operation(
+        session,
+        operation_type="manual_business_ticket_created",
+        target_type="repair_ticket",
+        target_id=ticket.id,
+        email_id=email.id,
+        ticket_id=ticket.id,
+        description=reason,
+        after_data={"intent_type": parse_result.intent_type, "first_active_ticket_unchanged": True},
     )
     return ticket
 
@@ -1475,7 +1579,7 @@ async def apply_parse_result(
         )
 
     fields = parse_result.extracted_fields or {}
-    if parse_result.intent_type not in {"new_repair", "customer_supplement"}:
+    if parse_result.intent_type not in AUTO_INTENTS:
         fields = {}
     if field_selection is not None:
         fields = {key: value for key, value in fields.items() if key in field_selection}
@@ -1519,7 +1623,7 @@ async def apply_parse_result(
         user_id,
         selected_item_indices=item_selection,
     )
-    if parse_result.intent_type in {"new_repair", "customer_supplement"}:
+    if parse_result.intent_type in AUTO_INTENTS:
         await session.flush()
         current_items = (
             await session.execute(
@@ -1549,6 +1653,10 @@ async def apply_parse_result(
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
     email.intent_subtype = parse_result.intent_subtype
+    email.handling_level = parse_result.handling_level
+    email.classification_version = parse_result.classification_version
+    email.classification_confidence = parse_result.classification_confidence or parse_result.confidence_score
+    email.classification_reason_code = parse_result.classification_reason_code
     email.processing_stage = "completed"
     email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
     email.last_error_code = None
@@ -1567,7 +1675,7 @@ async def apply_parse_result(
 
     if (
         ticket.current_status_code == "auto_replied"
-        and parse_result.intent_type == "new_repair"
+        and parse_result.intent_type in {"new_repair", "thread_new_repair"}
         and ticket.source_email_id == email.id
         and not ticket.missing_fields
     ):
@@ -1597,7 +1705,7 @@ async def apply_parse_result(
         )
     if (
         ticket.current_status_code == "need_customer_info"
-        and parse_result.intent_type in {"new_repair", "customer_supplement"}
+        and parse_result.intent_type in AUTO_INTENTS
         and not ticket.missing_fields
     ):
         await transition_ticket(

@@ -40,8 +40,8 @@ def test_reply_references_drive_classification_while_history_supplies_sn() -> No
     intent, confidence, _reason = classify_email(email, email.latest_reply_segment or "")
     extracted = extract_fields(email)
 
-    assert intent == "normal_reply"
-    assert confidence == 0.85
+    assert intent == "repair_thread_other"
+    assert confidence == 0.78
     assert extracted["items"][0]["sn"] == "15CN2240103920"
     assert extracted["fields"]["problem_description"] == "高频源损坏"
 
@@ -102,6 +102,6 @@ def test_given_reply_eml_recovers_thread_history_without_creating_a_new_repair()
     extracted = extract_fields(email)
 
     assert payload.references_header and "<4675f26c4ff842268b19536529c4e154@tfme.com>" in payload.references_header
-    assert intent == "device_received"
+    assert intent == "device_intake_received"
     assert "M81231701100057" in {item["sn"] for item in extracted["items"]}
     assert "测试值异常" in extracted["fields"]["problem_description"]

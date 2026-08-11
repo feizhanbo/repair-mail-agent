@@ -20,6 +20,7 @@ JOB_TYPES = {
     "email_parse", "email_reparse", "imap_fetch", "smtp_send", "auto_followup",
     "master_data_import", "export_generate", "relay_ticket_export", "sap_rma_poll",
     "rma_authorization", "rma_archive",
+    "oss_delete",
 }
 TERMINAL_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 NON_RETRYABLE_ERROR_PARTS = {
@@ -246,6 +247,12 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
         if job.resource_id is None:
             raise ValueError("JOB_RESOURCE_REQUIRED")
         return await create_reply_draft(session, ticket_id=job.resource_id, user_id=user_id)
+    if job.job_type == "oss_delete":
+        from app.services.deletions import process_oss_deletion_operation
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await process_oss_deletion_operation(session, job.resource_id)
     if job.job_type == "master_data_import":
         from app.services import master_data
         from app.services.storage import download_oss_object_bytes
@@ -354,7 +361,7 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
         elif business_status in {"failed", "send_failed", "manual_review", "send_uncertain", "misconfigured", "archive_failed"}:
             error_code = str(result.get("error_code") or business_status).upper()
             retryable = (
-                job.job_type in {"relay_ticket_export", "smtp_send", "rma_archive"}
+                job.job_type in {"relay_ticket_export", "smtp_send", "rma_archive", "oss_delete"}
                 and _job_error_is_retryable(error_code)
             )
             job.result_json = sanitize_log_payload(result)

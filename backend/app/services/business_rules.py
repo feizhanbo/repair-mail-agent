@@ -43,7 +43,7 @@ def required_missing_for_values(
     reported_missing: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return only customer-actionable missing fields for a parsed email."""
-    if intent_type == "new_repair":
+    if intent_type in {"new_repair", "thread_new_repair"}:
         missing = {
             name: CUSTOMER_REQUIRED_FIELD_MESSAGES[name]
             for name in NEW_REPAIR_REQUIRED_FIELDS

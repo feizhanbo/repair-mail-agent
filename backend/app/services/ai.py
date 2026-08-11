@@ -50,6 +50,25 @@ AI_EXTRACT_SYSTEM_PROMPT += """
 - intent_type 不是 irrelevant 时，intent_subtype 必须为 null。
 """.strip()
 
+AI_EXTRACT_SYSTEM_PROMPT += """
+
+邮件业务分层分类：
+- FIRST/auto_repair: new_repair、thread_new_repair、customer_supplement。
+- SECOND/manual_rma_business: component_replacement_repair、onsite_service、
+  warranty_status_inquiry、repair_thread_other。
+- THIRD/lifecycle_only: device_intake_received、repaired_device_dispatched、
+  customer_repaired_device_received、contract_confirmation、invoice、
+  third_party_equipment_quote。
+- UNKNOWN: unknown。
+明确询问某个 SN/板卡/设备是否过保、保修状态或保修截止日期时，必须使用
+warranty_status_inquiry；客户仅陈述已经过保并明确申请标准寄修时，不得仅因“过保”
+判为咨询。回复链不等于补充信息；修改 RMA/SN/地址、撤销、异议和进度询问使用
+repair_thread_other。回复链中明确提出另一台、新增或再次报修时使用 thread_new_repair。
+同一邮件同时补充旧工单并提出新报修时使用 repair_thread_other，并列出
+candidate_intents。清晰的新报修动作优先于纯 THIRD 通知。输出 handling_level、
+candidate_intents 和 classification_reason_code；不得让 SECOND 与 unknown 混淆。
+""".strip()
+
 AI_REPLY_SYSTEM_PROMPT = """
 你是邮件报修自动化系统的中文客服助理。你只能输出 JSON 对象。
 根据工单缺失字段和模板草稿生成更自然的追问草稿。草稿只能用于人工审核，不代表已发送。
@@ -712,7 +731,7 @@ def _valid_email(value: str | None) -> bool:
 
 
 def _intent_requires_business_fields(intent_type: str | None) -> bool:
-    return intent_type in {"new_repair", "customer_supplement"}
+    return intent_type in {"new_repair", "thread_new_repair", "customer_supplement"}
 
 
 def _structured_attachment_business_data(
@@ -1107,6 +1126,10 @@ async def create_ai_parse_candidate(
         parser_version=settings.AI_PROMPT_VERSION,
         intent_type=parsed.intent_type,
         intent_subtype=parsed.intent_subtype,
+        handling_level=parsed.handling_level,
+        classification_version=parsed.classification_version,
+        classification_confidence=parsed.confidence_score,
+        classification_reason_code=parsed.classification_reason_code,
         extracted_fields=parsed.extracted_fields,
         extracted_items={"items": parsed.extracted_items},
         missing_fields=parsed.missing_fields,
@@ -1115,6 +1138,7 @@ async def create_ai_parse_candidate(
         field_confidences=parsed.field_confidences,
         evidence={
             **parsed.evidence,
+            "candidate_intents": parsed.candidate_intents,
             "source_type": "ai",
             "trace_id": ai_log.trace_id,
             "ai_call_log_id": ai_log.id,

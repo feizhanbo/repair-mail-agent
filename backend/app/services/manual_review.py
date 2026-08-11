@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ManualReviewTask
+from app.models import Email, EmailAttachment, ManualReviewTask
 from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
 from app.services.emails import reparse_email
@@ -21,6 +21,7 @@ TASK_FIELDS = (
     "id",
     "ticket_id",
     "email_id",
+    "thread_id",
     "task_type",
     "priority",
     "status",
@@ -101,7 +102,37 @@ async def list_tasks(
 
 async def get_task_detail(session: AsyncSession, task_id: int) -> dict[str, Any]:
     task = await get_task(session, task_id)
-    return {"task": serialize_task(task), "ticket_context": await get_ticket_detail(session, task.ticket_id)}
+    email = await session.get(Email, task.email_id) if task.email_id else None
+    attachments = list(
+        (
+            await session.execute(
+                select(EmailAttachment).where(EmailAttachment.email_id == task.email_id).order_by(EmailAttachment.id)
+            )
+        ).scalars().all()
+    ) if task.email_id else []
+    return {
+        "task": serialize_task(task),
+        "ticket_context": await get_ticket_detail(session, task.ticket_id) if task.ticket_id else None,
+        "email_context": {
+            "id": email.id,
+            "thread_id": email.thread_id,
+            "message_id": email.message_id,
+            "subject": email.subject,
+            "from_address": email.from_address,
+            "intent_type": email.intent_type,
+            "handling_level": email.handling_level,
+            "classification_reason_code": email.classification_reason_code,
+            "clean_body": email.clean_body,
+            "latest_reply_segment": email.latest_reply_segment,
+            "attachments": [
+                model_to_dict(
+                    attachment,
+                    ("id", "email_id", "oss_object_id", "file_name", "content_type", "file_size", "parse_status", "parse_error"),
+                )
+                for attachment in attachments
+            ],
+        } if email else None,
+    }
 
 
 async def claim_task(session: AsyncSession, *, task_id: int, user_id: int) -> dict[str, Any]:
@@ -114,8 +145,8 @@ async def claim_task(session: AsyncSession, *, task_id: int, user_id: int) -> di
     task.claimed_by_user_id = user_id
     task.claimed_at = utcnow()
     task.assigned_user_id = task.assigned_user_id or user_id
-    ticket = await get_ticket(session, task.ticket_id)
-    if ticket.assigned_user_id is None:
+    ticket = await get_ticket(session, task.ticket_id) if task.ticket_id else None
+    if ticket is not None and ticket.assigned_user_id is None:
         ticket.assigned_user_id = user_id
     await log_operation(
         session,
@@ -144,8 +175,9 @@ async def assign_task(
         "status": task.status,
     }
     task.assigned_user_id = assigned_user_id
-    ticket = await get_ticket(session, task.ticket_id)
-    ticket.assigned_user_id = assigned_user_id
+    ticket = await get_ticket(session, task.ticket_id) if task.ticket_id else None
+    if ticket is not None:
+        ticket.assigned_user_id = assigned_user_id
     if assigned_user_id is None:
         task.status = "pending"
         task.claimed_by_user_id = None
@@ -210,10 +242,35 @@ async def resolve_task(
     task = await get_task(session, task_id)
     if task.status in {"resolved", "closed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_ALREADY_RESOLVED")
-    ticket = await get_ticket(session, task.ticket_id)
+    ticket = await get_ticket(session, task.ticket_id) if task.ticket_id else None
     followup_result: dict[str, Any] | None = None
     reparse_result: dict[str, Any] | None = None
-    if next_action == "transition_ready_for_export":
+    if next_action == "finish_external_handling":
+        if ticket is not None and ticket.ticket_category == "manual_business":
+            await transition_ticket(
+                session,
+                ticket=ticket,
+                to_status_code="resolved",
+                trigger_event="manual_business_resolved",
+                user_id=user_id,
+                reason=resolution,
+                resolving_task_id=task.id,
+            )
+    elif next_action == "resolve_manual_business":
+        if ticket is None or ticket.ticket_category != "manual_business":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_TICKET_REQUIRED")
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="resolved",
+            trigger_event="manual_business_resolved",
+            user_id=user_id,
+            reason=resolution,
+            resolving_task_id=task.id,
+        )
+    elif ticket is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_LEVEL_TASK_ACTION_INVALID")
+    elif next_action == "transition_ready_for_export":
         safety_result = await validate_and_mark_ready_for_export(
             session,
             ticket_id=ticket.id,
@@ -340,7 +397,7 @@ async def resolve_task(
     )
     return {
         "task": serialize_task(task),
-        "ticket": await get_ticket_detail(session, ticket.id),
+        "ticket": await get_ticket_detail(session, ticket.id) if ticket else None,
         "followup_result": followup_result,
         "reparse_result": reparse_result,
     }
@@ -357,7 +414,9 @@ async def reparse_task(
     task = await get_task(session, task_id)
     email_id = task.email_id
     if email_id is None:
-        ticket = await get_ticket(session, task.ticket_id)
+        ticket = await get_ticket(session, task.ticket_id) if task.ticket_id else None
+        if ticket is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_EMAIL_NOT_FOUND")
         email_id = ticket.source_email_id
     if email_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_EMAIL_NOT_FOUND")
@@ -379,6 +438,6 @@ async def reparse_task(
     )
     return {
         "task": serialize_task(task),
-        "ticket_context": await get_ticket_detail(session, task.ticket_id),
+        "ticket_context": await get_ticket_detail(session, task.ticket_id) if task.ticket_id else None,
         "reparse_result": reparse_result,
     }

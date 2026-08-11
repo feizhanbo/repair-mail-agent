@@ -1140,6 +1140,10 @@ async def _reply_send_guard_error(
     ticket: RepairTicket,
     reply: ReplyRecord,
 ) -> str | None:
+    if reply.reply_type == "device_received_ack":
+        return "DEVICE_RECEIPT_FEATURE_REMOVED"
+    if ticket.ticket_category == "manual_business" and reply.reply_type == "rma_authorization":
+        return "MANUAL_BUSINESS_RMA_FORBIDDEN"
     if is_followup_reply_type(reply.reply_type):
         ticket_items = list(
             (
@@ -1242,9 +1246,7 @@ async def _send_reply_record(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
 
     def sync_ticket_delivery_status() -> None:
-        if reply.reply_type == "device_received_ack":
-            ticket.device_receipt_ack_status = reply.send_status
-        elif reply.reply_type == "rma_authorization" and reply.send_status in {"send_failed", "send_uncertain"}:
+        if reply.reply_type == "rma_authorization" and reply.send_status in {"send_failed", "send_uncertain"}:
             ticket.rma_status = "manual_review"
 
     if reply.send_status == "sent" and reply.smtp_message_id:
@@ -1498,8 +1500,6 @@ async def _send_reply_record(
                     reply=reply,
                     user_id=user_id,
                 )
-        if reply.reply_type == "device_received_ack":
-            ticket.device_receipt_ack_status = "sent"
         if is_followup_reply_type(reply.reply_type) and not was_counted:
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
         if is_followup_reply_type(reply.reply_type) and ticket.current_status_code == "need_customer_info":
@@ -1525,8 +1525,6 @@ async def _send_reply_record(
             uncertain=reply.send_status == "send_uncertain",
             recovery_stage="smtp_send",
         )
-        if reply.reply_type == "device_received_ack":
-            ticket.device_receipt_ack_status = reply.send_status
         await _ensure_reply_manual_task(
             session,
             ticket=ticket,
@@ -1574,6 +1572,10 @@ async def create_reply_draft(
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
+    if reply_kind == "device_received_ack":
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
+    if ticket.ticket_category == "manual_business" and reply_kind == "rma_authorization":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_RMA_FORBIDDEN")
     language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
     if is_followup_reply_type(reply_kind) and ticket.current_status_code != "need_customer_info":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="FOLLOWUP_TICKET_NOT_WAITING_CUSTOMER_INFO")
@@ -1922,13 +1924,9 @@ async def reconcile_uncertain_reply(
                 reply_id=reply.id,
                 user_id=user_id,
             )
-        elif reply.reply_type == "device_received_ack":
-            ticket.device_receipt_ack_status = "sent"
     elif outcome == "failed":
         reply.send_status = "send_failed"
         reply.error_message = "SMTP_SEND_CONFIRMED_FAILED"
-        if reply.reply_type == "device_received_ack":
-            ticket.device_receipt_ack_status = "send_failed"
         if reply.reply_type == "rma_authorization":
             ticket.rma_status = "manual_review"
     else:

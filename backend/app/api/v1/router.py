@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import ai_logs, auth, dashboard, db_browser, email_threads, emails, jobs, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
+from app.api.v1 import ai_logs, auth, dashboard, db_browser, deletions, email_threads, emails, jobs, manual_review, master_data, notifications, parse_results, replies, statistics, system, tickets, users
 
 api_router = APIRouter()
 
@@ -15,6 +15,7 @@ api_router.include_router(dashboard.router, prefix="/dashboard", tags=["首页�
 api_router.include_router(emails.router, prefix="/emails", tags=["邮件中心"])
 api_router.include_router(email_threads.router, prefix="/email-threads", tags=["邮件线程"])
 api_router.include_router(tickets.router, prefix="/tickets", tags=["工单中心"])
+api_router.include_router(deletions.router, prefix="/deletion-operations", tags=["删除操作"])
 api_router.include_router(parse_results.router, prefix="/parse-results", tags=["解析结果"])
 api_router.include_router(manual_review.router, prefix="/manual-review", tags=["人工复核"])
 api_router.include_router(replies.router, prefix="/replies", tags=["自动回复"])

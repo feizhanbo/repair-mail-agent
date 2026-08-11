@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, bool_column, datetime_column, pk_column
 
@@ -86,4 +86,26 @@ class ReplyRecord(TimestampMixin, Base):
     next_retry_at: Mapped[datetime | None] = datetime_column()
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
+
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="replies", lazy="raise"
+    )
+    related_email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[related_email_id], back_populates="related_reply_records", lazy="raise"
+    )
+    outgoing_email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[outgoing_email_id], back_populates="outgoing_reply_records", lazy="raise"
+    )
+    ai_call_log: Mapped["AiCallLog | None"] = relationship(
+        "AiCallLog", foreign_keys=[ai_call_log_id], back_populates="reply_records", lazy="raise"
+    )
+    rma_pdf_oss_object: Mapped["OssObject | None"] = relationship(
+        "OssObject", foreign_keys=[rma_pdf_oss_object_id], back_populates="reply_pdf_records", lazy="raise"
+    )
+    ticket_rmas: Mapped[list["TicketRma"]] = relationship(
+        "TicketRma", foreign_keys="TicketRma.reply_record_id", back_populates="reply_record", lazy="raise"
+    )
+    external_operations: Mapped[list["ExternalOperationRecord"]] = relationship(
+        "ExternalOperationRecord", foreign_keys="ExternalOperationRecord.reply_record_id", back_populates="reply_record", passive_deletes=True, lazy="raise"
+    )
 

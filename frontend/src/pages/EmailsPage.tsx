@@ -27,6 +27,7 @@ type EmailFilters = {
   parse_status?: string;
   intent_type?: string;
   intent_subtype?: string;
+  handling_level?: string;
   date_range?: unknown;
 };
 
@@ -195,7 +196,8 @@ export default function EmailsPage() {
   const columns: ColumnsType<EmailItem> = [
     { title: '主题', dataIndex: 'subject', ellipsis: true, render: (value?: string) => value || '-' },
     { title: '发件人', dataIndex: 'from_address', ellipsis: true, width: 220 },
-    { title: '意图', dataIndex: 'intent_type', width: 130, render: (value?: string) => <StatusTag value={value} /> },
+    { title: '层级', dataIndex: 'handling_level', width: 125, render: (value?: string) => <StatusTag value={value} /> },
+    { title: '意图', dataIndex: 'intent_type', width: 170, render: (value?: string) => <StatusTag value={value} /> },
     { title: '子类型', dataIndex: 'intent_subtype', width: 150, render: (value?: string) => value || '-' },
     { title: '解析', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
     { title: '线程', dataIndex: 'thread_id', width: 90, render: numberText },
@@ -315,12 +317,32 @@ export default function EmailsPage() {
               style={{ width: 150 }}
               options={[
                 { value: 'new_repair', label: '新报修' },
+                { value: 'thread_new_repair', label: '回复链新报修' },
                 { value: 'customer_supplement', label: '客户补充' },
-                { value: 'normal_reply', label: '普通回复/转发' },
-                { value: 'rma_sent', label: 'RMA 已发送' },
-                { value: 'device_received', label: '设备已收到' },
-                { value: 'irrelevant', label: '无关' },
+                { value: 'component_replacement_repair', label: '物料/元器件替换维修' },
+                { value: 'onsite_service', label: '叫修/现场服务' },
+                { value: 'warranty_status_inquiry', label: '保修状态确认' },
+                { value: 'repair_thread_other', label: '报修线程其他问题' },
+                { value: 'device_intake_received', label: '待修设备到达/入库' },
+                { value: 'repaired_device_dispatched', label: '维修完成设备发出' },
+                { value: 'customer_repaired_device_received', label: '客户收到维修设备' },
+                { value: 'contract_confirmation', label: '合同确认' },
+                { value: 'invoice', label: '发票' },
+                { value: 'third_party_equipment_quote', label: '非我司设备报价单' },
                 { value: 'unknown', label: '未知' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="handling_level">
+            <Select
+              allowClear
+              placeholder="处理层级"
+              style={{ width: 155 }}
+              options={[
+                { value: 'auto_repair', label: 'FIRST 自动报修' },
+                { value: 'manual_rma_business', label: 'SECOND 人工业务' },
+                { value: 'lifecycle_only', label: 'THIRD 生命周期' },
+                { value: 'unknown', label: 'UNKNOWN 未知' },
               ]}
             />
           </Form.Item>
@@ -387,6 +409,8 @@ export default function EmailsPage() {
               <Descriptions.Item label="Message-ID"><CopyableField value={detailQuery.data.email.message_id || ''} displayText={detailQuery.data.email.message_id || '-'} /></Descriptions.Item>
               <Descriptions.Item label="意图">{detailQuery.data.email.intent_type || '-'}</Descriptions.Item>
               <Descriptions.Item label="意图子类型">{detailQuery.data.email.intent_subtype || '-'}</Descriptions.Item>
+              <Descriptions.Item label="处理层级">{detailQuery.data.email.handling_level || '-'}</Descriptions.Item>
+              <Descriptions.Item label="分类版本">{detailQuery.data.email.classification_version || '-'}</Descriptions.Item>
               <Descriptions.Item label="原始EML">
                 {detailQuery.data.email.raw_eml_oss_object_id ? (
                   <Button

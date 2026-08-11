@@ -59,35 +59,44 @@ async def get_task(
     return ok(await manual_review_service.get_task_detail(session, task_id))
 
 
-@router.post("/tasks/{task_id}/claim", deprecated=True)
+@router.post("/tasks/{task_id}/claim")
 async def claim_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    del task_id, session, current_user
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
+    result = await manual_review_service.claim_task(session, task_id=task_id, user_id=current_user.id)
+    await session.commit()
+    return ok(result, "manual task claimed")
 
 
-@router.post("/tasks/{task_id}/assign", deprecated=True)
+@router.post("/tasks/{task_id}/assign")
 async def assign_task(
     task_id: int,
     payload: ManualTaskAssignRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
-    del task_id, payload, session, current_user
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
+    result = await manual_review_service.assign_task(
+        session,
+        task_id=task_id,
+        assigned_user_id=payload.assigned_user_id,
+        operator_user_id=current_user.id,
+        reason=payload.reason,
+    )
+    await session.commit()
+    return ok(result, "manual task assigned")
 
 
-@router.post("/tasks/{task_id}/release", deprecated=True)
+@router.post("/tasks/{task_id}/release")
 async def release_task(
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    del task_id, session, current_user
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="TASK_ASSIGNMENT_DISABLED")
+    result = await manual_review_service.release_task(session, task_id=task_id, user_id=current_user.id)
+    await session.commit()
+    return ok(result, "manual task released")
 
 
 @router.post("/tasks/{task_id}/resolve")

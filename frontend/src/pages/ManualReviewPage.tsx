@@ -89,6 +89,8 @@ const taskStatusOptions = [
 ];
 
 const resolveActionOptions = [
+  { value: 'finish_external_handling', label: '完成邮件级人工处理' },
+  { value: 'resolve_manual_business', label: '完成 SECOND 人工业务工单' },
   { value: 'transition_ready_for_export', label: '进入可导出' },
   { value: 'generate_followup', label: '生成追问' },
   { value: 'wait_customer_info', label: '等待客户补充' },
@@ -218,11 +220,11 @@ export default function ManualReviewPage() {
   const draftReplyMutation = useMutation({
     mutationFn: () => {
       const detail = detailQuery.data as ManualTaskDetail;
-      return api.draftReply(detail.ticket_context.ticket.id, {
+      return api.draftReply(detail.ticket_context!.ticket.id, {
         reply_type: 'followup',
-        related_email_id: detail.task.email_id ?? detail.ticket_context.source_email?.id,
+        related_email_id: detail.task.email_id ?? detail.ticket_context!.source_email?.id,
         language: 'zh-CN',
-        missing_fields: detail.ticket_context.ticket.missing_fields ?? undefined,
+        missing_fields: detail.ticket_context!.ticket.missing_fields ?? undefined,
       });
     },
     onSuccess: () => {
@@ -233,7 +235,7 @@ export default function ManualReviewPage() {
     onError: handleMutationError,
   });
   const validateSnMutation = useMutation({
-    mutationFn: () => api.validateTicketSn((detailQuery.data as ManualTaskDetail).ticket_context.ticket.id),
+    mutationFn: () => api.validateTicketSn((detailQuery.data as ManualTaskDetail).ticket_context!.ticket.id),
     onSuccess: () => {
       message.success('SN 校验完成');
       invalidateWorkbench();
@@ -243,8 +245,8 @@ export default function ManualReviewPage() {
   const patchFieldsMutation = useMutation({
     mutationFn: (values: TicketFieldForm) => {
       const detail = detailQuery.data as ManualTaskDetail;
-      return api.patchTicketFields(detail.ticket_context.ticket.id, {
-        version: detail.ticket_context.ticket.version,
+      return api.patchTicketFields(detail.ticket_context!.ticket.id, {
+        version: detail.ticket_context!.ticket.version,
         fields: values,
         reason: '前端人工复核修正字段',
       });
@@ -260,7 +262,7 @@ export default function ManualReviewPage() {
     mutationFn: (values: TicketItemForm) => {
       const detail = detailQuery.data as ManualTaskDetail;
       const item = editingItem ? { id: editingItem.id, ...values } : values;
-      return api.patchTicketItems(detail.ticket_context.ticket.id, { items: [item], reason: '前端人工复核修正明细' });
+      return api.patchTicketItems(detail.ticket_context!.ticket.id, { items: [item], reason: '前端人工复核修正明细' });
     },
     onSuccess: () => {
       message.success('明细已保存');
@@ -272,7 +274,7 @@ export default function ManualReviewPage() {
   });
   const resolvePolicyMutation = useMutation({
     mutationFn: () => api.resolveTicketPolicy(
-      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      (detailQuery.data as ManualTaskDetail).ticket_context!.ticket.id,
     ),
     onSuccess: () => {
       message.success('客户范围与服务政策已重新解析');
@@ -282,7 +284,7 @@ export default function ManualReviewPage() {
   });
   const overridePolicyMutation = useMutation({
     mutationFn: (values: PolicyOverrideForm) => api.overrideTicketPolicy(
-      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      (detailQuery.data as ManualTaskDetail).ticket_context!.ticket.id,
       values,
     ),
     onSuccess: () => {
@@ -294,7 +296,7 @@ export default function ManualReviewPage() {
   });
   const resolveRoutesMutation = useMutation({
     mutationFn: () => api.resolveReturnRoutes(
-      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      (detailQuery.data as ManualTaskDetail).ticket_context!.ticket.id,
     ),
     onSuccess: () => {
       message.success('维修寄回地址已重新匹配');
@@ -304,7 +306,7 @@ export default function ManualReviewPage() {
   });
   const selectRouteMutation = useMutation({
     mutationFn: (values: ReturnRouteForm) => api.selectReturnRoute(
-      (detailQuery.data as ManualTaskDetail).ticket_context.ticket.id,
+      (detailQuery.data as ManualTaskDetail).ticket_context!.ticket.id,
       returnRouteItem?.id as number,
       values,
     ),
@@ -342,10 +344,12 @@ export default function ManualReviewPage() {
       render: (_: unknown, record: ManualTask) => (
         <div style={{ lineHeight: 1.5 }}>
           <div>
-            <Button type="link" size="small" style={{ padding: 0 }}
-              onClick={(e) => { e.stopPropagation(); navigate(`/tickets?ticket_id=${record.ticket_id}`); }}>
-              #{record.ticket_id}
-            </Button>
+            {record.ticket_id ? (
+              <Button type="link" size="small" style={{ padding: 0 }}
+                onClick={(e) => { e.stopPropagation(); navigate(`/tickets?ticket_id=${record.ticket_id}`); }}>
+                #{record.ticket_id}
+              </Button>
+            ) : <Tag color="purple">邮件级任务</Tag>}
             <Tag style={{ marginLeft: 4 }}>{record.task_type}</Tag>
           </div>
           <div>
@@ -470,7 +474,7 @@ export default function ManualReviewPage() {
         ) : null}
       </div>
       <Modal title="编辑工单字段" open={fieldOpen} onCancel={() => setFieldOpen(false)} footer={null} destroyOnClose>
-        {detailQuery.data ? (
+        {detailQuery.data?.ticket_context ? (
           <TicketFieldEditor
             initialValues={{
               customer_code: detailQuery.data.ticket_context.ticket.customer_code ?? undefined,
@@ -530,7 +534,7 @@ export default function ManualReviewPage() {
           layout="vertical"
           initialValues={{
             charge_status: 'chargeable',
-            customer_scope: detailQuery.data?.ticket_context.ticket.customer_scope || 'domestic',
+            customer_scope: detailQuery.data?.ticket_context?.ticket.customer_scope || 'domestic',
           }}
           onFinish={(values) => overridePolicyMutation.mutate(values)}
         >
@@ -679,6 +683,44 @@ function ManualEvidencePane({
   }
   if (!detail) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载中" />;
+  }
+
+  if (!detail.ticket_context) {
+    const email = detail.email_context;
+    return (
+      <div className="drawer-stack">
+        <Descriptions column={2} size="small" bordered>
+          <Descriptions.Item label="任务类型">{detail.task.task_type}</Descriptions.Item>
+          <Descriptions.Item label="任务状态"><StatusTag value={detail.task.status} kind="task" /></Descriptions.Item>
+          <Descriptions.Item label="处理层级">{email?.handling_level || '-'}</Descriptions.Item>
+          <Descriptions.Item label="邮件意图">{email?.intent_type || '-'}</Descriptions.Item>
+          <Descriptions.Item label="邮件主题" span={2}>{email?.subject || '-'}</Descriptions.Item>
+          <Descriptions.Item label="发件人">{email?.from_address || '-'}</Descriptions.Item>
+          <Descriptions.Item label="Message-ID"><CopyableField value={email?.message_id || ''} /></Descriptions.Item>
+          <Descriptions.Item label="分类原因" span={2}>{email?.classification_reason_code || detail.task.trigger_reason || '-'}</Descriptions.Item>
+          <Descriptions.Item label="恢复动作" span={2}>{detail.task.recovery_action || '-'}</Descriptions.Item>
+        </Descriptions>
+        <Typography.Title level={5}>邮件正文</Typography.Title>
+        <pre className="json-block">{email?.latest_reply_segment || email?.clean_body || '-'}</pre>
+        <Typography.Title level={5}>附件</Typography.Title>
+        <Table<Attachment>
+          size="small"
+          rowKey="id"
+          pagination={false}
+          dataSource={email?.attachments || []}
+          columns={[
+            { title: '文件名', dataIndex: 'file_name', ellipsis: true },
+            { title: '类型', dataIndex: 'content_type', width: 150, render: (value?: string) => value || '-' },
+            { title: '解析状态', dataIndex: 'parse_status', width: 120, render: (value: string) => <StatusTag value={value} kind="parse" /> },
+            { title: '操作', width: 90, render: (_: unknown, record: Attachment) => <ContentPreviewButton kind="attachment" id={record.id} disabled={!record.oss_object_id} /> },
+          ]}
+        />
+        <Space wrap>
+          <Button loading={reparseLoading} onClick={onReparse}>重新解析邮件</Button>
+          <Button type="primary" onClick={onResolve}>记录人工结论</Button>
+        </Space>
+      </div>
+    );
   }
 
   const context = detail.ticket_context;
@@ -936,6 +978,9 @@ function EmailTimelineItem({ email }: { email: EmailItem }) {
 
 function buildSuggestions(detail: ManualTaskDetail) {
   const suggestions: string[] = [];
+  if (!detail.ticket_context) {
+    return ['查看邮件正文、附件和线程上下文后，完成业务定类并记录人工处理结论。'];
+  }
   const ticket = detail.ticket_context.ticket;
   if (ticket.missing_fields && Object.keys(ticket.missing_fields).length > 0) {
     suggestions.push('优先核对缺失字段，必要时生成追问草稿。');

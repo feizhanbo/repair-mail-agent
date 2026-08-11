@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, created_at_column, datetime_column, pk_column, updated_at_column
 
@@ -52,6 +52,22 @@ class AiCallLog(CreatedAtMixin, Base):
     log_line_no: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True))
     log_record_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
 
+    email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="ai_call_logs", lazy="raise"
+    )
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="ai_call_logs", lazy="raise"
+    )
+    job_run: Mapped["JobRunLog | None"] = relationship(
+        "JobRunLog", foreign_keys=[job_run_id], back_populates="ai_call_logs", lazy="raise"
+    )
+    attachment: Mapped["EmailAttachment | None"] = relationship(
+        "EmailAttachment", foreign_keys=[attachment_id], back_populates="ai_call_logs", lazy="raise"
+    )
+    reply_records: Mapped[list["ReplyRecord"]] = relationship(
+        "ReplyRecord", foreign_keys="ReplyRecord.ai_call_log_id", back_populates="ai_call_log", lazy="raise"
+    )
+
 
 class OperationLog(CreatedAtMixin, Base):
     __tablename__ = "operation_logs"
@@ -77,6 +93,13 @@ class OperationLog(CreatedAtMixin, Base):
     after_data: Mapped[dict | None] = mapped_column(mysql.JSON)
     ip_address: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(500))
+
+    email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="operation_logs", lazy="raise"
+    )
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="operation_logs", lazy="raise"
+    )
 
 
 class SystemEventLog(CreatedAtMixin, Base):
@@ -109,6 +132,16 @@ class SystemEventLog(CreatedAtMixin, Base):
     message: Mapped[str] = mapped_column(String(1000), nullable=False)
     details: Mapped[dict | None] = mapped_column(mysql.JSON)
     stack_trace: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT)
+
+    email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="system_event_logs", lazy="raise"
+    )
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="system_event_logs", lazy="raise"
+    )
+    job_run: Mapped["JobRunLog | None"] = relationship(
+        "JobRunLog", foreign_keys=[job_run_id], back_populates="system_event_logs", lazy="raise"
+    )
 
 
 class JobRunLog(Base):
@@ -150,4 +183,20 @@ class JobRunLog(Base):
     output_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_job_run_logs_output_oss"))
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
+
+    fetched_emails: Mapped[list["Email"]] = relationship(
+        "Email", foreign_keys="Email.fetch_job_run_id", back_populates="fetch_job", lazy="raise"
+    )
+    ai_call_logs: Mapped[list[AiCallLog]] = relationship(
+        AiCallLog, foreign_keys="AiCallLog.job_run_id", back_populates="job_run", lazy="raise"
+    )
+    system_event_logs: Mapped[list[SystemEventLog]] = relationship(
+        SystemEventLog, foreign_keys="SystemEventLog.job_run_id", back_populates="job_run", lazy="raise"
+    )
+    input_oss_object: Mapped["OssObject | None"] = relationship(
+        "OssObject", foreign_keys=[input_oss_object_id], back_populates="input_jobs", lazy="raise"
+    )
+    output_oss_object: Mapped["OssObject | None"] = relationship(
+        "OssObject", foreign_keys=[output_oss_object_id], back_populates="output_jobs", lazy="raise"
+    )
 

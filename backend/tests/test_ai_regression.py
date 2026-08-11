@@ -57,7 +57,7 @@ def test_ai_extract_schema_rejects_invalid_confidence() -> None:
 
 @pytest.mark.parametrize(
     ("legacy", "expected"),
-    [("customer_reply", "customer_supplement"), ("internal_forward", "normal_reply"), ("invented", "unknown")],
+    [("customer_reply", "customer_supplement"), ("internal_forward", "repair_thread_other"), ("invented", "unknown")],
 )
 def test_ai_intent_taxonomy_is_normalized(legacy: str, expected: str) -> None:
     normalized = _normalize_response_payload({"intent_type": legacy}, AiExtractResponse)

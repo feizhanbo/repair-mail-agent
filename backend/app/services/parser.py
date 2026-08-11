@@ -8,6 +8,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from app.config import settings
+from app.core.email_classification import CLASSIFICATION_VERSION, decision_for_intent
 from app.models import Email
 from app.services.business_rules import required_missing_for_values
 
@@ -26,11 +27,18 @@ class RuleAnalysisResult:
     field_confidences: dict[str, float]
     evidence: dict[str, Any]
     intent_subtype: str | None = None
+    handling_level: str | None = None
+    classification_version: str = CLASSIFICATION_VERSION
+    classification_reason_code: str | None = None
 
     def to_parse_payload(self) -> dict[str, Any]:
         return {
             "intent_type": self.intent_type,
             "intent_subtype": self.intent_subtype,
+            "handling_level": self.handling_level,
+            "classification_version": self.classification_version,
+            "classification_confidence": self.classification_confidence,
+            "classification_reason_code": self.classification_reason_code,
             "extracted_fields": self.fields,
             "extracted_items": {"items": self.items},
             "missing_fields": self.missing_fields,
@@ -118,20 +126,44 @@ def clean_email_body(email: Email) -> str:
 def classify_email(email: Email, body: str) -> tuple[str, float, str]:
     subject = email.subject or ""
     text = f"{subject}\n{body}".lower()
-    receipt_terms = ("我们收到货了", "请入库", "已收到设备", "设备已收到", "received the unit", "received the device")
+    question_terms = ("是否", "请确认", "确认一下", "到期", "截止", "什么时候", "吗", "?", "？", "whether", "is it", "status", "expiration", "expiry", "expire")
+    warranty_terms = ("过保", "保修状态", "保修期", "质保", "warranty", "out of warranty")
+    if any(term in text for term in warranty_terms) and any(term in text for term in question_terms):
+        return "warranty_status_inquiry", 0.96, "邮件明确询问或确认设备保修状态。"
+    if any(term in text for term in ("上门维修", "现场维修", "现场服务", "工程师到场", "叫修", "on-site", "onsite service", "field service")):
+        return "onsite_service", 0.95, "邮件明确请求现场或上门服务。"
+    if any(term in text for term in ("元器件更换", "器件替换", "零部件更换", "物料替换", "component replacement", "parts replacement")):
+        return "component_replacement_repair", 0.94, "邮件明确属于元器件或物料替换维修。"
+    if any(term in text for term in ("维修完成已发出", "维修完成已寄出", "设备已寄回", "repaired unit shipped", "repair completed and shipped")):
+        return "repaired_device_dispatched", 0.95, "邮件表示维修后的设备已经发出。"
+    if any(term in text for term in ("维修设备已收到", "修好的设备已收到", "使用正常", "received the repaired", "received repaired unit")):
+        return "customer_repaired_device_received", 0.94, "客户确认收到维修后的设备。"
+    receipt_terms = ("我们收到货了", "请入库", "收到待维修设备", "待修设备已收到", "received the unit for repair", "received the device for repair")
     if any(keyword in text for keyword in receipt_terms):
-        return "device_received", 0.95, "最新回复确认维修设备已经收到。"
+        return "device_intake_received", 0.95, "邮件表示待维修设备已经到达或入库。"
+    if any(term in text for term in ("发票", "开票", "invoice")):
+        return "invoice", 0.93, "邮件属于发票业务。"
+    if any(term in text for term in ("合同确认", "合同条款", "合同附件", "contract confirmation", "contract terms")):
+        return "contract_confirmation", 0.93, "邮件属于合同确认业务。"
+    if any(term in text for term in ("非我司设备", "其他厂家设备", "第三方设备报价", "third-party equipment quotation", "other vendor quotation")):
+        return "third_party_equipment_quote", 0.94, "邮件属于非我司设备报价。"
     if email.mail_direction == "outbound" and "rma" in text:
         return "rma_sent", 0.9, "系统外发的 RMA 邮件。"
     if email.in_reply_to or email.references_header:
+        new_request_terms = ("另外", "新增", "还有一", "再次报修", "另有", "another unit", "additional", "new repair")
+        if any(term in text for term in new_request_terms):
+            return "thread_new_repair", 0.9, "回复链中明确提出新的维修对象或新报修。"
+        modification_terms = ("修改rma", "修改 sn", "修改sn", "撤销", "取消维修", "地址改为", "进度", "异议", "不对", "change rma", "cancel repair", "repair status")
+        if any(term in text for term in modification_terms):
+            return "repair_thread_other", 0.91, "回复链提出修改、撤销、异议或进度问题。"
         supplement_terms = ("补充", "sn", "s/n", "序列号", "故障", "地址", "电话", "fault", "serial", "address")
         if any(term in text for term in supplement_terms):
             return "customer_supplement", 0.88, "回复链包含新增报修信息。"
-        return "normal_reply", 0.85, "存在 In-Reply-To 或 References，按普通回复处理。"
+        return "repair_thread_other", 0.78, "邮件位于报修回复链，但不能安全归为补充或新报修。"
     if any(keyword in text for keyword in ("退订", "unsubscribe", "广告", "newsletter")):
         return "irrelevant", 0.9, "命中无关邮件关键词。"
     if any(keyword in text for keyword in ("fwd:", "fw:", "转发")):
-        return "normal_reply", 0.65, "主题疑似转发，按不触发 RMA 的普通链路邮件处理。"
+        return "unknown", 0.55, "转发邮件缺少可安全确定的业务动作。"
     if any(keyword in text for keyword in ("报修", "维修", "故障", "repair", "rma", "sn")):
         return "new_repair", 0.8, "命中报修关键词。"
     return "unknown", 0.45, "未命中明确分类规则。"
@@ -208,6 +240,7 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
         items=extracted["items"],
         reported_missing=extracted["missing_fields"],
     )
+    decision = None if intent_type == "irrelevant" else decision_for_intent(intent_type, reason_code="RULE_CANDIDATE")
     return RuleAnalysisResult(
         intent_type=intent_type,
         intent_subtype="general_irrelevant" if intent_type == "irrelevant" else None,
@@ -221,4 +254,6 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
         confidence_score=min(float(extracted["confidence_score"]), classification_confidence),
         field_confidences=extracted["field_confidences"],
         evidence=extracted["evidence"],
+        handling_level=decision.handling_level if decision else None,
+        classification_reason_code=decision.reason_code if decision else "MAILBOX_ADMISSION_IRRELEVANT",
     )

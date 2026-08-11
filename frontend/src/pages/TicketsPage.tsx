@@ -258,19 +258,6 @@ export default function TicketsPage() {
     },
     onError: handleMutationError,
   });
-  const confirmDeviceReceivedMutation = useMutation({
-    mutationFn: (id: number) => api.confirmDeviceReceived(id, {
-      idempotency_key: `manual-${id}-${Date.now()}`,
-      note: '操作员在工单中心确认公司已收到待修设备。',
-    }),
-    onSuccess: (result) => {
-      message.success('公司收货事实已记录；不会发送邮件或改变 RMA 签发状态');
-      invalidateDetail();
-      void queryClient.invalidateQueries({ queryKey: ['replies'] });
-      void queryClient.invalidateQueries({ queryKey: ['manual-tasks'] });
-    },
-    onError: handleMutationError,
-  });
   const retrySapMutation = useMutation({
     mutationFn: (id: number) => api.retrySapExport(id),
     onSuccess: () => {
@@ -530,7 +517,6 @@ export default function TicketsPage() {
             onOverridePolicy={() => setPolicyOverrideOpen(true)}
             onResolveReturnRoutes={() => resolveReturnRoutesMutation.mutate()}
             onSelectReturnRoute={setReturnRouteItem}
-            onConfirmDeviceReceived={() => confirmAction('确认公司已经收到客户寄来的待修设备及纸质 RMA 授权单？', () => confirmDeviceReceivedMutation.mutate(detailQuery.data.ticket.id))}
             onTransition={() => setTransitionOpen(true)}
             hasPrevTicket={hasPrevTicket}
             hasNextTicket={hasNextTicket}
@@ -547,7 +533,6 @@ export default function TicketsPage() {
             approveRmaManualPolicyLoading={approveRmaManualPolicyMutation.isPending}
             resolvePolicyLoading={resolvePolicyMutation.isPending}
             resolveReturnRoutesLoading={resolveReturnRoutesMutation.isPending}
-            confirmDeviceLoading={confirmDeviceReceivedMutation.isPending}
           />
         ) : detailQuery.isFetching ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="正在加载工单详情" />
@@ -809,7 +794,6 @@ function TicketDetailView({
   onOverridePolicy,
   onResolveReturnRoutes,
   onSelectReturnRoute,
-  onConfirmDeviceReceived,
   onTransition,
   hasPrevTicket,
   hasNextTicket,
@@ -826,7 +810,6 @@ function TicketDetailView({
   approveRmaManualPolicyLoading,
   resolvePolicyLoading,
   resolveReturnRoutesLoading,
-  confirmDeviceLoading,
 }: {
   detail: TicketDetail;
   onApplyParse: (id: number) => void;
@@ -848,7 +831,6 @@ function TicketDetailView({
   onOverridePolicy: () => void;
   onResolveReturnRoutes: () => void;
   onSelectReturnRoute: (item: TicketLine) => void;
-  onConfirmDeviceReceived: () => void;
   onTransition: () => void;
   hasPrevTicket: boolean;
   hasNextTicket: boolean;
@@ -865,7 +847,6 @@ function TicketDetailView({
   approveRmaManualPolicyLoading: boolean;
   resolvePolicyLoading: boolean;
   resolveReturnRoutesLoading: boolean;
-  confirmDeviceLoading: boolean;
 }) {
   const timelineEmails = detail.email_timeline.length > 0 ? detail.email_timeline : detail.source_email ? [detail.source_email] : [];
   const fieldAudits = detail.field_evidence?.field_audits ?? [];
@@ -1300,7 +1281,6 @@ function TicketDetailView({
         <Button loading={resolveReturnRoutesLoading} onClick={onResolveReturnRoutes}>匹配寄回地址</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
         <Button icon={<CheckCircleOutlined />} loading={validateExportLoading} onClick={onValidateExport}>完整安全校验</Button>
-        <Button icon={<CheckCircleOutlined />} loading={confirmDeviceLoading} onClick={onConfirmDeviceReceived}>记录收货事实（不流转）</Button>
         {canTransitionTicket ? <Button type="primary" onClick={onTransition}>状态流转</Button> : null}
       </div>
     </div>

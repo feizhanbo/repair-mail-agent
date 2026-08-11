@@ -321,7 +321,7 @@ def test_validation_error_uses_unified_error_contract() -> None:
     assert payload["data"]["errors"]
 
 
-def test_claim_endpoint_is_deprecated_and_never_commits(monkeypatch) -> None:
+def test_operator_can_claim_manual_task(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_claim(_session, *, task_id: int, user_id: int):
@@ -333,10 +333,10 @@ def test_claim_endpoint_is_deprecated_and_never_commits(monkeypatch) -> None:
         response = client.post("/api/v1/manual-review/tasks/9/claim")
 
     payload = response.json()
-    assert response.status_code == 410
-    assert payload["success"] is False
-    assert payload["message"] == "TASK_ASSIGNMENT_DISABLED"
-    assert session.committed is False
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["claimed_by_user_id"] == 7
+    assert session.committed is True
 
 
 def test_delete_user_rejects_current_user() -> None:
@@ -513,7 +513,7 @@ def test_manual_task_structured_filters_are_forwarded(monkeypatch) -> None:
     assert seen["created_end"] == date(2026, 7, 7)
 
 
-def test_admin_assign_endpoint_is_deprecated(monkeypatch) -> None:
+def test_admin_can_assign_manual_task(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_assign(_session, *, task_id: int, assigned_user_id: int | None, operator_user_id: int, reason: str | None):
@@ -528,9 +528,10 @@ def test_admin_assign_endpoint_is_deprecated(monkeypatch) -> None:
         response = client.post("/api/v1/manual-review/tasks/9/assign", json={"assigned_user_id": 8, "reason": "测试分配"})
 
     payload = response.json()
-    assert response.status_code == 410
-    assert payload["message"] == "TASK_ASSIGNMENT_DISABLED"
-    assert session.committed is False
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["assigned_user_id"] == 8
+    assert session.committed is True
 
 
 def test_operator_can_query_all_manual_tasks() -> None:

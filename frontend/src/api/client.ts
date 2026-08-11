@@ -281,8 +281,6 @@ export const api = {
       confirm_template_thread_and_archive: true;
     },
   ) => postData<JobRunLog>(`/tickets/${id}/rma/manual-policy-approve`, body),
-  confirmDeviceReceived: (id: number, body: { idempotency_key: string; note?: string }) =>
-    postData<{ ticket_id: number; status: string; reply_id?: number | null; idempotent_reuse: boolean }>(`/tickets/${id}/confirm-device-received`, body),
   applyParseResult: (id: number, body?: string | { reason?: string; action?: 'apply' | 'partial_apply' | 'reject'; selected_fields?: string[]; selected_item_indices?: number[] }) => {
     const payload = typeof body === 'string' ? { reason: body } : body;
     return postData<TicketDetail>(`/parse-results/${id}/apply`, payload ?? { action: 'apply' });

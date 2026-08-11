@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
+from app.api.v1.deletions import raise_deletion_http
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import (
@@ -26,7 +27,6 @@ from app.models import (
     UserRole,
 )
 from app.schemas.business import (
-    DeviceReceivedConfirmRequest,
     IdsRequest,
     ParseResultApplyRequest,
     RmaManualPolicyApprovalRequest,
@@ -41,9 +41,9 @@ from app.schemas.business import (
 )
 from app.services.audit import log_operation
 from app.services.common import utcnow
-from app.services.device_receipts import confirm_device_received
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services import tickets as ticket_service
+from app.services import deletions as deletion_service
 from app.services.business_resolution import (
     manually_select_item_route,
     override_ticket_policy,
@@ -722,23 +722,13 @@ async def approve_rma_manual_policy(
     )
 
 
-@router.post("/{ticket_id}/confirm-device-received")
+@router.post("/{ticket_id}/confirm-device-received", deprecated=True)
 async def confirm_ticket_device_received(
     ticket_id: int,
-    payload: DeviceReceivedConfirmRequest,
-    session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await confirm_device_received(
-        session,
-        ticket_id=ticket_id,
-        user_id=current_user.id,
-        source="manual",
-        note=payload.note,
-        idempotency_key=payload.idempotency_key,
-    )
-    await session.commit()
-    return ok(result, "company device receipt recorded")
+    del ticket_id, current_user
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
 
 
 @router.post("/{ticket_id}/confirm-export", deprecated=True)
@@ -880,3 +870,41 @@ async def field_evidence(
 ) -> dict:
     del current_user
     return ok(await ticket_service.get_ticket_field_evidence(session, ticket_id))
+
+
+@router.get("/{ticket_id}/delete-preview")
+async def ticket_delete_preview(
+    ticket_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    try:
+        return ok(await deletion_service.preview_ticket(session, ticket_id, current_user.id))
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)
+
+
+@router.delete("/{ticket_id}")
+async def delete_ticket(
+    ticket_id: int,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    reason: Annotated[str, Query(min_length=3, max_length=500)],
+    confirmation_token: Annotated[str, Query(min_length=20)],
+    force_local_cleanup: bool = False,
+) -> dict:
+    try:
+        result = await deletion_service.delete_ticket(
+            session,
+            ticket_id=ticket_id,
+            user_id=current_user.id,
+            reason=reason,
+            confirmation_token=confirmation_token,
+            force_local_cleanup=force_local_cleanup,
+        )
+        if result["oss_status"] == "pending":
+            response.status_code = status.HTTP_202_ACCEPTED
+        return ok(result, "ticket deleted")
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)

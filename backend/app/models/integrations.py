@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, datetime_column, pk_column
 
@@ -49,6 +49,13 @@ class TicketRelayExport(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     next_retry_at: Mapped[datetime | None] = datetime_column()
     exported_at: Mapped[datetime | None] = datetime_column()
+
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="relay_exports", lazy="raise"
+    )
+    sap_lines: Mapped[list["ExportSap"]] = relationship(
+        "ExportSap", foreign_keys="ExportSap.relay_export_id", back_populates="relay_export", passive_deletes=True, lazy="raise"
+    )
 
 
 class ExportSap(TimestampMixin, Base):
@@ -119,6 +126,19 @@ class ExportSap(TimestampMixin, Base):
     repair_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
 
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="sap_exports", lazy="raise"
+    )
+    ticket_item: Mapped["RepairTicketItem"] = relationship(
+        "RepairTicketItem", foreign_keys=[ticket_item_id], back_populates="sap_exports", lazy="raise"
+    )
+    relay_export: Mapped[TicketRelayExport] = relationship(
+        TicketRelayExport, foreign_keys=[relay_export_id], back_populates="sap_lines", lazy="raise"
+    )
+    external_operations: Mapped[list["ExternalOperationRecord"]] = relationship(
+        "ExternalOperationRecord", foreign_keys="ExternalOperationRecord.export_sap_id", back_populates="export_sap", passive_deletes=True, lazy="raise"
+    )
+
 
 class TicketRma(TimestampMixin, Base):
     __tablename__ = "ticket_rmas"
@@ -157,6 +177,19 @@ class TicketRma(TimestampMixin, Base):
     pdf_archived_at: Mapped[datetime | None] = datetime_column()
     issued_at: Mapped[datetime | None] = datetime_column()
 
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="rmas", lazy="raise"
+    )
+    pdf_oss_object: Mapped["OssObject | None"] = relationship(
+        "OssObject", foreign_keys=[pdf_oss_object_id], back_populates="ticket_rmas", lazy="raise"
+    )
+    reply_record: Mapped["ReplyRecord | None"] = relationship(
+        "ReplyRecord", foreign_keys=[reply_record_id], back_populates="ticket_rmas", lazy="raise"
+    )
+    items: Mapped[list["TicketRmaItem"]] = relationship(
+        "TicketRmaItem", foreign_keys="TicketRmaItem.ticket_rma_id", back_populates="ticket_rma", passive_deletes=True, lazy="raise"
+    )
+
 
 class TicketRmaItem(TimestampMixin, Base):
     __tablename__ = "ticket_rma_items"
@@ -175,6 +208,13 @@ class TicketRmaItem(TimestampMixin, Base):
         mysql.BIGINT(unsigned=True),
         ForeignKey("repair_ticket_items.id", name="fk_ticket_rma_items_item", ondelete="CASCADE"),
         nullable=False,
+    )
+
+    ticket_rma: Mapped[TicketRma] = relationship(
+        TicketRma, foreign_keys=[ticket_rma_id], back_populates="items", lazy="raise"
+    )
+    ticket_item: Mapped["RepairTicketItem"] = relationship(
+        "RepairTicketItem", foreign_keys=[ticket_item_id], back_populates="rma_item", lazy="raise"
     )
 
 
@@ -223,3 +263,16 @@ class ExternalOperationRecord(TimestampMixin, Base):
     started_at: Mapped[datetime | None] = datetime_column()
     completed_at: Mapped[datetime | None] = datetime_column()
     details_json: Mapped[dict | None] = mapped_column(mysql.JSON)
+
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="external_operations", lazy="raise"
+    )
+    email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="external_operations", lazy="raise"
+    )
+    reply_record: Mapped["ReplyRecord | None"] = relationship(
+        "ReplyRecord", foreign_keys=[reply_record_id], back_populates="external_operations", lazy="raise"
+    )
+    export_sap: Mapped[ExportSap | None] = relationship(
+        ExportSap, foreign_keys=[export_sap_id], back_populates="external_operations", lazy="raise"
+    )

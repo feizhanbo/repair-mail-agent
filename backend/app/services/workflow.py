@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     Email,
     EmailAttachment,
+    EmailThread,
     ManualReviewTask,
     NotificationEvent,
     OssObject,
@@ -199,6 +200,7 @@ async def create_manual_task_if_missing(
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
+        thread_id=getattr(ticket, "thread_id", None),
         task_type=task_type,
         priority=priority,
         status="pending",
@@ -248,6 +250,59 @@ async def create_manual_task_if_missing(
     return task
 
 
+async def create_email_manual_task_if_missing(
+    session: AsyncSession,
+    *,
+    email: Email,
+    task_type: str,
+    trigger_reason: str,
+    priority: str = "normal",
+    recovery_stage: str = "email_classification",
+    recovery_action: str | None = None,
+) -> ManualReviewTask:
+    existing = await session.scalar(
+        select(ManualReviewTask)
+        .where(
+            ManualReviewTask.email_id == email.id,
+            ManualReviewTask.task_type == task_type,
+            ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+        )
+        .order_by(ManualReviewTask.id.desc())
+    )
+    if existing is not None:
+        return existing
+    owner = await choose_available_operator(session, None)
+    task = ManualReviewTask(
+        ticket_id=None,
+        email_id=email.id,
+        thread_id=email.thread_id,
+        task_type=task_type,
+        priority=priority,
+        status="pending" if owner is not None else "assignment_failed",
+        description="邮件业务需要人工判断或通过现有业务渠道处理。",
+        trigger_reason=trigger_reason,
+        recovery_stage=recovery_stage,
+        recovery_action=recovery_action or "人工定类、关联/创建工单或记录外部处理结果。",
+        assigned_user_id=owner.id if owner is not None else None,
+    )
+    session.add(task)
+    await session.flush()
+    await create_notification(
+        session,
+        event_type="email_manual_business_assigned" if owner else "manual_review_assignment_failed",
+        target_type="manual_review_task",
+        target_id=task.id,
+        title="邮件业务需要人工处理",
+        content=trigger_reason,
+        priority=priority,
+        recipient_user_id=owner.id if owner else None,
+        recipient_role_code=None if owner else "admin",
+        metadata={"email_id": email.id, "thread_id": email.thread_id, "task_type": task_type},
+        requires_attention=True,
+    )
+    return task
+
+
 async def transition_ticket(
     session: AsyncSession,
     *,
@@ -263,8 +318,15 @@ async def transition_ticket(
     resolving_task_id: int | None = None,
 ) -> RepairTicket:
     from_status_code = ticket.current_status_code
-    if from_status_code == "closed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TICKET_ALREADY_CLOSED")
+    if from_status_code in {"closed", "resolved"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="TICKET_ALREADY_TERMINAL")
+    ticket_category = getattr(ticket, "ticket_category", "standard_repair")
+    if ticket_category == "manual_business" and to_status_code in {"ready_for_export", "rma_sent", "closed"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_RMA_TRANSITION_FORBIDDEN")
+    if to_status_code == "resolved" and (
+        ticket_category != "manual_business" or trigger_event != "manual_business_resolved"
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_RESOLUTION_REQUIRED")
     if to_status_code == "ready_for_export" and not (metadata or {}).get("safety_check_hash"):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXPORT_SAFETY_GATE_REQUIRED")
     if to_status_code == "rma_sent":
@@ -351,7 +413,12 @@ async def transition_ticket(
             )
         ticket.terminal_reason_code = trigger_event
         ticket.terminal_reason = reason or transition.condition_desc or trigger_event
-        ticket.closed_at = utcnow()
+        if to_status_code == "closed":
+            ticket.closed_at = utcnow()
+        elif to_status_code == "resolved":
+            ticket.resolved_at = utcnow()
+            ticket.resolution_code = trigger_event
+            ticket.resolution_summary = reason or transition.condition_desc or trigger_event
     session.add(
         TicketStatusLog(
             ticket_id=ticket.id,
@@ -422,8 +489,12 @@ async def transition_ticket(
             ticket_id=ticket.id,
             event_types={"ticket_system_error"},
         )
-    if to_status_code == "closed":
+    if to_status_code in {"closed", "resolved"}:
         await resolve_notifications_for_ticket(session, ticket_id=ticket.id)
+    if to_status_code == "closed" and ticket.thread_id:
+        thread = await session.get(EmailThread, ticket.thread_id, with_for_update=True)
+        if thread is not None and thread.ticket_id == ticket.id:
+            thread.ticket_id = None
 
     if to_status_code == "manual_review":
         await create_manual_task_if_missing(

@@ -10,7 +10,7 @@ import pytest
 from app import seed as seed_data
 from app.config import settings
 from app.models import Email, EmailThread, ParseResult, RepairTicket, ReplyRecord, ReplyTemplate
-from app.services import device_receipts, emails, mail_test_preflight, replies
+from app.services import emails, mail_test_preflight, replies
 from app.services.mail_safety import test_envelope_allowed as envelope_allowed
 from app.services.mail_safety import test_mail_configuration_reasons as configuration_reasons
 
@@ -151,12 +151,11 @@ def test_seed_closes_only_after_rma_send_and_archive_verification() -> None:
     assert [transition["trigger_event"] for transition in close_rules] == ["rma_issued_and_archived"]
 
 
-@pytest.mark.parametrize("intent_type", ["customer_supplement", "normal_reply", "rma_sent", "device_received"])
 @run_async
 async def test_unlinked_business_reply_creates_isolated_open_manual_ticket(
     monkeypatch: pytest.MonkeyPatch,
-    intent_type: str,
 ) -> None:
+    intent_type = "customer_supplement"
     email = Email(id=1, mailbox_account="rmatest1@accotest.com", message_id=f"<{intent_type}@accotest.com>")
     parse_result = ParseResult(id=2, email_id=1, parser_type="ai", intent_type=intent_type)
     ticket = RepairTicket(id=3, ticket_no="RMA-ORPHAN", current_status_code="manual_review")
@@ -201,7 +200,7 @@ async def test_subject_similarity_never_queries_for_existing_thread() -> None:
 
 
 @run_async
-async def test_reply_to_closed_ticket_creates_new_thread_and_preserves_source_message_id() -> None:
+async def test_reply_to_closed_ticket_reuses_rfc_thread_without_reopening_ticket() -> None:
     parent = Email(id=5, thread_id=9, message_id="<closed-source@accotest.com>", mailbox_account="test")
     old_thread = EmailThread(id=9, thread_key="old", ticket_id=11)
     closed_ticket = RepairTicket(id=11, ticket_no="RMA-CLOSED", current_status_code="closed")
@@ -214,7 +213,7 @@ async def test_reply_to_closed_ticket_creates_new_thread_and_preserves_source_me
         return None
 
     session = SimpleNamespace(scalar=AsyncMock(return_value=parent), get=get, add=Mock(), flush=AsyncMock())
-    new_thread = await emails._find_thread_for_email(
+    resolved_thread = await emails._find_thread_for_email(
         session,
         message_id="<new-after-close@accotest.com>",
         in_reply_to="<closed-source@accotest.com>",
@@ -223,47 +222,8 @@ async def test_reply_to_closed_ticket_creates_new_thread_and_preserves_source_me
         from_domain="accotest.com",
     )
 
-    assert new_thread is not old_thread
-    assert "<closed-source@accotest.com>" in new_thread.merge_reason
-    assert new_thread.ticket_id is None
-
-
-@run_async
-async def test_device_receipt_is_audit_only_without_email_or_state_progression(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ticket = RepairTicket(
-        id=1,
-        ticket_no="RMA2026072001",
-        current_status_code="rma_sent",
-        source_email_id=10,
-        thread_id=20,
-        contact_person="测试联系人",
-        contact_email="outside@example.com",
-        rma_status="sent",
-    )
-    async def get(model, object_id, **kwargs):
-        if model is RepairTicket:
-            return ticket
-        return None
-
-    session = SimpleNamespace(get=get, scalar=AsyncMock(return_value=None), add=Mock(), flush=AsyncMock())
-    monkeypatch.setattr(device_receipts, "log_operation", AsyncMock())
-
-    result = await device_receipts.confirm_device_received(
-        session,
-        ticket_id=1,
-        user_id=2,
-        source="manual",
-        note="测试收货",
-        idempotency_key="manual-test-1",
-    )
-
-    assert result["status"] == "recorded_no_progression"
-    assert ticket.current_status_code == "rma_sent"
-    assert ticket.device_received_at is not None
-    assert ticket.device_receipt_ack_status == "recorded_no_progression"
-    session.add.assert_not_called()
+    assert resolved_thread is old_thread
+    assert resolved_thread.ticket_id == 11
 
 
 @run_async

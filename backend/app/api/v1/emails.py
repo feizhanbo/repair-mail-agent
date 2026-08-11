@@ -15,14 +15,17 @@ from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user
+from app.api.deps import CurrentUser, get_current_user, require_roles
+from app.api.v1.deletions import raise_deletion_http
 from app.config import settings
 from app.core.database import get_session
 from app.core.request_context import get_correlation_id
 from app.core.response import ok, page
+from app.core.email_classification import classification_catalog
 from app.models import Email, EmailAttachment, JobRunLog, MailFetchRecord
 from app.schemas.business import EmailIngestRequest, EmailReparseRequest
 from app.services import emails as email_service
+from app.services import deletions as deletion_service
 from app.services import imap_fetcher
 from app.services.audit import log_operation
 from app.services.attachment_precheck import filter_decorative_attachments
@@ -182,6 +185,7 @@ async def list_emails(
     parse_status: str | None = None,
     intent_type: str | None = None,
     intent_subtype: str | None = None,
+    handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
     from_address: str | None = None,
@@ -197,6 +201,7 @@ async def list_emails(
         parse_status=parse_status,
         intent_type=intent_type,
         intent_subtype=intent_subtype,
+        handling_level=handling_level,
         keyword=keyword,
         subject=subject,
         from_address=from_address,
@@ -214,6 +219,7 @@ async def export_emails(
     parse_status: str | None = None,
     intent_type: str | None = None,
     intent_subtype: str | None = None,
+    handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
     from_address: str | None = None,
@@ -227,6 +233,7 @@ async def export_emails(
         parse_status=parse_status,
         intent_type=intent_type,
         intent_subtype=intent_subtype,
+        handling_level=handling_level,
         keyword=keyword,
         subject=subject,
         from_address=from_address,
@@ -242,6 +249,10 @@ async def export_emails(
         "to_addresses",
         "intent_type",
         "intent_subtype",
+        "handling_level",
+        "classification_version",
+        "classification_confidence",
+        "classification_reason_code",
         "parse_status",
         "received_at",
         "attachment_count",
@@ -255,6 +266,14 @@ async def export_emails(
         media_type=EXCEL_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="emails-export.xlsx"'},
     )
+
+
+@router.get("/classification-catalog")
+async def get_classification_catalog(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(classification_catalog())
 
 
 @router.get("/{email_id}/flow-trace")
@@ -763,3 +782,77 @@ async def reparse_email_job(
     )
     await session.commit()
     return ok(serialize_job(job), "email reparse queued")
+
+
+@router.get("/attachments/{attachment_id}/delete-preview")
+async def attachment_delete_preview(
+    attachment_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    try:
+        return ok(await deletion_service.preview_attachment(session, attachment_id, current_user.id))
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)
+
+
+@router.delete("/attachments/{attachment_id}")
+async def delete_attachment(
+    attachment_id: int,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    reason: Annotated[str, Query(min_length=3, max_length=500)],
+    confirmation_token: Annotated[str, Query(min_length=20)],
+) -> dict:
+    try:
+        result = await deletion_service.delete_attachment(
+            session,
+            attachment_id=attachment_id,
+            user_id=current_user.id,
+            reason=reason,
+            confirmation_token=confirmation_token,
+        )
+        if result["oss_status"] == "pending":
+            response.status_code = status.HTTP_202_ACCEPTED
+        return ok(result, "attachment deleted")
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)
+
+
+@router.get("/{email_id}/delete-preview")
+async def email_delete_preview(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    try:
+        return ok(await deletion_service.preview_email(session, email_id, current_user.id))
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)
+
+
+@router.delete("/{email_id}")
+async def delete_email(
+    email_id: int,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    reason: Annotated[str, Query(min_length=3, max_length=500)],
+    confirmation_token: Annotated[str, Query(min_length=20)],
+    force_local_cleanup: bool = False,
+) -> dict:
+    try:
+        result = await deletion_service.delete_email(
+            session,
+            email_id=email_id,
+            user_id=current_user.id,
+            reason=reason,
+            confirmation_token=confirmation_token,
+            force_local_cleanup=force_local_cleanup,
+        )
+        if result["oss_status"] == "pending":
+            response.status_code = status.HTTP_202_ACCEPTED
+        return ok(result, "email deleted")
+    except deletion_service.DeletionError as exc:
+        raise_deletion_http(exc)

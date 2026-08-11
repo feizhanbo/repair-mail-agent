@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, bool_column, pk_column
 
@@ -59,6 +59,10 @@ class TicketStatusLog(CreatedAtMixin, Base):
     operator_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_status_logs_user"))
     metadata_json: Mapped[dict | None] = mapped_column("metadata", mysql.JSON)
 
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="status_logs", lazy="raise"
+    )
+
 
 class FieldAuditLog(CreatedAtMixin, Base):
     __tablename__ = "field_audit_logs"
@@ -79,4 +83,14 @@ class FieldAuditLog(CreatedAtMixin, Base):
     reason: Mapped[str | None] = mapped_column(String(500))
     operator_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_field_audit_user"))
     parse_result_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("parse_results.id", name="fk_field_audit_parse_result"))
+
+    ticket: Mapped["RepairTicket"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="field_audit_logs", lazy="raise"
+    )
+    ticket_item: Mapped["RepairTicketItem | None"] = relationship(
+        "RepairTicketItem", foreign_keys=[ticket_item_id], back_populates="field_audit_logs", lazy="raise"
+    )
+    parse_result: Mapped["ParseResult | None"] = relationship(
+        "ParseResult", foreign_keys=[parse_result_id], back_populates="field_audit_logs", lazy="raise"
+    )
 

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, bool_column, datetime_column, pk_column
 
@@ -14,14 +14,16 @@ class ManualReviewTask(TimestampMixin, Base):
     __table_args__ = (
         Index("idx_manual_tasks_ticket", "ticket_id"),
         Index("idx_manual_tasks_email", "email_id"),
+        Index("idx_manual_tasks_thread", "thread_id"),
         Index("idx_manual_tasks_status", "status"),
         Index("idx_manual_tasks_queue", "status", "priority", "created_at"),
         Index("idx_manual_tasks_assignee", "assigned_user_id", "status"),
     )
 
     id: Mapped[int] = pk_column()
-    ticket_id: Mapped[int] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("repair_tickets.id", name="fk_manual_tasks_ticket", ondelete="CASCADE"), nullable=False)
+    ticket_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("repair_tickets.id", name="fk_manual_tasks_ticket", ondelete="SET NULL"))
     email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_manual_tasks_email"))
+    thread_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_threads.id", name="fk_manual_tasks_thread", ondelete="SET NULL"))
     task_type: Mapped[str] = mapped_column(String(50), nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False, server_default="normal")
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
@@ -35,6 +37,16 @@ class ManualReviewTask(TimestampMixin, Base):
     resolved_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_manual_tasks_resolver"))
     resolved_at: Mapped[datetime | None] = datetime_column()
     resolution: Mapped[str | None] = mapped_column(Text)
+
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="manual_review_tasks", lazy="raise"
+    )
+    email: Mapped["Email | None"] = relationship(
+        "Email", foreign_keys=[email_id], back_populates="manual_review_tasks", lazy="raise"
+    )
+    thread: Mapped["EmailThread | None"] = relationship(
+        "EmailThread", foreign_keys=[thread_id], back_populates="manual_review_tasks", lazy="raise"
+    )
 
 
 class NotificationEvent(CreatedAtMixin, Base):
@@ -67,6 +79,13 @@ class NotificationEvent(CreatedAtMixin, Base):
     delivered_at: Mapped[datetime | None] = datetime_column()
     requires_attention: Mapped[bool] = bool_column(False)
 
+    ticket: Mapped["RepairTicket | None"] = relationship(
+        "RepairTicket", foreign_keys=[ticket_id], back_populates="notifications", lazy="raise"
+    )
+    user_states: Mapped[list["NotificationUserState"]] = relationship(
+        "NotificationUserState", foreign_keys="NotificationUserState.notification_id", back_populates="notification", passive_deletes=True, lazy="raise"
+    )
+
 
 class NotificationUserState(TimestampMixin, Base):
     __tablename__ = "notification_user_states"
@@ -89,4 +108,8 @@ class NotificationUserState(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="unread")
     read_at: Mapped[datetime | None] = datetime_column()
     resolved_at: Mapped[datetime | None] = datetime_column()
+
+    notification: Mapped[NotificationEvent] = relationship(
+        NotificationEvent, foreign_keys=[notification_id], back_populates="user_states", lazy="raise"
+    )
 

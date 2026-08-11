@@ -61,11 +61,6 @@ class TicketTransitionRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-class DeviceReceivedConfirmRequest(BaseModel):
-    idempotency_key: str = Field(min_length=1, max_length=100)
-    note: str | None = Field(default=None, max_length=1000)
-
-
 class TicketExportConfirmRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
@@ -142,6 +137,8 @@ class ManualTaskResolveRequest(BaseModel):
         "wait_customer_info",
         "reparse",
         "keep_manual_review",
+        "finish_external_handling",
+        "resolve_manual_business",
     ] = "keep_manual_review"
 
 
