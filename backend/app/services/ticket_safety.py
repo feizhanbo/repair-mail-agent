@@ -27,7 +27,8 @@ from app.services.business_resolution import (
     resolve_ticket_return_routes,
 )
 from app.services.common import utcnow
-from app.services.external_relay import relay_configured, validate_sn_against_relay
+from app.services.sap_sn_sync import sn_snapshot_freshness
+from app.services.external_relay import relay_configured
 from app.services.jobs import enqueue_job
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
@@ -189,7 +190,11 @@ async def build_sn_validation_report(
         settings.RELAY_SQLSERVER_ENABLED
         and settings.RELAY_ADAPTER.strip().lower() == "sqlserver"
     )
-    source_system = "sqlserver_live+local_sn_assets" if sqlserver_live else "local_sn_assets"
+    source_system = "sqlserver_snapshot+local_sn_assets" if sqlserver_live else "local_sn_assets"
+    if sqlserver_live:
+        freshness = await sn_snapshot_freshness(session)
+        if not freshness["fresh"]:
+            errors["sn_snapshot"] = f"sqlserver_snapshot_{freshness['status']}"
     for item in items:
         prefix = f"items.{item.line_no}"
         normalized_sn = _clean_text(item.sn).upper()
@@ -231,27 +236,6 @@ async def build_sn_validation_report(
                     errors[f"{prefix}.customer"] = "sn_customer_mismatch"
                 if item.material_code and asset.material_code != item.material_code:
                     errors[f"{prefix}.material"] = "sn_material_mismatch"
-
-        if sqlserver_live and normalized_sn and _SN_PATTERN.fullmatch(normalized_sn):
-            remote = await validate_sn_against_relay(normalized_sn)
-            check["sqlserver_status"] = remote["status"]
-            if remote["status"] != "found":
-                errors[f"{prefix}.sqlserver_sn"] = remote["status"]
-            elif asset is not None and isinstance(remote.get("record"), dict):
-                record = remote["record"]
-                comparable = {
-                    "customer_code": asset.customer_code,
-                    "material_code": asset.material_code,
-                    "asset_status": asset.asset_status,
-                }
-                mismatch = [
-                    field
-                    for field, local_value in comparable.items()
-                    if _remote_value(record, field) is not None
-                    and str(_remote_value(record, field)) != str(local_value)
-                ]
-                if mismatch:
-                    errors[f"{prefix}.sqlserver_mirror"] = "mismatch:" + ",".join(mismatch)
 
         item_errors = {key: value for key, value in errors.items() if key.startswith(prefix)}
         passed = not item_errors

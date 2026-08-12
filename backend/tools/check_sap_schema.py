@@ -4,8 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "m0h5c6d7e8f9"
-EXPECTED_BUSINESS_TABLE_COUNT = 35
+EXPECTED_REVISION = "q4l9g0b1c2d3"
+EXPECTED_BUSINESS_TABLE_COUNT = 37
 
 EXPECTED = {
     "export_sap": {
@@ -13,17 +13,18 @@ EXPECTED = {
             "ticket_id",
             "ticket_item_id",
             "relay_export_id",
-            "submission_key",
+            "source_request_id",
             "payload_hash",
             "remote_call_id",
             "rma_no",
+            "customer_code",
             "shipping_fee",
             "repair_fee",
             "tax_rate",
             "charge_status",
         },
         "unique": {
-            "uk_export_sap_submission_key",
+            "uk_export_sap_source_request_id",
             "uk_export_sap_remote_call_id",
             "uk_export_sap_item_snapshot",
         },
@@ -104,6 +105,8 @@ EXPECTED = {
         "columns": {
             "ticket_id",
             "rma_no",
+            "customer_code",
+            "repair_business_date",
             "status",
             "policy_snapshot",
             "pdf_oss_object_id",
@@ -111,7 +114,7 @@ EXPECTED = {
             "received_at",
             "sent_at",
         },
-        "unique": {"uk_ticket_rmas_no"},
+        "unique": {"uk_ticket_rmas_ticket_no"},
         "foreign_keys": {
             "fk_ticket_rmas_ticket",
             "fk_ticket_rmas_pdf",
@@ -125,6 +128,32 @@ EXPECTED = {
             "fk_ticket_rma_items_rma",
             "fk_ticket_rma_items_item",
         },
+    },
+    "sap_sn_sync_batches": {
+        "columns": {
+            "batch_no",
+            "status",
+            "source_count",
+            "valid_count",
+            "duplicate_count",
+            "count_change_percent",
+            "snapshot_hash",
+            "approved_by_user_id",
+        },
+        "unique": {"uk_sap_sn_sync_batches_no"},
+        "foreign_keys": {"fk_sap_sn_sync_batches_approved_by"},
+    },
+    "sap_sn_staging": {
+        "columns": {
+            "sync_batch_id",
+            "sn",
+            "customer_code",
+            "material_code",
+            "values_json",
+            "row_hash",
+        },
+        "unique": {"uk_sap_sn_staging_batch_sn"},
+        "foreign_keys": {"fk_sap_sn_staging_batch"},
     },
 }
 
@@ -230,8 +259,8 @@ async def main() -> None:
         raise SystemExit(f"unexpected_business_table_count={result['business_table_count']}")
     if result["errors"]:
         raise SystemExit(";".join(result["errors"]))
-    if policy_count != 37:
-        raise SystemExit(f"unexpected_customer_policy_count={policy_count}")
+    if policy_count < 37:
+        raise SystemExit(f"customer_policy_count_below_required_baseline={policy_count}")
     if annual_enabled_count != 0:
         raise SystemExit(f"annual_policy_must_be_inactive_until_dated={annual_enabled_count}")
     if rma_status_count != 1:

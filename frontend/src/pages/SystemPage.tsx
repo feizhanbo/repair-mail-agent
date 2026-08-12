@@ -7,7 +7,7 @@ import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
-import type { ReplyTemplate, WorkflowStatus, WorkflowTransition } from '../types/api';
+import type { ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition } from '../types/api';
 import { formatTime } from '../utils/format';
 
 type ConfigForm = {
@@ -38,6 +38,9 @@ export default function SystemPage() {
   const [templateForm] = Form.useForm<TemplateForm>();
   const [editingTemplate, setEditingTemplate] = useState<ReplyTemplate | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [snSyncResult, setSnSyncResult] = useState<SapSnSyncBatch | null>(null);
+  const [snSyncApprovalOpen, setSnSyncApprovalOpen] = useState(false);
+  const [snSyncApprovalReason, setSnSyncApprovalReason] = useState('');
   const systemQuery = useQuery({
     queryKey: ['system-info'],
     queryFn: api.systemInfo,
@@ -67,6 +70,25 @@ export default function SystemPage() {
   const mailPreflightMutation = useMutation({
     mutationFn: api.mailTestPreflight,
     onSuccess: (result) => message.success(`邮件预检通过，实际发送 ${result.messages_sent} 封邮件`),
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const snSyncMutation = useMutation({
+    mutationFn: api.startSapSnSync,
+    onSuccess: (result) => {
+      setSnSyncResult(result);
+      setSnSyncApprovalOpen(result.status === 'awaiting_approval');
+      message.success(result.status === 'succeeded' ? 'SAP SN 全量快照已生效' : 'SAP SN 快照已完成校验');
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const snSyncApplyMutation = useMutation({
+    mutationFn: () => api.applySapSnSync(snSyncResult?.id as number, snSyncApprovalReason),
+    onSuccess: (result) => {
+      setSnSyncResult(result);
+      setSnSyncApprovalOpen(false);
+      setSnSyncApprovalReason('');
+      message.success('SAP SN 快照已由管理员确认生效');
+    },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const templateMutation = useMutation({
@@ -325,6 +347,35 @@ export default function SystemPage() {
       </SectionPanel>
       <SectionPanel>
         <div className="section-heading">
+          <Typography.Title level={4}>SAP SN 全量快照</Typography.Title>
+          <Button
+            type="primary"
+            loading={snSyncMutation.isPending}
+            onClick={() => snSyncMutation.mutate()}
+          >
+            手动读取并校验
+          </Button>
+        </div>
+        <Alert
+          type="info"
+          showIcon
+          message="定时同步默认关闭；取得 SAP 每日刷新完成时间后再配置 Cron。快照超过 36 小时会阻止自动导出。"
+          style={{ marginBottom: 12 }}
+        />
+        {snSyncResult ? (
+          <Descriptions column={3} size="small" bordered>
+            <Descriptions.Item label="批次">{snSyncResult.batch_no}</Descriptions.Item>
+            <Descriptions.Item label="状态"><StatusTag value={snSyncResult.status} kind="sap" /></Descriptions.Item>
+            <Descriptions.Item label="来源总数">{snSyncResult.source_count}</Descriptions.Item>
+            <Descriptions.Item label="有效数">{snSyncResult.valid_count}</Descriptions.Item>
+            <Descriptions.Item label="重复数">{snSyncResult.duplicate_count}</Descriptions.Item>
+            <Descriptions.Item label="数量变化">{snSyncResult.count_change_percent ? `${snSyncResult.count_change_percent}%` : '-'}</Descriptions.Item>
+            <Descriptions.Item label="错误" span={3}>{snSyncResult.error_code || '-'}</Descriptions.Item>
+          </Descriptions>
+        ) : null}
+      </SectionPanel>
+      <SectionPanel>
+        <div className="section-heading">
           <Typography.Title level={4}>状态定义</Typography.Title>
         </div>
         <Table<WorkflowStatus>
@@ -349,6 +400,28 @@ export default function SystemPage() {
           size="middle"
         />
       </SectionPanel>
+      <Modal
+        title="确认应用数量变化超过 5% 的 SN 快照"
+        open={snSyncApprovalOpen}
+        onCancel={() => setSnSyncApprovalOpen(false)}
+        onOk={() => snSyncApplyMutation.mutate()}
+        confirmLoading={snSyncApplyMutation.isPending}
+        okButtonProps={{ disabled: snSyncApprovalReason.trim().length < 3 }}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message={`上一批 ${snSyncResult?.previous_count ?? '-'} 条，本批 ${snSyncResult?.source_count ?? '-'} 条，变化 ${snSyncResult?.count_change_percent ?? '-'}%。`}
+          style={{ marginBottom: 12 }}
+        />
+        <Input.TextArea
+          rows={4}
+          value={snSyncApprovalReason}
+          onChange={(event) => setSnSyncApprovalReason(event.target.value)}
+          placeholder="填写管理员确认依据（至少 3 个字符）"
+          maxLength={500}
+        />
+      </Modal>
       <Modal
         title={editingTemplate ? '编辑回复话术' : '新增回复话术'}
         open={templateModalOpen}

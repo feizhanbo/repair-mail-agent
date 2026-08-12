@@ -41,6 +41,11 @@ from app.services.external_operations import (
     succeed_external_operation,
 )
 from app.services.mail_safety import TEST_MAIL_RECIPIENT, TEST_MAIL_SENDER, test_envelope_allowed, test_only_subject
+from app.services.mail_reply_renderer import (
+    RelatedResource,
+    ReplyRenderError,
+    render_reply_history,
+)
 from app.services.rma_pdf import (
     RmaPdfError,
     TEMPLATE_VERSION as RMA_TEMPLATE_VERSION,
@@ -507,6 +512,7 @@ def _build_reply_message(
     reply: ReplyRecord,
     message_id: str,
     *,
+    related_resources: tuple[RelatedResource, ...] = (),
     attachment_content: bytes | None = None,
     attachment_filename: str | None = None,
 ) -> EmailMessage:
@@ -525,6 +531,16 @@ def _build_reply_message(
     rendered_html = getattr(reply, "final_html_body", None) or getattr(reply, "draft_html_body", None)
     if rendered_html:
         message.add_alternative(rendered_html, subtype="html")
+        html_part = message.get_body(preferencelist=("html",))
+        if html_part is not None:
+            for resource in related_resources:
+                html_part.add_related(
+                    resource.content,
+                    maintype=resource.maintype,
+                    subtype=resource.subtype,
+                    cid=f"<{resource.content_id}>",
+                    disposition="inline",
+                )
     if attachment_content is not None:
         message.add_attachment(
             attachment_content,
@@ -538,6 +554,7 @@ def _build_reply_message(
 def _send_reply_via_smtp(
     reply: ReplyRecord,
     *,
+    message: EmailMessage | None = None,
     attachment_content: bytes | None = None,
     attachment_filename: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
@@ -555,12 +572,15 @@ def _send_reply_via_smtp(
         return False, None, "SMTP_TLS_REQUIRED"
 
     message_id = _smtp_message_id(reply)
-    message = _build_reply_message(
-        reply,
-        message_id,
-        attachment_content=attachment_content,
-        attachment_filename=attachment_filename,
-    )
+    if message is None:
+        message = _build_reply_message(
+            reply,
+            message_id,
+            attachment_content=attachment_content,
+            attachment_filename=attachment_filename,
+        )
+    elif str(message.get("Message-ID") or "") != message_id:
+        return False, None, "SMTP_MESSAGE_ID_MISMATCH"
     try:
         with _smtp_client() as smtp:
             if settings.SMTP_PORT == 587:
@@ -685,20 +705,19 @@ async def _render_reply_templates(
     else:
         html_body = _plain_to_html(body)
 
-    history_plain, history_html, history_hash = await _thread_history(
+    history = await render_reply_history(
         session,
-        ticket=ticket,
+        parent=parent,
         language=content_template.language,
     )
-    if history_plain:
-        body = body.rstrip() + THREAD_HISTORY_SEPARATOR + history_plain
-        html_body = html_body.rstrip() + '<hr style="border:0;border-top:1px solid #999">' + history_html
+    body = body.rstrip() + THREAD_HISTORY_SEPARATOR + history.plain
+    html_body = html_body.rstrip() + '<hr style="border:0;border-top:1px solid #999">' + history.html
     subject = _reply_subject(parent.subject, ticket.ticket_no)
-    return subject, body, html_body, base_template, history_hash, _render_hash(
+    return subject, body, html_body, base_template, history.snapshot_hash, _render_hash(
         subject=subject,
         plain=body,
         html_body=html_body,
-        history_hash=history_hash,
+        history_hash=history.snapshot_hash,
     )
 
 
@@ -1185,12 +1204,15 @@ async def _reply_send_guard_error(
         and reply.thread_version != thread.thread_version
     ):
         return "REPLY_THREAD_CHANGED_REGENERATE_REQUIRED"
-    _history_plain, _history_html, current_history_hash = await _thread_history(
-        session,
-        ticket=ticket,
-        language=template.language,
-    )
-    if not reply.thread_history_hash or reply.thread_history_hash != current_history_hash:
+    try:
+        current_history = await render_reply_history(
+            session,
+            parent=parent,
+            language=template.language,
+        )
+    except ReplyRenderError as exc:
+        return exc.code
+    if not reply.thread_history_hash or reply.thread_history_hash != current_history.snapshot_hash:
         return "REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED"
     parent_message_id = _message_id_chain(parent.message_id)
     if _message_id_chain(reply.in_reply_to) != parent_message_id:
@@ -1321,14 +1343,42 @@ async def _send_reply_record(
         attachment_content = await download_oss_object_bytes(session, oss_object_id=reply.rma_pdf_oss_object_id)
         oss_object = await session.get(OssObject, reply.rma_pdf_oss_object_id)
         attachment_filename = (oss_object.original_file_name if oss_object else None) or f"RMA-{ticket.ticket_no}.pdf"
+    template = await session.get(ReplyTemplate, reply.template_id) if reply.template_id else None
+    parent = await session.get(Email, reply.related_email_id) if reply.related_email_id else None
+    try:
+        if template is None or parent is None:
+            raise ReplyRenderError("REPLY_RENDER_PREREQUISITE_MISSING")
+        reply_history = await render_reply_history(
+            session,
+            parent=parent,
+            language=template.language,
+        )
+        if reply_history.snapshot_hash != reply.thread_history_hash:
+            raise ReplyRenderError("REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED")
+    except ReplyRenderError as exc:
+        reply.send_status = "send_failed"
+        reply.last_error_code = exc.code
+        reply.error_message = exc.code
+        sync_ticket_delivery_status()
+        await _ensure_reply_manual_task(
+            session,
+            ticket=ticket,
+            task_type="reply_render_failed",
+            reason=exc.code,
+            email_id=reply.related_email_id,
+            user_id=user_id,
+        )
+        return
     message_id = _smtp_message_id(reply)
     reply.smtp_message_id = message_id
-    raw_message = _build_reply_message(
+    outbound_message = _build_reply_message(
         reply,
         message_id,
+        related_resources=reply_history.resources,
         attachment_content=attachment_content,
         attachment_filename=attachment_filename,
-    ).as_bytes()
+    )
+    raw_message = outbound_message.as_bytes()
     raw_hash = hashlib.sha256(raw_message).hexdigest()
     archive_operation = None
     try:
@@ -1424,8 +1474,7 @@ async def _send_reply_record(
             ok, sent_message_id, error = await asyncio.to_thread(
                 _send_reply_via_smtp,
                 reply,
-                attachment_content=attachment_content,
-                attachment_filename=attachment_filename,
+                message=outbound_message,
             )
     if ok and sent_message_id:
         was_counted = reply.send_status == "sent"
@@ -1664,6 +1713,17 @@ async def create_reply_draft(
             missing_fields=effective_missing_fields,
             parent=related_email,
         )
+    except ReplyRenderError as exc:
+        await _ensure_reply_manual_task(
+            session,
+            ticket=ticket,
+            task_type="reply_render_failed",
+            reason=exc.code,
+            email_id=related_email.id,
+            user_id=user_id,
+        )
+        await _commit_if_available(session)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.code) from exc
     except HTTPException as exc:
         await create_manual_task_if_missing(
             session,
@@ -2217,6 +2277,13 @@ async def create_and_send_rma_authorization(
             missing_fields=None,
             parent=related_email,
             customer_policy=customer_policy,
+        )
+    except ReplyRenderError as exc:
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_reply_render_failed",
+            reason=exc.code,
         )
     except HTTPException as exc:
         return await _rma_manual_review(

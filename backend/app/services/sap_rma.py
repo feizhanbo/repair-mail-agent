@@ -31,10 +31,10 @@ from app.services.external_operations import (
     start_external_operation,
     succeed_external_operation,
 )
-from app.services.external_relay import (
-    RelaySubmissionUncertainError,
-    poll_rma_from_relay,
-    push_ticket_snapshot_to_relay,
+from app.integrations.sap_middleware import (
+    ExternalRmaSubmissionItem,
+    SapUnknownCommitStateError,
+    create_sap_middleware_adapter,
 )
 from app.services.jobs import enqueue_job
 from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
@@ -48,7 +48,7 @@ EXPORT_FIELDS = (
     "ticket_item_id",
     "relay_export_id",
     "ticket_version",
-    "submission_key",
+    "source_request_id",
     "payload_hash",
     "policy_snapshot",
     "status",
@@ -85,6 +85,8 @@ RMA_FIELDS = (
     "id",
     "ticket_id",
     "rma_no",
+    "customer_code",
+    "repair_business_date",
     "status",
     "policy_snapshot",
     "pdf_oss_object_id",
@@ -122,13 +124,8 @@ def _stable_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _submission_key(ticket_id: int, item_id: int, ticket_version: int, payload_hash: str) -> str:
-    return str(
-        uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"repair-mail-agent:sap:{ticket_id}:{item_id}:{ticket_version}:{payload_hash}",
-        )
-    )
+def _source_request_id() -> str:
+    return str(uuid.uuid4())
 
 
 async def _move_to_manual(
@@ -255,7 +252,7 @@ async def ensure_export_lines(
         )
         if existing_row is not None:
             existing_row.relay_export_id = export.id
-            if not existing_row.remote_call_id:
+            if existing_row.status not in {"waiting_sap_result", "waiting_rma", "rma_received"}:
                 existing_row.status = "pending"
                 existing_row.last_error_code = None
                 existing_row.last_error_message = None
@@ -267,7 +264,7 @@ async def ensure_export_lines(
             ticket_item_id=item.id,
             relay_export_id=export.id,
             ticket_version=ticket.version,
-            submission_key=_submission_key(ticket.id, item.id, ticket.version, payload_hash),
+            source_request_id=_source_request_id(),
             payload_hash=payload_hash,
             policy_snapshot=policy,
             status="pending",
@@ -296,7 +293,7 @@ async def ensure_export_lines(
 
 def _line_payload(row: ExportSap) -> dict[str, Any]:
     return {
-        "submission_key": row.submission_key,
+        "source_request_id": row.source_request_id,
         "ticket_id": row.ticket_id,
         "ticket_item_id": row.ticket_item_id,
         "relay_export_id": row.relay_export_id,
@@ -351,172 +348,197 @@ async def submit_export_batch(
             reason=str(exc),
         )
 
-    export.status = "running"
-    export.attempt_count += 1
-    ticket.relay_export_status = "running"
-    for line in lines:
-        if line.status in {"accepted", "rma_received"} and line.remote_call_id:
-            continue
-        operation = await start_external_operation(
+    customer_codes = {str(line.customer_code or "").strip() for line in lines}
+    if len(customer_codes) != 1 or "" in customer_codes:
+        export.status = "manual_review"
+        export.error_code = "SAP_BATCH_CUSTOMER_CODE_CONFLICT"
+        return await _move_to_manual(
             session,
-            operation_type="relay_insert",
-            operation_key=f"export-sap:{line.id}:insert",
-            ticket_id=ticket.id,
-            email_id=ticket.source_email_id,
-            export_sap_id=line.id,
-            recovery_stage="relay_insert",
-            details={"submission_key": line.submission_key, "sn": line.sn},
+            ticket=ticket,
+            task_type="sap_batch_customer_conflict",
+            reason=export.error_code,
         )
-        if operation.status == "succeeded" and operation.remote_reference:
-            # Recover local state from the durable external-operation evidence;
-            # never insert a second remote row after a confirmed CallID.
-            now = utcnow()
-            line.status = "accepted"
-            line.remote_call_id = str(operation.remote_reference)
-            line.submitted_at = line.submitted_at or operation.started_at or now
-            line.accepted_at = line.accepted_at or operation.completed_at or now
-            line.last_error_code = None
-            line.last_error_message = None
-            continue
+    if any(line.status in {"waiting_sap_result", "waiting_rma", "rma_received"} for line in lines):
+        return {
+            "status": export.status,
+            "export_id": export.id,
+            "line_count": len(lines),
+            "idempotent_reuse": True,
+        }
+
+    # SourceRequestIDs must survive a worker crash or unknown external commit.
+    await session.flush()
+    await session.commit()
+    export = await session.get(TicketRelayExport, export_id, with_for_update=True)
+    if export is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    ticket = await session.get(RepairTicket, export.ticket_id, with_for_update=True)
+    lines = list(
+        (
+            await session.execute(
+                select(ExportSap)
+                .where(ExportSap.relay_export_id == export.id)
+                .order_by(ExportSap.ticket_item_id)
+                .with_for_update()
+            )
+        ).scalars().all()
+    )
+    if export.status == "submitting" or any(line.status == "submitting" for line in lines):
+        confirm_at = utcnow() + timedelta(seconds=settings.RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS)
+        export.status = "submit_unknown"
+        export.error_code = "SAP_SUBMIT_INTERRUPTED_REQUIRES_RECONCILIATION"
+        export.next_retry_at = confirm_at
+        ticket.relay_export_status = "submit_unknown"
+        for line in lines:
+            line.status = "submit_unknown"
+            line.last_error_code = export.error_code
+            line.next_retry_at = confirm_at
+        await session.flush()
+        return await reconcile_uncertain_submission(
+            session,
+            export_id=export.id,
+            reason="interrupted_submit_recovery",
+            user_id=None,
+        )
+    export.status = "submitting"
+    export.attempt_count += 1
+    ticket.relay_export_status = "submitting"
+    now = utcnow()
+    for line in lines:
         line.status = "submitting"
         line.attempt_count += 1
-        try:
-            result = await push_ticket_snapshot_to_relay(_line_payload(line))
-        except RelaySubmissionUncertainError as exc:
-            line.status = "submit_uncertain"
-            line.last_error_code = "RELAY_SUBMIT_RESULT_UNCERTAIN"
-            line.last_error_message = str(exc)[:2000]
-            export.status = "manual_review"
-            export.error_code = line.last_error_code
-            export.error_message = line.last_error_message
-            ticket.relay_export_status = "submit_uncertain"
-            fail_external_operation(
-                operation,
-                error_code=line.last_error_code,
-                error_message=line.last_error_message,
-                retryable=False,
-                uncertain=True,
-                recovery_stage="relay_insert_reconcile",
-            )
-            await create_manual_task_if_missing(
-                session,
-                ticket=ticket,
-                task_type="sap_submit_uncertain",
-                trigger_reason=(
-                    "SAP插入结果不确定且尚未取得CallID，禁止自动重插；"
-                    "请核对远端记录后绑定CallID或确认未插入。"
-                ),
-                priority="high",
-                email_id=ticket.source_email_id,
-            )
-            await notify_ticket_once(
-                session,
-                ticket=ticket,
-                event_type="sap_submit_uncertain",
-                title="SAP提交结果待核对",
-                content=f"工单 {ticket.ticket_no} 未取得CallID，系统已停止自动重试。",
-                priority="high",
-                metadata={"relay_export_id": export.id, "line_id": line.id},
-            )
-            return {
-                "status": "manual_review",
-                "error_code": line.last_error_code,
-                "export_id": export.id,
-                "line_id": line.id,
-            }
-        except Exception as exc:
-            line.status = "failed"
-            line.last_error_code = "RELAY_TICKET_EXPORT_FAILED"
-            line.last_error_message = str(exc)[:2000]
-            fail_external_operation(
-                operation,
-                error_code=line.last_error_code,
-                error_message=line.last_error_message,
-                retryable=True,
-                recovery_stage="relay_insert",
-            )
-            export.status = "failed"
-            export.error_code = line.last_error_code
-            export.error_message = line.last_error_message
-            ticket.relay_export_status = "failed"
-            await notify_ticket_once(
-                session,
-                ticket=ticket,
-                event_type="sap_export_failed",
-                title="SAP 提交失败",
-                content=f"工单 {ticket.ticket_no} 的 SAP 提交失败，可在工单详情查看原因并重试。",
-                priority="high",
-                metadata={
-                    "relay_export_id": export.id,
-                    "line_id": line.id,
-                    "error_code": line.last_error_code,
-                },
-            )
-            return {
-                "status": "failed",
-                "error_code": line.last_error_code,
-                "error_message": line.last_error_message,
-                "export_id": export.id,
-                "line_id": line.id,
-            }
-        if result.get("status") != "succeeded" or not result.get("remote_record_key"):
-            line.status = "failed"
-            line.last_error_code = f"RELAY_{str(result.get('status') or 'FAILED').upper()}"
-            line.last_error_message = str(result.get("error_message") or line.last_error_code)[:2000]
-            fail_external_operation(
-                operation,
-                error_code=line.last_error_code,
-                error_message=line.last_error_message,
-                retryable=True,
-                recovery_stage="relay_insert",
-            )
-            export.status = "failed"
-            export.error_code = line.last_error_code
-            ticket.relay_export_status = "failed"
-            await notify_ticket_once(
-                session,
-                ticket=ticket,
-                event_type="sap_export_failed",
-                title="SAP 提交失败",
-                content=f"工单 {ticket.ticket_no} 的 SAP 提交未被中转库受理，可在工单详情重试。",
-                priority="high",
-                metadata={
-                    "relay_export_id": export.id,
-                    "line_id": line.id,
-                    "error_code": line.last_error_code,
-                },
-            )
-            return {"status": "failed", "error_code": line.last_error_code, "export_id": export.id}
-        now = utcnow()
-        line.status = "accepted"
-        line.remote_call_id = str(result["remote_record_key"])
         line.submitted_at = line.submitted_at or now
-        line.accepted_at = now
         line.last_error_code = None
         line.last_error_message = None
-        succeed_external_operation(
-            operation,
-            remote_reference=line.remote_call_id,
-            details={"call_id": line.remote_call_id, "sn": line.sn},
+    operation = await start_external_operation(
+        session,
+        operation_type="relay_insert",
+        operation_key=f"relay-export:{export.id}:submit:{export.attempt_count}",
+        ticket_id=ticket.id,
+        email_id=ticket.source_email_id,
+        export_sap_id=lines[0].id,
+        recovery_stage="source_request_batch_submit",
+        details={
+            "source_request_ids": [line.source_request_id for line in lines],
+            "sns": [line.sn for line in lines],
+        },
+    )
+    # Persist the in-flight marker and operation evidence before touching SQL
+    # Server. A restarted worker must reconcile, never blindly reinsert.
+    await session.flush()
+    await session.commit()
+    adapter = create_sap_middleware_adapter()
+    items = [
+        ExternalRmaSubmissionItem(
+            source_request_id=uuid.UUID(line.source_request_id),
+            sn=line.sn,
+            payload=_line_payload(line),
         )
+        for line in lines
+    ]
+    try:
+        await adapter.submit_rma_batch(items)
+    except SapUnknownCommitStateError as exc:
+        confirm_at = utcnow() + timedelta(seconds=settings.RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS)
+        export.status = "submit_unknown"
+        export.error_code = "SAP_SUBMIT_RESULT_UNKNOWN"
+        export.error_message = str(exc)[:2000]
+        export.next_retry_at = confirm_at
+        ticket.relay_export_status = "submit_unknown"
+        for line in lines:
+            line.status = "submit_unknown"
+            line.last_error_code = export.error_code
+            line.last_error_message = export.error_message
+            line.next_retry_at = confirm_at
+        fail_external_operation(
+            operation,
+            error_code=export.error_code,
+            error_message=export.error_message,
+            retryable=True,
+            uncertain=True,
+            recovery_stage="source_request_batch_reconcile",
+        )
+        result = await reconcile_uncertain_submission(
+            session, export_id=export.id, reason="immediate_unknown_commit_check", user_id=None
+        )
+        if result["status"] == "submit_unknown":
+            await notify_ticket_once(
+                session,
+                ticket=ticket,
+                event_type="sap_submit_unknown",
+                title="SAP 提交结果等待自动核对",
+                content=(
+                    f"工单 {ticket.ticket_no} 的整批提交结果未知；系统将在 "
+                    f"{settings.RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS} 秒后按 SourceRequestID 再次核对。"
+                ),
+                priority="high",
+                metadata={"relay_export_id": export.id},
+            )
+            poll_job = await enqueue_job(
+                session,
+                job_type="sap_rma_poll",
+                resource_type="ticket_relay_export",
+                resource_id=export.id,
+                idempotency_key=f"sap_submit_reconcile:{export.id}:{export.attempt_count}",
+                metadata={"ticket_id": ticket.id, "reconcile_submit": True},
+                max_attempts=5,
+            )
+            poll_job.next_run_at = confirm_at
+            result["reconcile_job_id"] = poll_job.id
+        return result
+    except Exception as exc:
+        export.status = "submit_failed"
+        export.error_code = "SAP_BATCH_SUBMIT_FAILED"
+        export.error_message = str(exc)[:2000]
+        ticket.relay_export_status = "failed"
+        for line in lines:
+            line.status = "submit_failed"
+            line.last_error_code = export.error_code
+            line.last_error_message = export.error_message
+        fail_external_operation(
+            operation,
+            error_code=export.error_code,
+            error_message=export.error_message,
+            retryable=True,
+            recovery_stage="source_request_batch_submit",
+        )
+        await notify_ticket_once(
+            session,
+            ticket=ticket,
+            event_type="sap_export_failed",
+            title="SAP 整批提交失败",
+            content=f"工单 {ticket.ticket_no} 的 SAP 提交失败，可在工单详情查看原因并安全重试。",
+            priority="high",
+            metadata={"relay_export_id": export.id, "error_code": export.error_code},
+        )
+        return {"status": "submit_failed", "error_code": export.error_code, "export_id": export.id}
 
-    export.status = "accepted"
-    export.remote_record_key = ",".join(line.remote_call_id or "" for line in lines)[:191]
+    accepted_at = utcnow()
+    for line in lines:
+        line.status = "waiting_sap_result"
+        line.accepted_at = accepted_at
+        line.next_retry_at = None
+    succeed_external_operation(
+        operation,
+        details={"source_request_ids": [line.source_request_id for line in lines]},
+    )
+    export.status = "waiting_sap_result"
     export.error_code = None
     export.error_message = None
+    export.next_retry_at = None
     export.exported_at = utcnow()
-    ticket.relay_export_status = "accepted"
+    ticket.relay_export_status = "waiting_rma"
     ticket.rma_status = "waiting_sap"
     await notify_ticket_once(
         session,
         ticket=ticket,
         event_type="sap_export_accepted",
-        title="SAP 提交已受理",
-        content=f"工单 {ticket.ticket_no} 的 {len(lines)} 个 SN 已写入中转库并取得 CallID。",
+        title="SAP 提交已写入",
+        content=f"工单 {ticket.ticket_no} 的 {len(lines)} 个 SN 已作为同一事务写入中转库。",
         metadata={
             "relay_export_id": export.id,
             "line_count": len(lines),
-            "call_ids": [line.remote_call_id for line in lines],
+            "source_request_ids": [line.source_request_id for line in lines],
         },
     )
     poll_job = await enqueue_job(
@@ -529,7 +551,7 @@ async def submit_export_batch(
         max_attempts=5000,
     )
     return {
-        "status": "accepted",
+        "status": "waiting_sap_result",
         "export_id": export.id,
         "line_count": len(lines),
         "poll_job_id": poll_job.id,
@@ -539,92 +561,59 @@ async def submit_export_batch(
 async def reconcile_uncertain_submission(
     session: AsyncSession,
     *,
-    line_id: int,
-    outcome: str,
-    call_id: str | None,
+    export_id: int,
     reason: str,
-    user_id: int,
+    user_id: int | None,
 ) -> dict[str, Any]:
-    line = await session.get(ExportSap, line_id, with_for_update=True)
-    if line is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAP_EXPORT_LINE_NOT_FOUND")
-    if line.status != "submit_uncertain":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="SAP_SUBMISSION_NOT_UNCERTAIN",
-        )
-    export = await session.get(TicketRelayExport, line.relay_export_id, with_for_update=True)
-    ticket = await session.get(RepairTicket, line.ticket_id, with_for_update=True)
+    export = await session.get(TicketRelayExport, export_id, with_for_update=True)
+    if export is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    ticket = await session.get(RepairTicket, export.ticket_id, with_for_update=True)
     if export is None or ticket is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SAP_EXPORT_CONTEXT_MISSING")
-    normalized_call_id = (call_id or "").strip()
-    if outcome == "accepted":
-        if not normalized_call_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CALL_ID_REQUIRED")
-        duplicate = await session.scalar(
-            select(ExportSap.id).where(
-                ExportSap.remote_call_id == normalized_call_id,
-                ExportSap.id != line.id,
-            )
-        )
-        if duplicate is not None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="CALL_ID_ALREADY_BOUND")
-    elif outcome == "not_inserted":
-        if normalized_call_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="CALL_ID_NOT_ALLOWED_FOR_NOT_INSERTED",
-            )
-    else:
+    if export.status not in {"submit_unknown", "manual_review"}:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="SAP_RECONCILE_OUTCOME_INVALID",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SAP_SUBMISSION_RECONCILIATION_NOT_ALLOWED",
         )
-    operation = await start_external_operation(
-        session,
-        operation_type="relay_insert_reconcile",
-        operation_key=f"export-sap:{line.id}:insert-reconcile",
-        ticket_id=ticket.id,
-        email_id=ticket.source_email_id,
-        export_sap_id=line.id,
-        recovery_stage="relay_insert_reconcile",
-        details={"outcome": outcome, "reason": reason},
-    )
-    if outcome == "accepted":
-        now = utcnow()
-        line.remote_call_id = normalized_call_id
-        line.status = "accepted"
-        line.submitted_at = line.submitted_at or now
-        line.accepted_at = now
-        line.last_error_code = None
-        line.last_error_message = None
-        succeed_external_operation(
-            operation,
-            remote_reference=normalized_call_id,
-            details={"outcome": outcome, "reason": reason, "user_id": user_id},
+    if export.status == "manual_review" and export.error_code != "SAP_SUBMIT_PARTIAL_REMOTE_ROWS":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SAP_SUBMISSION_RECONCILIATION_NOT_ALLOWED",
         )
-    elif outcome == "not_inserted":
-        line.status = "pending"
-        line.last_error_code = None
-        line.last_error_message = None
-        line.next_retry_at = None
-        succeed_external_operation(
-            operation,
-            details={"outcome": outcome, "reason": reason, "user_id": user_id},
-        )
-    rows = list(
+    lines = list(
         (
             await session.execute(
-                select(ExportSap).where(ExportSap.relay_export_id == export.id)
+                select(ExportSap)
+                .where(ExportSap.relay_export_id == export.id)
+                .order_by(ExportSap.ticket_item_id)
+                .with_for_update()
             )
         ).scalars().all()
     )
-    poll_job_id: int | None = None
-    if rows and all(row.remote_call_id for row in rows):
-        export.status = "accepted"
-        export.remote_record_key = ",".join(row.remote_call_id or "" for row in rows)[:191]
-        ticket.relay_export_status = "accepted"
-        ticket.rma_status = "waiting_sap"
+    if not lines:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SAP_EXPORT_LINES_MISSING")
+    adapter = create_sap_middleware_adapter()
+    results = await adapter.find_records_by_source_request_ids(
+        [uuid.UUID(line.source_request_id) for line in lines]
+    )
+    found = {str(row.source_request_id): row for row in results}
+    expected = {line.source_request_id for line in lines}
+    found_ids = set(found)
+    if found_ids == expected:
+        now = utcnow()
+        for line in lines:
+            result = found[line.source_request_id]
+            line.status = "rma_received" if result.rma_no else "waiting_sap_result"
+            line.accepted_at = line.accepted_at or now
+            line.next_retry_at = None
+            line.last_error_code = None
+            line.last_error_message = None
+        export.status = "waiting_sap_result"
+        export.error_code = None
+        export.error_message = None
+        export.next_retry_at = None
+        ticket.relay_export_status = "waiting_rma"
         poll_job = await enqueue_job(
             session,
             job_type="sap_rma_poll",
@@ -634,16 +623,57 @@ async def reconcile_uncertain_submission(
             metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
             max_attempts=5000,
         )
-        poll_job_id = poll_job.id
-    else:
-        export.status = "pending"
-        ticket.relay_export_status = "pending"
+        return {
+            "status": "waiting_sap_result",
+            "export_id": export.id,
+            "found_count": len(found_ids),
+            "poll_job_id": poll_job.id,
+        }
+    if found_ids:
+        export.status = "manual_review"
+        export.error_code = "SAP_SUBMIT_PARTIAL_REMOTE_ROWS"
+        export.error_message = f"expected={len(expected)},found={len(found_ids)}"
+        for line in lines:
+            line.status = "manual_review"
+            line.last_error_code = export.error_code
+        return await _move_to_manual(
+            session,
+            ticket=ticket,
+            task_type="sap_submit_partial_remote_rows",
+            reason=export.error_code,
+        )
+    now = utcnow()
+    if export.status == "submit_unknown" and export.next_retry_at and now < export.next_retry_at:
+        return {
+            "status": "submit_unknown",
+            "export_id": export.id,
+            "found_count": 0,
+            "confirm_after": export.next_retry_at,
+        }
+    for line in lines:
+        line.status = "pending"
+        line.next_retry_at = None
+        line.last_error_code = None
+        line.last_error_message = None
+    export.status = "pending"
+    export.next_retry_at = None
+    export.error_code = None
+    export.error_message = None
+    ticket.relay_export_status = "pending"
+    retry_job = await enqueue_job(
+        session,
+        job_type="relay_ticket_export",
+        resource_type="ticket_relay_export",
+        resource_id=export.id,
+        idempotency_key=f"relay_ticket_export_unknown_retry:{export.id}:{export.attempt_count}",
+        metadata={"ticket_id": ticket.id, "reason": reason, "user_id": user_id},
+        max_attempts=5,
+    )
     return {
-        "status": line.status,
-        "line_id": line.id,
-        "call_id": line.remote_call_id,
+        "status": "pending",
+        "export_id": export.id,
         "ticket_id": ticket.id,
-        "poll_job_id": poll_job_id,
+        "retry_job_id": retry_job.id,
     }
 
 
@@ -693,54 +723,62 @@ async def poll_export_batch(
             .with_for_update()
         )
     ).scalars().all()
-    if not lines or any(not line.remote_call_id for line in lines):
-        export.status = "failed"
-        export.error_code = "SAP_EXPORT_CALL_ID_MISSING"
+    if not lines:
+        export.status = "submit_failed"
+        export.error_code = "SAP_EXPORT_LINES_MISSING"
         ticket.relay_export_status = "failed"
-        return {"status": "failed", "error_code": "SAP_EXPORT_CALL_ID_MISSING", "export_id": export.id}
+        return {"status": "submit_failed", "error_code": export.error_code, "export_id": export.id}
+    if export.status == "submit_unknown":
+        return await reconcile_uncertain_submission(
+            session,
+            export_id=export.id,
+            reason="scheduled_unknown_commit_confirmation",
+            user_id=confirmed_by_user_id,
+        )
 
     now = utcnow()
     waiting = False
-    for line in lines:
-        if line.status == "rma_received" and line.rma_no:
-            continue
-        poll_operation = await start_external_operation(
-            session,
-            operation_type="relay_poll",
-            operation_key=f"export-sap:{line.id}:poll:{now.isoformat()}",
-            ticket_id=ticket.id,
-            email_id=ticket.source_email_id,
-            export_sap_id=line.id,
-            recovery_stage="relay_poll",
-            details={"call_id": line.remote_call_id},
+    poll_operation = await start_external_operation(
+        session,
+        operation_type="relay_poll",
+        operation_key=f"relay-export:{export.id}:poll:{now.isoformat()}",
+        ticket_id=ticket.id,
+        email_id=ticket.source_email_id,
+        export_sap_id=lines[0].id,
+        recovery_stage="source_request_result_poll",
+        details={"source_request_ids": [line.source_request_id for line in lines]},
+    )
+    try:
+        results = await create_sap_middleware_adapter().find_records_by_source_request_ids(
+            [uuid.UUID(line.source_request_id) for line in lines]
         )
-        try:
-            result = await poll_rma_from_relay(line.remote_call_id or "")
-        except Exception as exc:
-            fail_external_operation(
-                poll_operation,
-                error_code="RELAY_RMA_POLL_FAILED",
-                error_message=str(exc)[:2000],
-                retryable=True,
-                recovery_stage="relay_poll",
-            )
-            raise
-        line.last_polled_at = now
-        succeed_external_operation(
+    except Exception as exc:
+        fail_external_operation(
             poll_operation,
-            remote_reference=line.remote_call_id,
-            details={
-                "call_id": line.remote_call_id,
-                "result_status": result.get("status"),
-                "rma_no": result.get("rma_no"),
-            },
+            error_code="RELAY_RMA_POLL_FAILED",
+            error_message=str(exc)[:2000],
+            retryable=True,
+            recovery_stage="source_request_result_poll",
         )
-        if result.get("status") != "rma_received":
+        raise
+    by_source_id = {str(result.source_request_id): result for result in results}
+    succeed_external_operation(
+        poll_operation,
+        details={
+            "found_count": len(by_source_id),
+            "expected_count": len(lines),
+            "rma_numbers": sorted({row.rma_no for row in results if row.rma_no}),
+        },
+    )
+    for line in lines:
+        line.last_polled_at = now
+        result = by_source_id.get(line.source_request_id)
+        if result is None or not result.rma_no:
             line.status = "waiting_rma"
             waiting = True
             continue
         try:
-            rma_no = validate_rma_no(str(result.get("rma_no") or ""))
+            rma_no = validate_rma_no(result.rma_no)
         except ValueError as exc:
             line.status = "manual_review"
             line.last_error_code = str(exc)
@@ -787,21 +825,32 @@ async def poll_export_batch(
 
     distinct_rmas = sorted({line.rma_no for line in lines if line.rma_no})
     existing_rmas: dict[str, TicketRma | None] = {}
+    business_date = ticket.request_date or min(
+        (line.repair_requested_at.date() for line in lines if line.repair_requested_at),
+        default=now.date(),
+    )
     for rma_no in distinct_rmas:
-        rma = await session.scalar(select(TicketRma).where(TicketRma.rma_no == rma_no))
-        existing_rmas[str(rma_no)] = rma
-        if rma is not None and rma.ticket_id != ticket.id:
+        rows = list(
+            (await session.execute(select(TicketRma).where(TicketRma.rma_no == rma_no))).scalars().all()
+        )
+        existing_rmas[str(rma_no)] = next((row for row in rows if row.ticket_id == ticket.id), None)
+        conflicts = [
+            row
+            for row in rows
+            if row.ticket_id != ticket.id
+            and (row.customer_code != ticket.customer_code or row.repair_business_date != business_date)
+        ]
+        if conflicts:
             export.status = "manual_review"
-            export.error_code = "RMA_NUMBER_ALREADY_LINKED_TO_OTHER_TICKET"
+            export.error_code = "RMA_CROSS_TICKET_BUSINESS_IDENTITY_CONFLICT"
             ticket.relay_export_status = "failed"
             for line in lines:
-                if line.rma_no == rma_no:
-                    line.status = "manual_review"
-                    line.last_error_code = export.error_code
+                line.status = "manual_review"
+                line.last_error_code = export.error_code
             return await _move_to_manual(
                 session,
                 ticket=ticket,
-                task_type="duplicate_rma_number",
+                task_type="duplicate_rma_business_identity_conflict",
                 reason=export.error_code,
             )
 
@@ -842,6 +891,8 @@ async def poll_export_batch(
             rma = TicketRma(
                 ticket_id=ticket.id,
                 rma_no=rma_no or "",
+                customer_code=ticket.customer_code,
+                repair_business_date=business_date,
                 status="received",
                 policy_snapshot={"lines": [line.policy_snapshot for line in matching]},
                 received_at=now,

@@ -79,8 +79,6 @@ type TransitionForm = {
 };
 
 type SapReconcileForm = {
-  outcome: 'accepted' | 'not_inserted';
-  call_id?: string;
   reason: string;
 };
 
@@ -286,7 +284,6 @@ export default function TicketsPage() {
   const reconcileSapMutation = useMutation({
     mutationFn: (values: SapReconcileForm) => api.reconcileSapSubmission(
       selectedId as number,
-      sapReconcileLineId as number,
       values,
     ),
     onSuccess: () => {
@@ -674,47 +671,24 @@ export default function TicketsPage() {
         </Form>
       </Modal>
       <Modal
-        title="SAP 提交结果人工对账"
+        title="SAP SourceRequestID 整批对账"
         open={sapReconcileLineId !== null}
         onCancel={() => setSapReconcileLineId(null)}
         footer={null}
         destroyOnClose
       >
         <Typography.Paragraph type="warning">
-          仅在远端人工核对后操作。确认已插入时必须填写 SAP 生成的 CallID；确认未插入后系统才允许安全重试。
+          系统将按本批全部 SourceRequestID 重新查询。全部存在则继续等待 RMA；全部不存在才允许整批重试；部分存在会转人工处理。
         </Typography.Paragraph>
         <Form<SapReconcileForm>
           layout="vertical"
-          initialValues={{ outcome: 'accepted' }}
           onFinish={(values) => reconcileSapMutation.mutate(values)}
         >
-          <Form.Item label="核对结果" name="outcome" rules={[{ required: true }]}>
-            <Select options={[
-              { value: 'accepted', label: '远端已插入，绑定 CallID' },
-              { value: 'not_inserted', label: '远端确认未插入，允许重试' },
-            ]} />
-          </Form.Item>
-          <Form.Item
-            label="CallID"
-            name="call_id"
-            dependencies={['outcome']}
-            rules={[
-              ({ getFieldValue }) => ({
-                validator: (_, value) => (
-                  getFieldValue('outcome') !== 'accepted' || String(value || '').trim()
-                    ? Promise.resolve()
-                    : Promise.reject(new Error('远端已插入时必须填写 CallID'))
-                ),
-              }),
-            ]}
-          >
-            <Input maxLength={191} />
-          </Form.Item>
           <Form.Item label="核对依据/原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}>
             <Input.TextArea rows={4} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={reconcileSapMutation.isPending}>
-            提交对账结果
+            按 SourceRequestID 重新核对
           </Button>
         </Form>
       </Modal>
@@ -1131,7 +1105,8 @@ function TicketDetailView({
                   columns={[
                     { title: 'SN', dataIndex: 'sn', width: 150, fixed: 'left', render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '状态', dataIndex: 'status', width: 120, render: (v: string) => <StatusTag value={v} kind="sap" /> },
-                    { title: 'CallID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                    { title: 'SourceRequestID', dataIndex: 'source_request_id', width: 260, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                    { title: '历史 CallID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => v ? <CopyableField value={v} /> : '-' },
                     { title: 'RMA', dataIndex: 'rma_no', width: 130, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '客户代码', dataIndex: 'customer_code', width: 120, render: (v?: string) => v || '-' },
                     { title: 'SAP 物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
@@ -1159,8 +1134,8 @@ function TicketDetailView({
                       width: 150,
                       fixed: 'right',
                       render: (_: unknown, row: NonNullable<TicketDetail['sap_exports']>[number]) => (
-                        row.status === 'submit_uncertain' && canTransitionTicket
-                          ? <Button size="small" danger onClick={() => onReconcileSap(row.id)}>人工对账</Button>
+                        row.status === 'submit_unknown' && canTransitionTicket
+                          ? <Button size="small" danger onClick={() => onReconcileSap(row.id)}>整批对账</Button>
                           : '-'
                       ),
                     },

@@ -41,6 +41,7 @@ ATTENTION_EVENT_TYPES = frozenset(
         "ticket_system_error",
         "sap_export_failed",
         "sap_submit_uncertain",
+        "sap_submit_unknown",
         "rma_reply_failed",
     }
 )

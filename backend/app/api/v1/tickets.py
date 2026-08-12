@@ -420,6 +420,16 @@ async def retry_sap_export(
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
+    if export.status == "submit_unknown":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SAP_SUBMIT_UNKNOWN_MUST_RECONCILE_BEFORE_RETRY",
+        )
+    if export.status not in {"pending", "submit_failed", "failed"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SAP_EXPORT_RETRY_NOT_ALLOWED_FOR_CURRENT_STATUS",
+        )
     job = await enqueue_job(
         session,
         job_type="relay_ticket_export",
@@ -481,29 +491,43 @@ async def confirm_late_sap_result(
     return ok(result, "late SAP result confirmed")
 
 
-@router.post("/{ticket_id}/sap-export/lines/{line_id}/reconcile")
+@router.post("/{ticket_id}/sap-export/reconcile")
 async def reconcile_sap_submission(
     ticket_id: int,
-    line_id: int,
     payload: SapSubmitReconcileRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
-    line = await session.get(ExportSap, line_id)
-    if line is None or line.ticket_id != ticket_id:
-        from fastapi import HTTPException, status
-
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAP_EXPORT_LINE_NOT_FOUND")
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    export = await session.scalar(
+        select(TicketRelayExport)
+        .where(TicketRelayExport.ticket_id == ticket.id)
+        .order_by(TicketRelayExport.created_at.desc())
+    )
+    if export is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
     result = await reconcile_uncertain_submission(
         session,
-        line_id=line_id,
-        outcome=payload.outcome,
-        call_id=payload.call_id,
+        export_id=export.id,
         reason=payload.reason,
         user_id=current_user.id,
     )
     await session.commit()
     return ok(result, "uncertain SAP submission reconciled")
+
+
+@router.post("/{ticket_id}/sap-export/lines/{line_id}/reconcile", deprecated=True)
+async def retire_call_id_reconciliation(
+    ticket_id: int,
+    line_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    del ticket_id, line_id, session, current_user
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="SAP_CALL_ID_RECONCILIATION_RETIRED",
+    )
 
 
 @router.post("/{ticket_id}/rma/retry-send")

@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 35
+    assert len(Base.metadata.tables) == 37
 
 
 def test_phase_one_table_names() -> None:
@@ -32,6 +32,8 @@ def test_phase_one_table_names() -> None:
         "reply_templates",
         "roles",
         "sn_assets",
+        "sap_sn_sync_batches",
+        "sap_sn_staging",
         "sn_validation_results",
         "system_event_logs",
         "ticket_status_logs",
@@ -105,7 +107,7 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "ticket_id",
         "ticket_item_id",
         "relay_export_id",
-        "submission_key",
+            "source_request_id",
         "payload_hash",
         "remote_call_id",
         "rma_no",

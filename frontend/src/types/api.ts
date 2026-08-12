@@ -526,9 +526,10 @@ export type SapExportLine = {
   id: number;
   ticket_item_id: number;
   relay_export_id: number;
-  submission_key: string;
+  source_request_id: string;
   status: string;
   attempt_count: number;
+  /** Legacy audit-only CallID; new submissions never populate it. */
   remote_call_id?: string | null;
   rma_no?: string | null;
   last_error_code?: string | null;
@@ -551,9 +552,27 @@ export type SapExportLine = {
   tax_rate?: number | string | null;
 };
 
+export type SapSnSyncBatch = {
+  id: number;
+  batch_no: string;
+  status: string;
+  source_count: number;
+  valid_count: number;
+  invalid_count: number;
+  duplicate_count: number;
+  previous_count?: number | null;
+  count_change_percent?: string | null;
+  snapshot_hash?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  applied_at?: string | null;
+};
+
 export type TicketRmaRecord = {
   id: number;
   rma_no: string;
+  customer_code?: string | null;
+  repair_business_date?: string | null;
   status: string;
   policy_snapshot?: JsonRecord | null;
   pdf_oss_object_id?: number | null;

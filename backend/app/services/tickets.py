@@ -700,10 +700,10 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             "batch_status": relay_batches[0].status if relay_batches else "not_started",
             "line_count": len(sap_exports),
             "submitted_count": sum(
-                1 for row in sap_exports if row.status in {"accepted", "waiting_rma", "rma_received"}
+                1 for row in sap_exports if row.status in {"waiting_sap_result", "waiting_rma", "rma_received"}
             ),
             "accepted_count": sum(
-                1 for row in sap_exports if row.remote_call_id
+                1 for row in sap_exports if row.status in {"waiting_sap_result", "waiting_rma", "rma_received"}
             ),
             "rma_received_count": sum(
                 1 for row in sap_exports if row.status == "rma_received" and row.rma_no
@@ -719,7 +719,7 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "id",
                     "ticket_item_id",
                     "relay_export_id",
-                    "submission_key",
+                    "source_request_id",
                     "status",
                     "attempt_count",
                     "remote_call_id",
@@ -749,6 +749,8 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                 (
                     "id",
                     "rma_no",
+                    "customer_code",
+                    "repair_business_date",
                     "status",
                     "policy_snapshot",
                     "pdf_oss_object_id",

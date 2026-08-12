@@ -60,7 +60,14 @@ OPEN_TASK_STATUSES = {"pending", "assigned", "claimed", "assignment_failed"}
 IRREVERSIBLE_REPLY_STATUSES = {"sent", "send_uncertain"}
 IRREVERSIBLE_EXTERNAL_STATUSES = {"succeeded", "uncertain"}
 IRREVERSIBLE_EXTERNAL_TYPES = {"smtp_send", "relay_insert", "relay_insert_reconcile"}
-IRREVERSIBLE_EXPORT_STATUSES = {"submitted", "accepted", "waiting_rma", "rma_received"}
+IRREVERSIBLE_EXPORT_STATUSES = {
+    "submitted",
+    "accepted",
+    "waiting_sap_result",
+    "waiting_rma",
+    "rma_received",
+    "submit_unknown",
+}
 IRREVERSIBLE_RMA_STATUSES = {"sent", "issued"}
 DELETE_PREVIEW_TTL_MINUTES = 10
 
@@ -549,7 +556,7 @@ async def _finalize_database_delete(
 
 async def process_oss_deletion_operation(session: AsyncSession, audit_log_id: int) -> dict[str, Any]:
     audit = await session.get(OperationLog, audit_log_id, with_for_update=True)
-    if audit is None or audit.operation_type not in {"attachment_deleted", "email_deleted", "ticket_deleted"}:
+    if audit is None or audit.operation_type not in {"attachment_deleted", "email_deleted", "ticket_deleted", "gold_test_replay_reset"}:
         raise DeletionError("DELETION_OPERATION_NOT_FOUND", status_code=404)
     operations = list(
         (
@@ -834,7 +841,7 @@ async def delete_ticket(
 
 async def get_deletion_operation(session: AsyncSession, audit_log_id: int) -> dict[str, Any]:
     audit = await session.get(OperationLog, audit_log_id)
-    if audit is None or audit.operation_type not in {"attachment_deleted", "email_deleted", "ticket_deleted"}:
+    if audit is None or audit.operation_type not in {"attachment_deleted", "email_deleted", "ticket_deleted", "gold_test_replay_reset"}:
         raise DeletionError("DELETION_OPERATION_NOT_FOUND", status_code=404)
     operations = list((await session.execute(select(ExternalOperationRecord).where(ExternalOperationRecord.operation_type == "oss_delete", ExternalOperationRecord.operation_key.like(f"delete:{audit.id}:%")))).scalars().all())
     job = await session.scalar(select(JobRunLog).where(JobRunLog.resource_type == "operation_log", JobRunLog.resource_id == audit.id).order_by(JobRunLog.id.desc()))

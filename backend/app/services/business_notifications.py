@@ -27,6 +27,7 @@ async def notify_ticket_once(
             event_types={
                 "sap_export_failed",
                 "sap_submit_uncertain",
+                "sap_submit_unknown",
                 "rma_reply_failed",
             },
         )

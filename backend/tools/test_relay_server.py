@@ -5,6 +5,7 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any, Iterator
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -20,12 +21,29 @@ SCENARIOS = {"normal", "delayed", "partial", "invalid_rma", "multi_rma", "timeou
 
 
 class RelayRecord(BaseModel):
-    submission_key: str = Field(min_length=8, max_length=128)
+    source_request_id: str | None = Field(default=None, min_length=8, max_length=128)
+    submission_key: str | None = Field(default=None, min_length=8, max_length=128)
     ticket_id: int | None = None
     ticket_item_id: int | None = None
     relay_export_id: int | None = None
     sn: str = Field(min_length=1, max_length=100)
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="after")
+    def require_source_request_id(self) -> "RelayRecord":
+        value = self.source_request_id or self.submission_key
+        if not value:
+            raise ValueError("SOURCE_REQUEST_ID_REQUIRED")
+        self.source_request_id = value
+        return self
+
+
+class RelayBatch(BaseModel):
+    items: list[RelayRecord] = Field(min_length=1)
+
+
+class RelayQuery(BaseModel):
+    source_request_ids: list[str] = Field(min_length=1)
 
 
 class RelayControl(BaseModel):
@@ -33,8 +51,16 @@ class RelayControl(BaseModel):
     delay_seconds: int = Field(default=0, ge=0, le=31_536_000)
     rma_no: str | None = None
 
+    @model_validator(mode="after")
+    def validate_rma_no(self) -> "RelayControl":
+        if self.rma_no is not None and not re.fullmatch(r"\d{10}|INVALID-RMA", self.rma_no):
+            raise ValueError("TEST_RELAY_RMA_NO_INVALID")
+        return self
+
 
 class TestRelayStore:
+    __test__ = False
+
     def __init__(self, path: Path):
         self.path = path.resolve()
         self.call_id_namespace = hashlib.sha256(
@@ -80,6 +106,14 @@ class TestRelayStore:
                 );
                 """
             )
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(records)").fetchall()}
+            if "source_request_id" not in columns:
+                db.execute("ALTER TABLE records ADD COLUMN source_request_id TEXT")
+                db.execute("UPDATE records SET source_request_id = submission_key WHERE source_request_id IS NULL")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uk_records_source_request_id "
+                "ON records(source_request_id)"
+            )
 
     @staticmethod
     def _now() -> datetime:
@@ -108,56 +142,96 @@ class TestRelayStore:
         )
         return rma_no
 
-    def create(self, payload: RelayRecord) -> dict[str, Any]:
-        with self.connection() as db:
-            existing = db.execute(
-                "SELECT call_id FROM records WHERE submission_key = ?", (payload.submission_key,)
-            ).fetchone()
-            if existing:
-                return {
-                    "status": "succeeded",
-                    "remote_record_key": str(existing["call_id"]),
-                    "idempotent_reuse": True,
-                }
-            record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
-            call_id = f"TESTCALL-{self.call_id_namespace}-{record_id:08d}"
-            scenario = self._setting(db, "default_scenario", "normal")
-            delay = int(self._setting(db, "default_delay_seconds", "0"))
-            ticket_key = str(payload.ticket_id or payload.relay_export_id or payload.submission_key)
-            if scenario == "multi_rma":
-                ticket_key = f"{ticket_key}:{payload.ticket_item_id or payload.sn}"
-            rma_no = self._next_rma(db, ticket_key)
-            if scenario == "invalid_rma":
-                rma_no = "INVALID-RMA"
-            available_at = self._now() + timedelta(seconds=delay)
-            if scenario in {"timeout", "late"}:
-                available_at = self._now() + timedelta(days=365)
-            db.execute(
-                """
-                INSERT INTO records(
-                    id, submission_key, call_id, ticket_id, ticket_item_id, sn,
-                    payload_json, scenario, rma_no, available_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record_id,
-                    payload.submission_key,
-                    call_id,
-                    payload.ticket_id,
-                    payload.ticket_item_id,
-                    payload.sn,
-                    json.dumps(payload.model_dump(), ensure_ascii=False, default=str),
-                    scenario,
-                    rma_no,
-                    available_at.isoformat(),
-                    self._now().isoformat(),
-                ),
-            )
+    def _create_in_db(self, db: sqlite3.Connection, payload: RelayRecord) -> dict[str, Any]:
+        source_request_id = str(payload.source_request_id)
+        existing = db.execute(
+            "SELECT call_id FROM records WHERE source_request_id = ?", (source_request_id,)
+        ).fetchone()
+        if existing:
             return {
                 "status": "succeeded",
-                "remote_record_key": call_id,
-                "idempotent_reuse": False,
+                "source_request_id": source_request_id,
+                "remote_record_key": str(existing["call_id"]),
+                "idempotent_reuse": True,
             }
+        record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
+        call_id = f"TESTCALL-{self.call_id_namespace}-{record_id:08d}"
+        scenario = self._setting(db, "default_scenario", "normal")
+        delay = int(self._setting(db, "default_delay_seconds", "0"))
+        ticket_key = str(payload.ticket_id or payload.relay_export_id or source_request_id)
+        if scenario == "multi_rma":
+            ticket_key = f"{ticket_key}:{payload.ticket_item_id or payload.sn}"
+        rma_no = self._next_rma(db, ticket_key)
+        fixed_rma_no = self._setting(db, "default_rma_no", "").strip()
+        if fixed_rma_no:
+            rma_no = fixed_rma_no
+        if scenario == "invalid_rma":
+            rma_no = "INVALID-RMA"
+        available_at = self._now() + timedelta(seconds=delay)
+        if scenario in {"timeout", "late"}:
+            available_at = self._now() + timedelta(days=365)
+        db.execute(
+            """
+                INSERT INTO records(
+                    id, submission_key, source_request_id, call_id, ticket_id, ticket_item_id, sn,
+                    payload_json, scenario, rma_no, available_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record_id,
+                source_request_id,
+                source_request_id,
+                call_id,
+                payload.ticket_id,
+                payload.ticket_item_id,
+                payload.sn,
+                json.dumps(payload.model_dump(), ensure_ascii=False, default=str),
+                scenario,
+                rma_no,
+                available_at.isoformat(),
+                self._now().isoformat(),
+            ),
+        )
+        return {
+            "status": "succeeded",
+            "source_request_id": source_request_id,
+            "remote_record_key": call_id,
+            "idempotent_reuse": False,
+        }
+
+    def create(self, payload: RelayRecord) -> dict[str, Any]:
+        with self.connection() as db:
+            return self._create_in_db(db, payload)
+
+    def create_batch(self, payload: RelayBatch) -> dict[str, Any]:
+        with self.connection() as db:
+            rows = [self._create_in_db(db, item) for item in payload.items]
+            return {"status": "succeeded", "items": rows}
+
+    def query(self, source_request_ids: list[str]) -> list[dict[str, Any]]:
+        if not source_request_ids:
+            return []
+        with self.connection() as db:
+            placeholders = ",".join("?" for _ in source_request_ids)
+            rows = db.execute(
+                f"SELECT * FROM records WHERE source_request_id IN ({placeholders})",
+                source_request_ids,
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                rma_no: str | None = None
+                if not (row["scenario"] == "partial" and int(row["id"]) % 2 == 0):
+                    available = datetime.fromisoformat(str(row["available_at"]))
+                    if self._now() >= available:
+                        rma_no = row["rma_no"]
+                result.append(
+                    {
+                        "source_request_id": row["source_request_id"],
+                        "sn": row["sn"],
+                        "rma_no": rma_no,
+                    }
+                )
+            return result
 
     def get(self, call_id: str) -> dict[str, Any] | None:
         with self.connection() as db:
@@ -187,6 +261,13 @@ class TestRelayStore:
                 "INSERT OR REPLACE INTO settings(key, value) VALUES ('default_delay_seconds', ?)",
                 (str(control.delay_seconds),),
             )
+            if control.rma_no:
+                db.execute(
+                    "INSERT OR REPLACE INTO settings(key, value) VALUES ('default_rma_no', ?)",
+                    (control.rma_no,),
+                )
+            else:
+                db.execute("DELETE FROM settings WHERE key = 'default_rma_no'")
         return control.model_dump()
 
     def update(self, call_id: str, control: RelayControl) -> dict[str, Any] | None:
@@ -229,6 +310,14 @@ def create_app(*, database: Path, token: str) -> FastAPI:
     @app.post("/records")
     def create_record(payload: RelayRecord, _: None = Depends(authorize)) -> dict[str, Any]:
         return store.create(payload)
+
+    @app.post("/records/batch")
+    def create_batch(payload: RelayBatch, _: None = Depends(authorize)) -> dict[str, Any]:
+        return store.create_batch(payload)
+
+    @app.post("/records/query")
+    def query_records(payload: RelayQuery, _: None = Depends(authorize)) -> dict[str, Any]:
+        return {"items": store.query(payload.source_request_ids)}
 
     @app.get("/records/{call_id}")
     def get_record(call_id: str, _: None = Depends(authorize)) -> dict[str, Any]:

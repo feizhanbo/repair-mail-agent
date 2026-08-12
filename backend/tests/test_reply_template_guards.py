@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.models import Email, EmailAttachment, RepairTicket, RepairTicketItem, ReplyRecord, ReplyTemplate
 from app.seed import REPLY_TEMPLATES
 from app.services import replies
+from app.services.mail_reply_renderer import ReplyHistory
 
 
 def _template(
@@ -32,7 +33,7 @@ def _template(
 
 
 @pytest.mark.anyio
-async def test_domestic_reply_composes_content_with_company_base() -> None:
+async def test_domestic_reply_composes_content_with_company_base(monkeypatch: pytest.MonkeyPatch) -> None:
     content = _template(template_id=1, template_type="receipt")
     base = _template(
         template_id=2,
@@ -49,6 +50,19 @@ async def test_domestic_reply_composes_content_with_company_base() -> None:
         subject="Original repair",
     )
     session = SimpleNamespace(scalar=AsyncMock(return_value=base))
+    monkeypatch.setattr(
+        replies,
+        "render_reply_history",
+        AsyncMock(
+            return_value=ReplyHistory(
+                plain="From: customer@example.com\n\nOriginal request",
+                html="<blockquote><b>Original request</b></blockquote>",
+                snapshot_hash="a" * 64,
+                resources=(),
+                raw_eml_sha256="b" * 64,
+            )
+        ),
+    )
 
     subject, body, html_body, selected_base, history_hash, render_hash = await replies._render_reply_templates(
         session,
@@ -59,7 +73,8 @@ async def test_domestic_reply_composes_content_with_company_base() -> None:
     )
 
     assert subject == "Re: Original repair"
-    assert body == "BASE-BEGIN\n业务内容 RMA-3\nBASE-END"
+    assert "Original request" in body
+    assert body.startswith("BASE-BEGIN\n业务内容 RMA-3\nBASE-END")
     assert "业务内容 RMA-3" in html_body
     assert selected_base is base
     assert len(history_hash) == 64
@@ -120,7 +135,19 @@ async def test_send_guard_requires_template_base_and_reply_headers(monkeypatch: 
         return None
 
     history_hash = "a" * 64
-    monkeypatch.setattr(replies, "_thread_history", AsyncMock(return_value=("", "", history_hash)))
+    monkeypatch.setattr(
+        replies,
+        "render_reply_history",
+        AsyncMock(
+            return_value=ReplyHistory(
+                plain="",
+                html="",
+                snapshot_hash=history_hash,
+                resources=(),
+                raw_eml_sha256="b" * 64,
+            )
+        ),
+    )
     session = SimpleNamespace(get=get, scalar=AsyncMock())
     reply = ReplyRecord(
         ticket_id=1,
@@ -146,6 +173,24 @@ async def test_send_guard_requires_template_base_and_reply_headers(monkeypatch: 
     )
 
     assert await replies._reply_send_guard_error(session, ticket=ticket, reply=reply) is None
+    replies.render_reply_history.return_value = ReplyHistory(
+        plain="changed",
+        html="<div>changed</div>",
+        snapshot_hash="c" * 64,
+        resources=(),
+        raw_eml_sha256="d" * 64,
+    )
+    assert (
+        await replies._reply_send_guard_error(session, ticket=ticket, reply=reply)
+        == "REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED"
+    )
+    replies.render_reply_history.return_value = ReplyHistory(
+        plain="",
+        html="",
+        snapshot_hash=history_hash,
+        resources=(),
+        raw_eml_sha256="b" * 64,
+    )
     reply.template_id = None
     assert await replies._reply_send_guard_error(session, ticket=ticket, reply=reply) == "REPLY_TEMPLATE_REQUIRED"
 

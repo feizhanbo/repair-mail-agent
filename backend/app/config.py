@@ -91,6 +91,18 @@ class Settings(BaseSettings):
     TEST_RELAY_BASE_URL: str = ""
     TEST_RELAY_TOKEN: str = ""
     RUN_REAL_MAIL_INTEGRATION_TESTS: bool = False
+    E2E_GOLD_RUN_ENABLED: bool = False
+    E2E_RMATEST2_IMAP_HOST: str = "imaphz.qiye.163.com"
+    E2E_RMATEST2_IMAP_PORT: int = 993
+    E2E_RMATEST2_IMAP_USE_SSL: bool = True
+    E2E_RMATEST2_IMAP_USER: str = "rmatest2@accotest.com"
+    E2E_RMATEST2_IMAP_PASSWORD: str = ""
+    E2E_RMATEST2_IMAP_FOLDER: str = "INBOX"
+    E2E_RMATEST2_SMTP_HOST: str = "smtphz.qiye.163.com"
+    E2E_RMATEST2_SMTP_PORT: int = 465
+    E2E_RMATEST2_SMTP_USE_SSL: bool = True
+    E2E_RMATEST2_SMTP_USER: str = "rmatest2@accotest.com"
+    E2E_RMATEST2_SMTP_PASSWORD: str = ""
 
     RELAY_SQLSERVER_ENABLED: bool = False
     RELAY_SQLSERVER_HOST: str = ""
@@ -116,6 +128,8 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_RESULT_MODE: str = "table"
     RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
     RELAY_SQLSERVER_RESULT_TARGET: str = ""
+    RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN: str = "SourceRequestID"
+    # Legacy audit-only configuration. New submissions and result queries never use CallID.
     RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
     RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
     RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {
@@ -126,12 +140,13 @@ class Settings(BaseSettings):
         "material_name": "itemName",
         "email_subject": "subject",
         "contact_person": "BPContact",
-        "contact_phone": "BPCellular",
+        "contact_phone": "Telephone",
         "problem_description": "U_FailurePhenomena",
         "repair_requested_at": "U_BXDate",
-        "mailing_address": "BPBillAddr",
+        "mailing_address": "BPShipAddr",
         "currency": "U_cur",
         "shipping_fee": "U_DeliveryPaid",
+        "repair_fee": "U_WSPrice",
         "charge_status": "U_RepairPaid",
     }
     RELAY_SQLSERVER_BATCH_SIZE: int = 500
@@ -139,6 +154,10 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
     RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS: int = 300
     RELAY_SQLSERVER_RMA_TIMEOUT_WORKING_HOURS: int = 8
+    RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS: int = 300
+    RELAY_SN_SYNC_CRON: str = ""
+    RELAY_SN_COUNT_CHANGE_GUARD_PERCENT: float = 5.0
+    RELAY_SN_SNAPSHOT_MAX_AGE_HOURS: int = 36
 
     INTERNAL_EMAIL_DOMAINS: list[str] = ["accotest.com"]
     DEVICE_RECEIPT_TRUSTED_SENDERS: list[str] = []

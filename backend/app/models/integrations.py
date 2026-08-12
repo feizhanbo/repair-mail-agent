@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -23,6 +23,70 @@ class ExternalSyncCheckpoint(TimestampMixin, Base):
     last_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="never_run")
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     statistics_json: Mapped[dict | None] = mapped_column(mysql.JSON)
+
+
+class SapSnSyncBatch(TimestampMixin, Base):
+    __tablename__ = "sap_sn_sync_batches"
+    __table_args__ = (
+        UniqueConstraint("batch_no", name="uk_sap_sn_sync_batches_no"),
+        Index("idx_sap_sn_sync_batches_status", "status", "created_at"),
+    )
+
+    id: Mapped[int] = pk_column()
+    batch_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
+    source_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    valid_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    invalid_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    duplicate_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
+    previous_count: Mapped[int | None] = mapped_column()
+    count_change_percent: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    snapshot_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    approval_reason: Mapped[str | None] = mapped_column(String(500))
+    approved_by_user_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_sap_sn_sync_batches_approved_by")
+    )
+    started_at: Mapped[datetime | None] = datetime_column()
+    finished_at: Mapped[datetime | None] = datetime_column()
+    applied_at: Mapped[datetime | None] = datetime_column()
+
+    staging_rows: Mapped[list["SapSnStaging"]] = relationship(
+        "SapSnStaging",
+        foreign_keys="SapSnStaging.sync_batch_id",
+        back_populates="sync_batch",
+        passive_deletes=True,
+        lazy="raise",
+    )
+
+
+class SapSnStaging(TimestampMixin, Base):
+    __tablename__ = "sap_sn_staging"
+    __table_args__ = (
+        UniqueConstraint("sync_batch_id", "sn", name="uk_sap_sn_staging_batch_sn"),
+        Index("idx_sap_sn_staging_batch", "sync_batch_id", "id"),
+    )
+
+    id: Mapped[int] = pk_column()
+    sync_batch_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("sap_sn_sync_batches.id", name="fk_sap_sn_staging_batch", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sn: Mapped[str] = mapped_column(String(100), nullable=False)
+    customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    material_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    material_name: Mapped[str | None] = mapped_column(String(255))
+    asset_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="valid")
+    values_json: Mapped[dict | None] = mapped_column(mysql.JSON)
+    raw_data: Mapped[dict | None] = mapped_column(mysql.JSON)
+    row_hash: Mapped[str] = mapped_column(mysql.CHAR(64), nullable=False)
+
+    sync_batch: Mapped[SapSnSyncBatch] = relationship(
+        SapSnSyncBatch, foreign_keys=[sync_batch_id], back_populates="staging_rows", lazy="raise"
+    )
 
 
 class TicketRelayExport(TimestampMixin, Base):
@@ -61,7 +125,7 @@ class TicketRelayExport(TimestampMixin, Base):
 class ExportSap(TimestampMixin, Base):
     __tablename__ = "export_sap"
     __table_args__ = (
-        UniqueConstraint("submission_key", name="uk_export_sap_submission_key"),
+        UniqueConstraint("source_request_id", name="uk_export_sap_source_request_id"),
         UniqueConstraint("remote_call_id", name="uk_export_sap_remote_call_id"),
         UniqueConstraint(
             "ticket_item_id",
@@ -95,7 +159,7 @@ class ExportSap(TimestampMixin, Base):
         nullable=False,
     )
     ticket_version: Mapped[int] = mapped_column(nullable=False)
-    submission_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
     payload_hash: Mapped[str] = mapped_column(mysql.CHAR(64), nullable=False)
     policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
@@ -143,7 +207,8 @@ class ExportSap(TimestampMixin, Base):
 class TicketRma(TimestampMixin, Base):
     __tablename__ = "ticket_rmas"
     __table_args__ = (
-        UniqueConstraint("rma_no", name="uk_ticket_rmas_no"),
+        UniqueConstraint("ticket_id", "rma_no", name="uk_ticket_rmas_ticket_no"),
+        Index("idx_ticket_rmas_business_identity", "rma_no", "customer_code", "repair_business_date"),
         Index("idx_ticket_rmas_ticket", "ticket_id", "created_at"),
         Index("idx_ticket_rmas_status", "status", "updated_at"),
     )
@@ -155,6 +220,8 @@ class TicketRma(TimestampMixin, Base):
         nullable=False,
     )
     rma_no: Mapped[str] = mapped_column(String(30), nullable=False)
+    customer_code: Mapped[str | None] = mapped_column(String(50))
+    repair_business_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="received")
     policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     pdf_oss_object_id: Mapped[int | None] = mapped_column(

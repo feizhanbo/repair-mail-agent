@@ -1,242 +1,141 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
 from app.config import settings
-from app.services import external_relay
-from app.services.external_relay import push_ai_parse_result_to_relay, sync_sn_assets_from_relay
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
+from app.integrations.sap_middleware import (
+    ExternalRmaSubmissionItem,
+    SapTransactionError,
+    SapUnknownCommitStateError,
+)
+from app.integrations.sap_middleware.sqlserver import SqlServerSapMiddlewareAdapter, _identifier
+from app.services.external_relay import (
+    push_ai_parse_result_to_relay,
+    relay_configuration_status,
+    sync_sn_assets_from_relay,
+)
 
 
 @pytest.mark.anyio
 async def test_relay_sn_sync_returns_disabled_when_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "RELAY_SN_SYNC_ENABLED", False)
-    monkeypatch.setattr(settings, "RELAY_BASE_URL", "https://relay.example.com")
-    monkeypatch.setattr(settings, "RELAY_API_KEY", "secret-relay-key")
-
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", False)
     result = await sync_sn_assets_from_relay(object())
-
     assert result == {"status": "disabled", "configured": False, "synced_count": 0}
 
 
 @pytest.mark.anyio
-async def test_raw_parse_result_push_is_deprecated(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "RELAY_PUSH_ENABLED", True)
-    monkeypatch.setattr(settings, "RELAY_BASE_URL", "")
-    monkeypatch.setattr(settings, "RELAY_API_KEY", "")
-
+async def test_raw_parse_result_push_is_deprecated() -> None:
     result = await push_ai_parse_result_to_relay(object(), parse_result_id=123)
-
-    assert result == {
-        "status": "deprecated",
-        "parse_result_id": 123,
-        "message": "Use validated ticket relay export",
-    }
+    assert result["status"] == "deprecated"
+    assert result["parse_result_id"] == 123
+    assert "SourceRequestID" in result["message"]
 
 
-def test_sqlserver_status_never_exposes_password(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configuration_requires_source_request_column(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", True)
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_PASSWORD", "do-not-return-this")
-    status = external_relay.relay_configuration_status()
-
-    assert status["status"] in {"misconfigured", "configured"}
-    assert "do-not-return-this" not in repr(status)
-    assert "password" not in {key.lower() for key in status}
-
-
-def test_sqlserver_query_uses_validated_identifiers_and_bound_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict = {}
-
-    class Cursor:
-        description = [("sn",), ("id",), ("updated_at",)]
-
-        def execute(self, sql, params):
-            seen["sql"] = sql
-            seen["params"] = params
-            return self
-
-        def fetchall(self):
-            return []
-
-    class Connection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def cursor(self):
-            return Cursor()
-
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SN_SCHEMA", "dbo")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SN_TABLE", "sn_source")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SN_PRIMARY_KEY", "id")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SN_UPDATED_AT_COLUMN", "updated_at")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SN_COLUMN_MAP", {
-        "sn": "sn",
-        "customer_code": "customer_code",
-        "customer_name": "customer_name",
-        "material_code": "material_code",
-        "asset_status": "asset_status",
-    })
-    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
-
-    external_relay._fetch_sn_rows(
-        cursor={"updated_at": "2026-07-16T00:00:00", "primary_key": 99},
-        full=False,
-    )
-
-    assert "[dbo].[sn_source]" in seen["sql"]
-    assert "2026-07-16T00:00:00" not in seen["sql"]
-    assert seen["params"][1:] == ["2026-07-16T00:00:00", "2026-07-16T00:00:00", 99]
-    with pytest.raises(external_relay.RelayConfigurationError):
-        external_relay._identifier("sn_source; DROP TABLE users")
+    monkeypatch.setattr(settings, "RELAY_ADAPTER", "sqlserver")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN", "")
+    status = relay_configuration_status()
+    assert status["configured"] is False
+    assert "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN" in status["missing"]
 
 
-def test_sqlserver_one_sn_insert_returns_sap_generated_call_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, object]] = []
+def test_identifier_rejects_sql_fragments() -> None:
+    with pytest.raises(Exception, match="SAP_IDENTIFIER_INVALID"):
+        _identifier("sn_source; DROP TABLE users")
 
-    class Cursor:
-        def execute(self, sql, params):
-            calls.append((sql, params))
-            return self
 
-        def fetchone(self):
-            return ("CALL-1001",)
+class _Cursor:
+    def __init__(self, fail_on: int | None = None):
+        self.calls: list[tuple[str, object]] = []
+        self.fail_on = fail_on
 
-    class Connection:
-        committed = False
+    def execute(self, sql, params):
+        self.calls.append((sql, params))
+        if self.fail_on and len(self.calls) == self.fail_on:
+            raise ValueError("known constraint failure")
+        return self
 
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *_args):
-            return False
+class _Connection:
+    def __init__(self, *, fail_on: int | None = None, rollback_fails: bool = False):
+        self.cursor_value = _Cursor(fail_on)
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+        self.rollback_fails = rollback_fails
 
-        def cursor(self):
-            return Cursor()
+    def cursor(self):
+        return self.cursor_value
 
-        def commit(self):
-            self.committed = True
+    def commit(self):
+        self.committed = True
 
-    mapping = {
-        "sn": "internalSN",
-        "customer_code": "customer",
-        "material_code": "itemCode",
-        "repair_fee": "U_WSPrice",
-    }
+    def rollback(self):
+        self.rolled_back = True
+        if self.rollback_fails:
+            raise OSError("connection lost")
+
+    def close(self):
+        self.closed = True
+
+
+def _items() -> list[ExternalRmaSubmissionItem]:
+    return [
+        ExternalRmaSubmissionItem(
+            source_request_id=UUID("11111111-1111-4111-8111-111111111111"),
+            sn="SN-1",
+            payload={"sn": "SN-1", "customer_code": "CM1"},
+        ),
+        ExternalRmaSubmissionItem(
+            source_request_id=UUID("22222222-2222-4222-8222-222222222222"),
+            sn="SN-2",
+            payload={"sn": "SN-2", "customer_code": "CM1"},
+        ),
+    ]
+
+
+def _configure_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
     monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_MODE", "table")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_COLUMN_MAP", mapping)
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
-    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
-
-    result = external_relay._write_ticket_snapshot(
-        {
-            "submission_key": "stable-key",
-            "sn": "SN-1",
-            "customer_code": "CM001",
-            "material_code": "MAT001",
-            "repair_fee": "1200.00",
-            "tax_rate": "13.0000",
-        }
-    )
-
-    assert result == {
-        "status": "succeeded",
-        "remote_record_key": "CALL-1001",
-        "idempotent_reuse": False,
-    }
-    assert len(calls) == 1
-    assert "OUTPUT INSERTED.[callID]" in calls[0][0]
-    assert "[internalSN]" in calls[0][0]
-    assert "[submission_key]" not in calls[0][0]
-    assert "tax_rate" not in calls[0][0]
-
-
-def test_sqlserver_rma_poll_uses_call_id_and_reads_customer_number(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: dict[str, object] = {}
-
-    class Result:
-        def fetchone(self):
-            return ("CALL-1001", "2026072801")
-
-    class Cursor:
-        def execute(self, sql, value):
-            seen["sql"] = sql
-            seen["value"] = value
-            return Result()
-
-    class Connection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def cursor(self):
-            return Cursor()
-
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RMA_COLUMN", "U_CustomerNum")
-    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
-
-    result = external_relay._fetch_rma_result("CALL-1001")
-
-    assert result == {"remote_call_id": "CALL-1001", "rma_no": "2026072801"}
-    assert "[callID], [U_CustomerNum]" in str(seen["sql"])
-    assert seen["value"] == "CALL-1001"
-
-
-def test_sqlserver_unknown_insert_result_is_not_automatically_retried(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    statements: list[str] = []
-
-    class Cursor:
-        def execute(self, sql, _params):
-            statements.append(sql)
-            raise OSError("connection lost after execute")
-
-    class Connection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def cursor(self):
-            return Cursor()
-
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_MODE", "table")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN", "SourceRequestID")
     monkeypatch.setattr(
         settings,
         "RELAY_SQLSERVER_RESULT_COLUMN_MAP",
-            {"sn": "internalSN"},
-        )
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "callID")
-    monkeypatch.setattr(external_relay, "_connect", lambda: Connection())
+        {"sn": "internalSN", "customer_code": "customer"},
+    )
 
-    with pytest.raises(
-        external_relay.RelaySubmissionUncertainError,
-        match="RELAY_SUBMIT_RESULT_UNCERTAIN",
-    ):
-        external_relay._write_ticket_snapshot(
-            {"submission_key": "stable-key", "sn": "SN-1"}
-        )
 
-    assert len(statements) == 1
-    assert statements[0].startswith("INSERT INTO")
+def test_sqlserver_submits_all_sn_in_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_mapping(monkeypatch)
+    connection = _Connection()
+    adapter = SqlServerSapMiddlewareAdapter()
+    monkeypatch.setattr(adapter, "_connect", lambda: connection)
+    adapter._submit_sync(_items())
+    assert connection.committed is True
+    assert connection.rolled_back is False
+    assert len(connection.cursor_value.calls) == 2
+    assert "[SourceRequestID]" in connection.cursor_value.calls[0][0]
+    assert "CallID" not in connection.cursor_value.calls[0][0]
+
+
+def test_sqlserver_rolls_back_whole_batch_on_known_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_mapping(monkeypatch)
+    connection = _Connection(fail_on=2)
+    adapter = SqlServerSapMiddlewareAdapter()
+    monkeypatch.setattr(adapter, "_connect", lambda: connection)
+    with pytest.raises(SapTransactionError):
+        adapter._submit_sync(_items())
+    assert connection.committed is False
+    assert connection.rolled_back is True
+
+
+def test_sqlserver_reports_unknown_when_rollback_cannot_be_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_mapping(monkeypatch)
+    connection = _Connection(fail_on=2, rollback_fails=True)
+    adapter = SqlServerSapMiddlewareAdapter()
+    monkeypatch.setattr(adapter, "_connect", lambda: connection)
+    with pytest.raises(SapUnknownCommitStateError):
+        adapter._submit_sync(_items())

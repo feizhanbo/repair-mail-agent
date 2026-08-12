@@ -681,7 +681,7 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
                 ticket_item_id=irreversible_item.id,
                 relay_export_id=irreversible_relay.id,
                 ticket_version=1,
-                submission_key=f"{batch}-submission",
+                source_request_id=f"{batch}-submission",
                 payload_hash="b" * 64,
                 status="accepted",
                 remote_call_id=f"{batch}-call",

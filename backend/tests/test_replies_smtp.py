@@ -146,6 +146,39 @@ def test_send_reply_keeps_starttls_for_port_587(monkeypatch: pytest.MonkeyPatch)
     assert actions.index("starttls") < actions.index("login")
 
 
+def test_send_reply_uses_the_prebuilt_archived_message_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple] = []
+    sent_messages: list[object] = []
+    _configure_smtp(monkeypatch, port=465)
+
+    class CapturingSMTP(FakeSMTP):
+        def send_message(self, message) -> None:
+            sent_messages.append(message)
+            super().send_message(message)
+
+    monkeypatch.setattr(
+        replies.smtplib,
+        "SMTP_SSL",
+        lambda host, port, timeout: CapturingSMTP(calls, "ssl", host, port, timeout),
+    )
+    reply = _reply()
+    reply.id = 44
+    message_id = replies._smtp_message_id(reply)
+    archived_message = replies._build_reply_message(reply, message_id)
+    archived_bytes = archived_message.as_bytes()
+
+    ok, returned_message_id, error = replies._send_reply_via_smtp(
+        reply,
+        message=archived_message,
+    )
+
+    assert ok is True
+    assert error is None
+    assert returned_message_id == message_id
+    assert sent_messages == [archived_message]
+    assert sent_messages[0].as_bytes() == archived_bytes
+
+
 def test_send_reply_blocks_non_whitelisted_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_smtp(monkeypatch, port=465)
     reply = _reply()

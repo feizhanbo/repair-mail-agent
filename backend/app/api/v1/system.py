@@ -10,8 +10,8 @@ from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
-from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, WorkflowStatus, WorkflowTransition
-from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SystemConfigUpdateRequest
+from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition
+from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SapSnSyncApprovalRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
 from app.services.external_relay import relay_configuration_status
@@ -19,9 +19,53 @@ from app.services.mail_test_preflight import MailTestPreflightError, run_mail_te
 from app.services.mail_safety import test_mail_configuration_reasons
 from app.services.rma_test_preflight import build_rma_test_preflight
 from app.services.runtime_config import read_runtime_config, write_runtime_config
+from app.services.sap_sn_sync import apply_sn_sync_batch, create_sn_sync_batch, serialize_sync_batch
 from app.services.storage import find_orphan_oss_objects
 
 router = APIRouter()
+
+
+@router.post("/sap-sn-sync")
+async def start_sap_sn_sync(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    result = await create_sn_sync_batch(session, user_id=current_user.id)
+    await session.commit()
+    return ok(result, "SAP SN full snapshot completed")
+
+
+@router.get("/sap-sn-sync/{batch_id}")
+async def get_sap_sn_sync(
+    batch_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    del current_user
+    batch = await session.get(SapSnSyncBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAP_SN_SYNC_BATCH_NOT_FOUND")
+    return ok(serialize_sync_batch(batch))
+
+
+@router.post("/sap-sn-sync/{batch_id}/apply")
+async def approve_sap_sn_sync(
+    batch_id: int,
+    payload: SapSnSyncApprovalRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    try:
+        result = await apply_sn_sync_batch(
+            session,
+            batch_id=batch_id,
+            user_id=current_user.id,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await session.commit()
+    return ok(result, "SAP SN snapshot applied")
 
 
 def _config_payload() -> dict:

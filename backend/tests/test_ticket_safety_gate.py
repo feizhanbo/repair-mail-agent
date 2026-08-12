@@ -83,14 +83,10 @@ async def test_sn_validation_uses_local_mirror_and_never_calls_sql_when_disabled
         source_system="local",
     )
 
-    async def fail_network(_sn: str):
-        raise AssertionError("SQL Server lookup must not run while disabled")
-
     async def fake_ticket_and_items(_session, _ticket_id):
         return ticket, [item]
 
     monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", False)
-    monkeypatch.setattr(ticket_safety, "validate_sn_against_relay", fail_network)
     monkeypatch.setattr(ticket_safety, "_ticket_and_items", fake_ticket_and_items)
 
     report = await ticket_safety.build_sn_validation_report(ScalarSession(asset, None), ticket_id=1)
@@ -250,7 +246,6 @@ async def test_manual_ready_resolution_clears_historical_parse_markers(monkeypat
     monkeypatch.setattr(ticket_safety, "validate_ticket_sn_core", fake_sn)
     monkeypatch.setattr(ticket_safety, "build_safety_report", fake_safety)
     monkeypatch.setattr(ticket_safety, "transition_ticket", fake_transition)
-    monkeypatch.setattr(ticket_safety, "relay_configured", lambda: False)
     monkeypatch.setattr(
         ticket_safety,
         "resolve_and_snapshot_ticket_policy",

@@ -18,7 +18,7 @@ REQUIRED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "m0h5c6d7e8f9"
+REQUIRED_REVISION = "q4l9g0b1c2d3"
 
 
 def _sha256(path: Path) -> str:

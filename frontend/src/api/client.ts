@@ -37,6 +37,7 @@ import type {
   StatisticsSummary,
   SystemConfig,
   SystemInfo,
+  SapSnSyncBatch,
   SystemRuntimeStatus,
   Ticket,
   TicketDetail,
@@ -249,9 +250,8 @@ export const api = {
   confirmLateSapResult: (id: number) => postData<Record<string, unknown>>(`/tickets/${id}/sap-export/confirm-late`),
   reconcileSapSubmission: (
     ticketId: number,
-    lineId: number,
-    body: { outcome: 'accepted' | 'not_inserted'; reason: string; call_id?: string },
-  ) => postData<Record<string, unknown>>(`/tickets/${ticketId}/sap-export/lines/${lineId}/reconcile`, body),
+    body: { reason: string },
+  ) => postData<Record<string, unknown>>(`/tickets/${ticketId}/sap-export/reconcile`, body),
   resolveTicketPolicy: (id: number) =>
     postData<Record<string, unknown>>(`/tickets/${id}/policy/resolve`),
   overrideTicketPolicy: (
@@ -342,6 +342,9 @@ export const api = {
   markNotificationCenterGroupRead: (ticketId: number) => postData<{ ticket_id: number }>(`/notifications/center/${ticketId}/read`),
   markNotificationRead: (id: number) => postData<NotificationEvent>(`/notifications/${id}/read`),
   systemInfo: () => getData<SystemInfo>('/system/info'),
+  startSapSnSync: () => postData<SapSnSyncBatch>('/system/sap-sn-sync'),
+  applySapSnSync: (batchId: number, reason: string) =>
+    postData<SapSnSyncBatch>(`/system/sap-sn-sync/${batchId}/apply`, { reason }),
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
   mailTestPreflight: () => postData<MailTestPreflightResult>('/system/mail-test/preflight'),

@@ -576,10 +576,16 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
     return created
 
 
-async def cleanup_temporary_master_data(manifest_path: Path) -> dict[str, Any]:
-    validate_manifest(manifest_path, require_approval=True)
+async def cleanup_temporary_master_data(
+    manifest_path: Path,
+    *,
+    state_path: Path | None = None,
+    skip_manifest_validation: bool = False,
+) -> dict[str, Any]:
+    if not skip_manifest_validation:
+        validate_manifest(manifest_path, require_approval=True)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    state_path = manifest_path.parent / "execution-state.json"
+    state_path = state_path or manifest_path.parent / "execution-state.json"
     if not state_path.exists():
         return {
             "sn_assets_deleted": 0,

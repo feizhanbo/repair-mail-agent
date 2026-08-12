@@ -66,9 +66,11 @@ class TicketExportConfirmRequest(BaseModel):
 
 
 class SapSubmitReconcileRequest(BaseModel):
-    outcome: Literal["accepted", "not_inserted"]
     reason: str = Field(min_length=1, max_length=500)
-    call_id: str | None = Field(default=None, max_length=191)
+
+
+class SapSnSyncApprovalRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class RmaManualPolicyApprovalRequest(BaseModel):
