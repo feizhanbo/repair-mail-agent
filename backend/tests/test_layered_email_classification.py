@@ -139,6 +139,32 @@ async def test_email_level_unknown_task_can_finish_without_ticket(monkeypatch: p
 
 
 @pytest.mark.anyio
+async def test_unbound_manual_task_keeps_legacy_sap_enqueue_during_graph_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = ManualReviewTask(id=13, ticket_id=10, email_id=33, task_type="data_review", status="claimed")
+    ticket = SimpleNamespace(id=10, current_status_code="manual_review", ticket_category="auto_repair")
+    validate = AsyncMock(return_value={"status": "ready_for_export"})
+    monkeypatch.setattr(manual_review, "get_task", AsyncMock(return_value=task))
+    monkeypatch.setattr(manual_review, "get_ticket", AsyncMock(return_value=ticket))
+    monkeypatch.setattr(manual_review, "get_ticket_detail", AsyncMock(return_value={"id": 10}))
+    monkeypatch.setattr(manual_review, "validate_and_mark_ready_for_export", validate)
+    monkeypatch.setattr(manual_review, "log_operation", AsyncMock())
+    monkeypatch.setattr(manual_review, "resolve_notifications_for_target", AsyncMock())
+
+    result = await manual_review.resolve_task(
+        SimpleNamespace(),
+        task_id=13,
+        user_id=5,
+        resolution="validated",
+        next_action="transition_ready_for_export",
+    )
+
+    assert result["task"]["id"] == 13
+    assert validate.await_args.kwargs["enqueue_relay_job"] is True
+
+
+@pytest.mark.anyio
 async def test_second_sidecar_ticket_preserves_first_thread_pointer(monkeypatch: pytest.MonkeyPatch) -> None:
     added: list[object] = []
 

@@ -17,6 +17,7 @@ from app.models import (
     ExportSap,
     ExternalOperationRecord,
     JobRunLog,
+    ManualReviewTask,
     OperationLog,
     OssObject,
     RepairTicket,
@@ -26,6 +27,8 @@ from app.models import (
     TicketRelayExport,
     TicketRma,
     User,
+    WorkflowExecution,
+    WorkflowInterrupt,
 )
 from app.services import deletions
 from app.services.storage import OssDeleteResult, StorageDeleteError
@@ -104,6 +107,7 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
     created_ai_ids: list[int] = []
     created_reply_ids: list[int] = []
     created_thread_ids: list[int] = []
+    created_execution_ids: list[int] = []
     audit_ids: list[int] = []
     physically_deleted: list[tuple[str, str]] = []
     fail_once: set[str] = set()
@@ -260,7 +264,19 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
                 parse_status="pending",
             )
             session.add(email_attachment)
+            email_execution = WorkflowExecution(
+                execution_id=f"{batch}-email-execution",
+                graph_thread_id=f"{batch}-email-thread",
+                workflow_name="delete_e2e",
+                workflow_version="test",
+                state_schema_version="test",
+                execution_mode="shadow",
+                status="completed",
+                email_id=email.id,
+            )
+            session.add(email_execution)
             await session.commit()
+            created_execution_ids.append(email_execution.id)
 
             preview = await deletions.preview_email(session, email.id, int(user_id))
             assert preview["deletable"] is True
@@ -280,6 +296,10 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
             assert await session.get(EmailAttachment, email_attachment.id) is None
             assert await session.get(OssObject, raw_object.id) is None
             assert await session.get(OssObject, email_attachment_object.id) is None
+            session.expire_all()
+            retained_email_execution = await session.get(WorkflowExecution, email_execution.id)
+            assert retained_email_execution is not None
+            assert retained_email_execution.email_id is None
             with pytest.raises(deletions.DeletionError) as missing_email:
                 await deletions.preview_email(session, email.id, int(user_id))
             assert missing_email.value.status_code == 404
@@ -603,7 +623,41 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
                 review_status="pending",
             )
             session.add(draft_reply)
+            manual_task = ManualReviewTask(
+                ticket_id=ticket.id,
+                email_id=source_email.id,
+                task_type="delete_e2e",
+                status="resolved",
+            )
+            session.add(manual_task)
+            await session.flush()
+            ticket_execution = WorkflowExecution(
+                execution_id=f"{batch}-ticket-execution",
+                graph_thread_id=f"{batch}-ticket-thread",
+                workflow_name="delete_e2e",
+                workflow_version="test",
+                state_schema_version="test",
+                execution_mode="active",
+                status="completed",
+                email_id=source_email.id,
+                ticket_id=ticket.id,
+                trigger_job_id=running_job.id,
+            )
+            session.add(ticket_execution)
+            await session.flush()
+            ticket_interrupt = WorkflowInterrupt(
+                execution_id=ticket_execution.execution_id,
+                interrupt_id=f"{batch}-interrupt",
+                checkpoint_id=f"{batch}-checkpoint",
+                checkpoint_step=1,
+                manual_task_id=manual_task.id,
+                status="resumed",
+                request_payload={"kind": "delete_e2e"},
+                resumed_by_user_id=int(user_id),
+            )
+            session.add(ticket_interrupt)
             await session.commit()
+            created_execution_ids.append(ticket_execution.id)
             created_reply_ids.append(draft_reply.id)
             created_job_ids.append(running_job.id)
 
@@ -640,6 +694,15 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
             assert await session.get(EmailTicketLink, related_link.id) is None
             assert await session.get(ReplyRecord, draft_reply.id) is None
             assert await session.get(AiCallLog, ticket_ai.id) is None
+            session.expire_all()
+            retained_ticket_execution = await session.get(WorkflowExecution, ticket_execution.id)
+            retained_ticket_interrupt = await session.get(WorkflowInterrupt, ticket_interrupt.id)
+            assert retained_ticket_execution is not None
+            assert retained_ticket_execution.ticket_id is None
+            assert retained_ticket_execution.email_id == source_email.id
+            assert retained_ticket_execution.trigger_job_id == running_job.id
+            assert retained_ticket_interrupt is not None
+            assert retained_ticket_interrupt.manual_task_id is None
             assert await session.get(Email, source_email.id) is not None
             assert await session.get(Email, related_email.id) is not None
             assert await session.get(EmailAttachment, source_attachment.id) is not None
@@ -789,6 +852,9 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
             assert len(physically_deleted) == 4
         finally:
             await session.rollback()
+            await session.execute(
+                delete(WorkflowExecution).where(WorkflowExecution.id.in_(created_execution_ids or [-1]))
+            )
             if audit_ids:
                 delete_job_ids = list(
                     (

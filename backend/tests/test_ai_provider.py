@@ -43,6 +43,7 @@ async def test_deepseek_provider_parses_valid_json() -> None:
                 "choices": [
                     {
                         "message": {
+                            "role": "assistant",
                             "content": json.dumps(
                                 {
                                     "intent_type": "new_repair",
@@ -75,7 +76,7 @@ async def test_deepseek_provider_parses_valid_json() -> None:
 @pytest.mark.anyio
 async def test_deepseek_provider_rejects_empty_content() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]})
 
     with pytest.raises(AiProviderError, match="AI_PROVIDER_EMPTY_CONTENT"):
         await make_provider(handler).chat_json(messages=[{"role": "user", "content": "return JSON"}], response_model=AiExtractResponse)
@@ -84,7 +85,7 @@ async def test_deepseek_provider_rejects_empty_content() -> None:
 @pytest.mark.anyio
 async def test_deepseek_provider_rejects_invalid_json_output() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": "not-json"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "not-json"}}]})
 
     with pytest.raises(AiProviderError, match="AI_PROVIDER_OUTPUT_NOT_JSON"):
         await make_provider(handler).chat_json(messages=[{"role": "user", "content": "return JSON"}], response_model=AiExtractResponse)
@@ -114,7 +115,7 @@ async def test_qwen_schema_failure_keeps_request_and_response_for_detail_log() -
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": json.dumps({"unexpected": True})}}],
+                "choices": [{"message": {"role": "assistant", "content": json.dumps({"unexpected": True})}}],
                 "usage": {"total_tokens": 7},
             },
         )

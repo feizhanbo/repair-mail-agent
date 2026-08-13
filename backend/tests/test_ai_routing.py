@@ -35,8 +35,16 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
 
     class FakeQwenProvider:
-        def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: float):
-            del api_key, base_url, timeout_seconds
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            base_url: str,
+            model: str,
+            timeout_seconds: float,
+            **kwargs,
+        ):
+            del api_key, base_url, timeout_seconds, kwargs
             seen["model"] = model
 
         async def vl_chat(self, **kwargs):

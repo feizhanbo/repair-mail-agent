@@ -4,9 +4,13 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import Settings
+from app.services import gold_replay
 from tools import run_gold_mail_regression as tool
 from tools.test_relay_server import RelayControl, RelayRecord, TestRelayStore
 
@@ -109,3 +113,112 @@ def test_cleanup_apply_requires_preview_plan_hash(tmp_path: Path) -> None:
     args = parser.parse_args(["cleanup", "--manifest", str(_manifest(tmp_path)), "--apply"])
     assert args.apply is True
     assert args.plan_hash is None
+
+
+def test_langgraph_gold_evidence_requires_v2_checkpoint_and_stable_status(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tool,
+        "settings",
+        Settings(
+            _env_file=None,
+            WORKFLOW_ENGINE="langgraph",
+            LANGGRAPH_CHECKPOINT_DATABASE_URL="postgresql://unused/graph",
+        ),
+    )
+    valid = {
+        "found": True,
+        "workflow_version": "langgraph-v2",
+        "execution_mode": "langgraph",
+        "status": "completed",
+        "checkpoint_present": True,
+        "checkpoint_step": 12,
+        "last_error_code": None,
+        "interrupts": [
+            {
+                "status": "resumed",
+                "checkpoint_present": True,
+                "checkpoint_step": 8,
+                "error_present": False,
+            }
+        ],
+    }
+    assert tool._assert_graph_execution_evidence(valid) == []
+
+    invalid = {
+        **valid,
+        "workflow_version": "langgraph-v1",
+        "status": "failed",
+        "checkpoint_present": False,
+        "checkpoint_step": None,
+        "last_error_code": "WORKFLOW_CHECKPOINT_MISSING",
+        "interrupts": [
+            {
+                "status": "pending",
+                "checkpoint_present": False,
+                "checkpoint_step": None,
+                "error_present": True,
+            }
+        ],
+    }
+    assert set(tool._assert_graph_execution_evidence(invalid)) == {
+        "LANGGRAPH_WORKFLOW_VERSION_MISMATCH",
+        "LANGGRAPH_EXECUTION_CHECKPOINT_MISSING",
+        "LANGGRAPH_EXECUTION_NOT_STABLE",
+        "LANGGRAPH_EXECUTION_HAS_ERROR",
+        "LANGGRAPH_INTERRUPT_CHECKPOINT_MISSING",
+        "LANGGRAPH_INTERRUPT_HAS_ERROR",
+    }
+
+
+def test_legacy_gold_evidence_does_not_require_graph_ownership(monkeypatch) -> None:
+    monkeypatch.setattr(tool, "settings", Settings(_env_file=None, WORKFLOW_ENGINE="legacy"))
+    assert tool._assert_graph_execution_evidence({"found": False}) == []
+
+
+@pytest.mark.anyio
+async def test_gold_checkpoint_cleanup_deletes_only_planned_threads(monkeypatch) -> None:
+    saver = SimpleNamespace(adelete_thread=AsyncMock(), alist=None)
+
+    async def alist(_config, *, limit):
+        assert limit == 1
+        if False:
+            yield None
+
+    saver.alist = alist
+
+    class Context:
+        async def __aenter__(self):
+            return saver
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(gold_replay, "postgres_checkpointer", lambda *_args, **_kwargs: Context())
+
+    assert await gold_replay._delete_gold_graph_checkpoints(["thread-a", "thread-b"]) == 0
+    assert saver.adelete_thread.await_args_list[0].args == ("thread-a",)
+    assert saver.adelete_thread.await_args_list[1].args == ("thread-b",)
+
+
+@pytest.mark.anyio
+async def test_gold_checkpoint_cleanup_fails_closed_when_thread_remains(monkeypatch) -> None:
+    saver = SimpleNamespace(adelete_thread=AsyncMock(), alist=None)
+
+    async def alist(_config, *, limit):
+        assert limit == 1
+        yield object()
+
+    saver.alist = alist
+
+    class Context:
+        async def __aenter__(self):
+            return saver
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(gold_replay, "postgres_checkpointer", lambda *_args, **_kwargs: Context())
+
+    with pytest.raises(gold_replay.GoldReplayError) as exc:
+        await gold_replay._delete_gold_graph_checkpoints(["thread-a"])
+    assert exc.value.code == "GOLD_REPLAY_CHECKPOINT_CLEANUP_VERIFY_FAILED"

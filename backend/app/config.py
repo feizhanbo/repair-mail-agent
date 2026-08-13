@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
     DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
     DB_SMOKE_DATABASE_URL: str = ""
+    LANGGRAPH_CHECKPOINT_DATABASE_URL: str = ""
+    LANGGRAPH_CHECKPOINT_SMOKE_DATABASE_URL: str = ""
+    LANGGRAPH_CHECKPOINT_AUTO_SETUP: bool = False
+    LANGGRAPH_STRICT_MSGPACK: bool = True
+    LANGGRAPH_RELEASE_EVIDENCE_FILE: str = ""
+    LANGGRAPH_RELEASE_EVIDENCE_ROOT: str = "/app/release-evidence"
+    LANGGRAPH_RELEASE_EVIDENCE_MAX_AGE_HOURS: int = 168
+    APP_RELEASE_COMMIT: str = ""
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -54,6 +62,8 @@ class Settings(BaseSettings):
     AI_BASE_URL: str = "https://api.deepseek.com"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_RETRIES: int = 2
+    AI_MAX_TOKENS: int = 4096
+    AI_STRUCTURED_OUTPUT_METHOD: str = "json_mode"
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
@@ -66,6 +76,10 @@ class Settings(BaseSettings):
     PDF_MAX_PARSE_PAGES: int = 15
     PDF_PREVIEW_MAX_PAGES: int = 5
     ATTACHMENT_MAX_ARCHIVE_BYTES: int = 200 * 1024 * 1024
+    ARCHIVE_MAX_MEMBERS: int = 1000
+    ARCHIVE_MAX_EXPANDED_BYTES: int = 100 * 1024 * 1024
+    ARCHIVE_MAX_COMPRESSION_RATIO: int = 100
+    ARCHIVE_MAX_DEPTH: int = 2
     EMAIL_MAX_ARCHIVE_BYTES: int = 500 * 1024 * 1024
     EMAIL_MAX_ATTACHMENTS: int = 50
     INLINE_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
@@ -170,6 +184,9 @@ class Settings(BaseSettings):
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
     ASYNC_JOB_STALE_SECONDS: int = 900
+    WORKFLOW_ENGINE: str = "legacy"
+    LANGGRAPH_EMAIL_ALLOWLIST: list[int] = []
+    LANGGRAPH_ROLLOUT_PERCENT: int = 100
 
     AUTO_SEND_ENABLED: bool = False
     AUTO_FOLLOWUP_ENABLED: bool = False
@@ -227,8 +244,49 @@ class Settings(BaseSettings):
             return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
         return value
 
+    @field_validator("WORKFLOW_ENGINE")
+    @classmethod
+    def validate_workflow_engine(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"legacy", "shadow", "langgraph"}:
+            raise ValueError("WORKFLOW_ENGINE must be legacy, shadow, or langgraph")
+        return normalized
+
+    @field_validator("LANGGRAPH_CHECKPOINT_DATABASE_URL", "LANGGRAPH_CHECKPOINT_SMOKE_DATABASE_URL")
+    @classmethod
+    def validate_checkpoint_database_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized and not normalized.lower().startswith(("postgresql://", "postgres://")):
+            raise ValueError("LANGGRAPH_CHECKPOINT_DATABASE_URL must be a PostgreSQL URL")
+        return normalized
+
+    @field_validator("LANGGRAPH_ROLLOUT_PERCENT")
+    @classmethod
+    def validate_langgraph_rollout_percent(cls, value: int) -> int:
+        if not 0 <= value <= 100:
+            raise ValueError("LANGGRAPH_ROLLOUT_PERCENT must be between 0 and 100")
+        return value
+
+    @field_validator("ASYNC_JOB_STALE_SECONDS")
+    @classmethod
+    def validate_async_job_stale_seconds(cls, value: int) -> int:
+        if value < 30:
+            raise ValueError("ASYNC_JOB_STALE_SECONDS must be at least 30")
+        return value
+
+    @field_validator("LANGGRAPH_RELEASE_EVIDENCE_MAX_AGE_HOURS")
+    @classmethod
+    def validate_release_evidence_max_age(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("LANGGRAPH_RELEASE_EVIDENCE_MAX_AGE_HOURS must be positive")
+        return value
+
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self) -> "Settings":
+        if self.WORKFLOW_ENGINE == "langgraph" and not self.LANGGRAPH_CHECKPOINT_DATABASE_URL.strip():
+            raise ValueError(
+                "LANGGRAPH_CHECKPOINT_DATABASE_URL is required when WORKFLOW_ENGINE=langgraph"
+            )
         if self.APP_ENV.strip().lower() not in {"prod", "production"}:
             return self
         insecure: list[str] = []
@@ -236,6 +294,8 @@ class Settings(BaseSettings):
             insecure.append("JWT_SECRET")
         if "change-me" in self.DATABASE_URL.lower():
             insecure.append("DATABASE_URL")
+        if self.WORKFLOW_ENGINE == "langgraph" and "change-me" in self.LANGGRAPH_CHECKPOINT_DATABASE_URL.lower():
+            insecure.append("LANGGRAPH_CHECKPOINT_DATABASE_URL")
         if len(self.DEFAULT_ADMIN_PASSWORD) < 12 or "change-me" in self.DEFAULT_ADMIN_PASSWORD.lower():
             insecure.append("DEFAULT_ADMIN_PASSWORD")
         if not self.CORS_ALLOWED_ORIGINS or "*" in self.CORS_ALLOWED_ORIGINS:

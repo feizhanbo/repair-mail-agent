@@ -9,7 +9,15 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 
-CORE_TABLES = ("emails", "repair_tickets", "reply_records", "mail_fetch_records", "job_run_logs")
+CORE_TABLES = (
+    "emails",
+    "repair_tickets",
+    "reply_records",
+    "mail_fetch_records",
+    "job_run_logs",
+    "workflow_executions",
+    "workflow_interrupts",
+)
 REQUIRED_RECEIPT_COLUMNS = (
     "device_received_at",
     "device_received_source",
@@ -18,7 +26,7 @@ REQUIRED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "q4l9g0b1c2d3"
+REQUIRED_REVISION = "r5m0h1c2d3e4"
 
 
 def _sha256(path: Path) -> str:

@@ -11,7 +11,12 @@ from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import JobRunLog
-from app.services.jobs import enqueue_job, serialize_job
+from app.services.jobs import (
+    enqueue_job,
+    reactivate_failed_graph_start_job,
+    reactivate_stale_graph_job,
+    serialize_job,
+)
 from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 
@@ -23,6 +28,15 @@ class ExportJobRequest(BaseModel):
     kind: str
     filters: dict = Field(default_factory=dict)
     ids: list[int] = Field(default_factory=list, max_length=1000)
+
+
+class StaleGraphJobRetryRequest(BaseModel):
+    confirm_previous_worker_stopped: bool
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class FailedGraphStartRetryRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 _EXPORT_FILTERS = {
@@ -113,6 +127,55 @@ async def get_job(
     if not _can_access_job(current_user, job):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
     return ok(serialize_job(job))
+
+
+@router.post("/{job_id}/retry-stale-graph")
+async def retry_stale_graph_job(
+    job_id: int,
+    payload: StaleGraphJobRetryRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    if "admin" not in current_user.roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    try:
+        job = await reactivate_stale_graph_job(
+            session,
+            job_id=job_id,
+            operator_user_id=current_user.id,
+            confirm_previous_worker_stopped=payload.confirm_previous_worker_stopped,
+            reason=payload.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await session.commit()
+    return ok(serialize_job(job), "stale graph job retry queued")
+
+
+@router.post("/{job_id}/retry-failed-graph-start")
+async def retry_failed_graph_start_job(
+    job_id: int,
+    payload: FailedGraphStartRetryRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    if "admin" not in current_user.roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    try:
+        job = await reactivate_failed_graph_start_job(
+            session,
+            job_id=job_id,
+            operator_user_id=current_user.id,
+            reason=payload.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await session.commit()
+    return ok(serialize_job(job), "failed graph start retry queued")
 
 
 @router.get("/{job_id}/download-url")

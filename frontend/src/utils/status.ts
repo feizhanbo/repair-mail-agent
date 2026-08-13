@@ -6,6 +6,7 @@ export const ticketStatusLabels: Record<string, string> = {
   manual_review: '人工复核',
   ready_for_export: '可导出',
   rma_sent: 'RMA 已发送',
+  resolved: '已解决',
   error: '异常',
   closed: '已关闭',
 };
@@ -18,6 +19,7 @@ export const ticketStatusColors: Record<string, string> = {
   manual_review: 'orange',
   ready_for_export: 'green',
   rma_sent: 'cyan',
+  resolved: 'green',
   error: 'red',
   closed: 'default',
 };

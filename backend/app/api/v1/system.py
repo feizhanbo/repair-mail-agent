@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +10,7 @@ from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
-from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition
+from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowExecution, WorkflowInterrupt, WorkflowStatus, WorkflowTransition
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SapSnSyncApprovalRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
 from app.services.common import model_to_dict
@@ -21,6 +21,7 @@ from app.services.rma_test_preflight import build_rma_test_preflight
 from app.services.runtime_config import read_runtime_config, write_runtime_config
 from app.services.sap_sn_sync import apply_sn_sync_batch, create_sn_sync_batch, serialize_sync_batch
 from app.services.storage import find_orphan_oss_objects
+from app.workflows.executions import retry_pending_external_interrupt
 
 router = APIRouter()
 
@@ -150,6 +151,7 @@ async def system_info(
 
 @router.get("/runtime-status")
 async def runtime_status(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
@@ -165,6 +167,28 @@ async def runtime_status(
     )
     imap_retry_count = int(
         await session.scalar(select(func.count()).select_from(MailFetchRecord).where(MailFetchRecord.fetch_status == "retry_wait")) or 0
+    )
+    workflow_status_counts = {
+        workflow_status: int(
+            await session.scalar(
+                select(func.count())
+                .select_from(WorkflowExecution)
+                .where(WorkflowExecution.status == workflow_status)
+            )
+            or 0
+        )
+        for workflow_status in ("waiting_human", "waiting_external", "resume_queued", "failed")
+    }
+    pending_interrupt_error_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkflowInterrupt)
+            .where(
+                WorkflowInterrupt.status == "pending",
+                WorkflowInterrupt.error_message.is_not(None),
+            )
+        )
+        or 0
     )
     orphan_objects = await find_orphan_oss_objects(session, limit=1000)
     provider_status: dict[str, dict | None] = {}
@@ -187,9 +211,20 @@ async def runtime_status(
         "failed_job_count": failed_jobs,
         "retry_job_count": retry_jobs,
         "imap_retry_count": imap_retry_count,
+        "workflow_execution_counts": workflow_status_counts,
+        "pending_workflow_interrupt_error_count": pending_interrupt_error_count,
         "oss_orphan_count": len(orphan_objects),
         "oss_orphans_truncated": len(orphan_objects) >= 1000,
         "ai_provider_status": provider_status,
+        "workflow_engine": settings.WORKFLOW_ENGINE,
+        "langgraph_release_gate": getattr(
+            request.app.state,
+            "langgraph_release_gate",
+            {
+                "required": settings.WORKFLOW_ENGINE == "langgraph",
+                "verified": False,
+            },
+        ),
     })
 
 
@@ -253,6 +288,28 @@ async def rma_test_preflight(
     del current_user
     # This endpoint only builds and reparses local bytes. It never opens SMTP.
     return ok(build_rma_test_preflight().result, "RMA test email offline preflight completed")
+
+
+@router.post("/workflow-executions/{execution_id}/interrupts/{interrupt_id}/retry")
+async def retry_workflow_external_interrupt(
+    execution_id: str,
+    interrupt_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
+    try:
+        result = await retry_pending_external_interrupt(
+            session,
+            execution_id=execution_id,
+            interrupt_id=interrupt_id,
+            operator_user_id=current_user.id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await session.commit()
+    return ok(result, "workflow external interrupt retry queued")
 
 
 def _reply_template_payload(template: ReplyTemplate) -> dict:

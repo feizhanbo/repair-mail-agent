@@ -113,6 +113,8 @@ def _text_provider() -> DeepSeekProvider:
         base_url=settings.AI_BASE_URL,
         model=settings.AI_MODEL,
         timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+        max_tokens=settings.AI_MAX_TOKENS,
+        structured_output_method=settings.AI_STRUCTURED_OUTPUT_METHOD,
     )
 
 

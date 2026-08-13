@@ -110,9 +110,16 @@ def test_upgrade_step_timeout_is_reported_and_process_is_killed(
 def test_schema_audit_constants_match_release_head_and_models() -> None:
     from app.models import Base
 
-    assert check_sap_schema.EXPECTED_REVISION == "q4l9g0b1c2d3"
+    assert check_sap_schema.EXPECTED_REVISION == "r5m0h1c2d3e4"
     assert check_sap_schema.EXPECTED_BUSINESS_TABLE_COUNT == len(Base.metadata.tables)
     assert audit_mail_release.REQUIRED_REVISION == check_sap_schema.EXPECTED_REVISION
+    assert {"workflow_executions", "workflow_interrupts"} <= set(check_sap_schema.EXPECTED)
+    assert {"workflow_executions", "workflow_interrupts"} <= set(audit_mail_release.CORE_TABLES)
+    assert check_sap_schema.EXPECTED["workflow_executions"]["ondelete"] == {
+        "fk_workflow_executions_email": "SET NULL",
+        "fk_workflow_executions_ticket": "SET NULL",
+        "fk_workflow_executions_job": "SET NULL",
+    }
 
 
 def test_release_audit_rejects_stale_revision_and_invalid_close_route() -> None:
@@ -148,6 +155,11 @@ def test_full_migration_chain_can_render_offline_sql() -> None:
     assert result.returncode == 0, result.stderr[-2000:]
     assert "PRECONDITION: export_sap must contain zero legacy rows" in result.stdout
     assert "m0h5c6d7e8f9" in result.stdout
+    assert "CREATE TABLE workflow_executions" in result.stdout
+    assert result.stdout.count("checkpoint_id VARCHAR(100)") == 2
+    assert result.stdout.count("checkpoint_step INTEGER") == 2
+    assert result.stdout.count("ON DELETE SET NULL") >= 5
+    assert "ON DELETE CASCADE" in result.stdout
 
 
 def test_settings_normalize_legacy_aiomysql_url_without_changing_target() -> None:

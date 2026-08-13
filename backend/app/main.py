@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -16,9 +17,17 @@ from app.core.errors import http_exception_handler, unhandled_exception_handler,
 from app.core.request_context import bind_request_context, normalize_correlation_id, reset_request_context
 from app.models import JobRunLog
 from app.services.ai import maintain_ai_jsonl_logs
-from app.services.jobs import claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
+from app.services.jobs import (
+    JobLeaseLost,
+    claim_next_job,
+    enqueue_job,
+    execute_claimed_job,
+    recover_stale_jobs,
+    renew_job_lease,
+)
 from app.services.notification_task_repair import repair_notification_and_task_data
 from app.services.rma_pdf import validate_rma_runtime_health
+from app.services.release_evidence import verify_runtime_release_gate
 from app.services.runtime_config import read_runtime_config
 from app.services.common import utcnow
 
@@ -73,6 +82,7 @@ async def _scheduled_job_worker():
                 await claim_session.commit()
                 return
             job_id = job.id
+            owner_token = str(job.locked_by or "")
             await claim_session.commit()
         async with AsyncSessionLocal() as run_session:
             claimed_job = await run_session.get(JobRunLog, job_id)
@@ -86,10 +96,97 @@ async def _scheduled_job_worker():
                 user_agent="background-job-worker",
             )
             try:
-                await execute_claimed_job(run_session, claimed_job)
-                await run_session.commit()
+                await _execute_job_with_lease(
+                    run_session,
+                    claimed_job,
+                    owner_token=owner_token,
+                )
             finally:
                 reset_request_context(tokens)
+
+
+async def _execute_job_with_lease(
+    run_session,
+    claimed_job: JobRunLog,
+    *,
+    owner_token: str,
+) -> bool:
+    """Run one claimed job while a separately committed lease heartbeat fences it."""
+    stop_heartbeat = asyncio.Event()
+    lease_lost = asyncio.Event()
+    heartbeat = asyncio.create_task(
+        _job_lease_heartbeat(
+            job_id=claimed_job.id,
+            owner_token=owner_token,
+            stop=stop_heartbeat,
+            lease_lost=lease_lost,
+        )
+    )
+    execution = asyncio.create_task(
+        execute_claimed_job(
+            run_session,
+            claimed_job,
+            expected_owner_token=owner_token,
+        )
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {execution, heartbeat},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat in done and lease_lost.is_set() and not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            await run_session.rollback()
+            return False
+        await execution
+        if lease_lost.is_set():
+            await run_session.rollback()
+            return False
+        await run_session.commit()
+        return True
+    except JobLeaseLost:
+        await run_session.rollback()
+        return False
+    finally:
+        stop_heartbeat.set()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+
+
+async def _job_lease_heartbeat(
+    *,
+    job_id: int,
+    owner_token: str,
+    stop: asyncio.Event,
+    lease_lost: asyncio.Event,
+) -> None:
+    interval = _job_lease_heartbeat_interval(settings.ASYNC_JOB_STALE_SECONDS)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            pass
+        try:
+            async with AsyncSessionLocal() as session:
+                renewed = await renew_job_lease(
+                    session,
+                    job_id=job_id,
+                    owner_token=owner_token,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("Job lease heartbeat failed: job_id=%s", job_id)
+            lease_lost.set()
+            return
+        if not renewed:
+            lease_lost.set()
+            return
+
+
+def _job_lease_heartbeat_interval(stale_seconds: int) -> int:
+    """Keep at least three renewal opportunities inside the stale window."""
+    return max(1, min(30, stale_seconds // 3))
 
 
 async def _scheduled_ai_log_maintenance():
@@ -121,6 +218,27 @@ async def _scheduled_consistency_recovery():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    release_gate = verify_runtime_release_gate(settings)
+    app.state.langgraph_release_gate = (
+        {
+            "required": True,
+            "verified": True,
+            **release_gate,
+        }
+        if release_gate is not None
+        else {
+            "required": False,
+            "verified": False,
+            "workflow_engine": settings.WORKFLOW_ENGINE,
+        }
+    )
+    if release_gate is not None:
+        logger.info(
+            "LangGraph release evidence verified: schema=%s source_commit=%s sha256=%s",
+            release_gate["schema_version"],
+            release_gate["source_commit"],
+            release_gate["sha256"],
+        )
     logger.info(
         "Application starting: app_name=%s app_env=%s text_ai_provider=deepseek multimodal_provider=%s",
         settings.APP_NAME,

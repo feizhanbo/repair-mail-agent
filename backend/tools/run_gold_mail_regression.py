@@ -28,7 +28,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.config import settings
 from app.core.database import AsyncSessionLocal
-from app.models import User
+from app.models import User, WorkflowExecution, WorkflowInterrupt
 from app.services.gold_replay import (
     GoldReplayError,
     apply_gold_test_reset,
@@ -388,12 +388,24 @@ async def _reset(message_ids: list[str], *, suite_id: str, run_id: str, apply: b
         )
         if not user_id:
             raise GoldCliError("DEFAULT_ADMIN_USER_NOT_FOUND")
+        graph_thread_ids = list(plan["resource_ids"].get("graph_threads") or [])
         result = await apply_gold_test_reset(
             session, message_ids=message_ids, expected_plan_hash=plan["plan_hash"],
             suite_id=suite_id, run_id=run_id, user_id=int(user_id),
             reason=f"Approved gold regression replay cleanup for {suite_id}/{run_id}",
         )
-        result["verification"] = await verify_gold_test_reset(session, message_ids=message_ids)
+        result["verification"] = await verify_gold_test_reset(
+            session,
+            message_ids=message_ids,
+            graph_thread_ids=graph_thread_ids,
+        )
+        result["verification"]["checkpoint_thread_count"] = int(
+            result.get("checkpoint_thread_count") or 0
+        )
+        result["verification"]["verified"] = (
+            result["verification"]["verified"]
+            and result["verification"]["checkpoint_thread_count"] == 0
+        )
         return result
 
 
@@ -471,6 +483,73 @@ def _wait_for_case(client: Client, email_id: int, expected_status: str, expected
                 return last
         time.sleep(2)
     raise GoldCliError("CASE_TIMEOUT", details={"last": last})
+
+
+async def _graph_execution_evidence(email_id: int) -> dict[str, Any]:
+    """Collect sanitized ownership/recovery evidence for a gold-mail case."""
+    async with AsyncSessionLocal() as session:
+        execution = await session.scalar(
+            select(WorkflowExecution)
+            .where(
+                WorkflowExecution.email_id == email_id,
+                WorkflowExecution.workflow_name == "email_ticket",
+            )
+            .order_by(WorkflowExecution.id.desc())
+        )
+        if execution is None:
+            return {"found": False, "interrupts": []}
+        rows = (
+            await session.execute(
+                select(WorkflowInterrupt)
+                .where(WorkflowInterrupt.execution_id == execution.execution_id)
+                .order_by(WorkflowInterrupt.id)
+            )
+        ).scalars().all()
+        return {
+            "found": True,
+            "execution_id_sha256": hashlib.sha256(execution.execution_id.encode()).hexdigest(),
+            "workflow_version": execution.workflow_version,
+            "state_schema_version": execution.state_schema_version,
+            "execution_mode": execution.execution_mode,
+            "status": execution.status,
+            "checkpoint_present": bool(execution.checkpoint_id),
+            "checkpoint_step": execution.checkpoint_step,
+            "last_error_code": execution.last_error_code,
+            "interrupts": [
+                {
+                    "status": row.status,
+                    "manual": row.manual_task_id is not None,
+                    "checkpoint_present": bool(row.checkpoint_id),
+                    "checkpoint_step": row.checkpoint_step,
+                    "error_present": bool(row.error_message),
+                }
+                for row in rows
+            ],
+        }
+
+
+def _assert_graph_execution_evidence(evidence: dict[str, Any]) -> list[str]:
+    if settings.WORKFLOW_ENGINE != "langgraph":
+        return []
+    issues: list[str] = []
+    if not evidence.get("found"):
+        return ["LANGGRAPH_EXECUTION_MISSING"]
+    if evidence.get("workflow_version") != "langgraph-v2":
+        issues.append("LANGGRAPH_WORKFLOW_VERSION_MISMATCH")
+    if evidence.get("execution_mode") != "langgraph":
+        issues.append("LANGGRAPH_EXECUTION_MODE_MISMATCH")
+    if not evidence.get("checkpoint_present") or evidence.get("checkpoint_step") is None:
+        issues.append("LANGGRAPH_EXECUTION_CHECKPOINT_MISSING")
+    if evidence.get("status") not in {"completed", "waiting_human", "waiting_external"}:
+        issues.append("LANGGRAPH_EXECUTION_NOT_STABLE")
+    if evidence.get("last_error_code"):
+        issues.append("LANGGRAPH_EXECUTION_HAS_ERROR")
+    for row in evidence.get("interrupts") or []:
+        if not row.get("checkpoint_present") or row.get("checkpoint_step") is None:
+            issues.append("LANGGRAPH_INTERRUPT_CHECKPOINT_MISSING")
+        if row.get("status") in {"pending", "resume_queued"} and row.get("error_present"):
+            issues.append("LANGGRAPH_INTERRUPT_HAS_ERROR")
+    return sorted(set(issues))
 
 
 def _rmatest2_max_uid() -> int:
@@ -682,6 +761,7 @@ def run_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
             case_root = run_root / f"case-{index + 1:03d}"
             case_root.mkdir(parents=True)
             case: dict[str, Any] = {"message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(), "status": "running", "issues": []}
+            supplement_email_id: int | None = None
             result["cases"].append(case)
             mini = _mini_manifest(case_root, manifest, item)
             try:
@@ -718,7 +798,26 @@ def run_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                     recovered = _wait_for_case(client, supplement_email_id, str(item["gold"]["expected_final_status"]), int(item["gold"]["expected_outbound_count"]))
                     value = {"email_detail": original_email_detail, "ticket_detail": recovered.get("ticket_detail")}
                 outbound = _rmatest2_new_messages(baseline_uid)
-                case["issues"] = _assert_case(item, value, outbound)
+                graph_email_ids = [
+                    value
+                    for value in (email_id, supplement_email_id)
+                    if value is not None
+                ]
+                graph_evidence = [
+                    asyncio.run(_graph_execution_evidence(int(graph_email_id)))
+                    for graph_email_id in dict.fromkeys(graph_email_ids)
+                ] or [{"found": False, "interrupts": []}]
+                case["graph_executions"] = graph_evidence
+                case["issues"] = sorted(
+                    set([
+                        *_assert_case(item, value, outbound),
+                        *[
+                            issue
+                            for evidence in graph_evidence
+                            for issue in _assert_graph_execution_evidence(evidence)
+                        ],
+                    ])
+                )
                 email = (value.get("email_detail") or {}).get("email") or {}
                 ticket = (value.get("ticket_detail") or {}).get("ticket") or {}
                 case.update({"actual_intent": email.get("intent_type"), "actual_status": ticket.get("current_status_code"), "outbound_count": len(outbound), "status": "passed" if not case["issues"] else "failed"})

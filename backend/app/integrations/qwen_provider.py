@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
-import time
-import uuid
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
+from app.ai.gateway import LangChainGatewayError, LangChainStructuredGateway
+from app.ai.models import ModelSpec, create_chat_model
 from app.integrations.ai_provider import AiJsonCompletion, AiProviderError
 
 
@@ -19,12 +18,16 @@ class QwenProvider:
         base_url: str,
         model: str,
         timeout_seconds: float,
+        max_tokens: int | None = None,
+        structured_output_method: str = "json_mode",
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.max_tokens = max_tokens
+        self.structured_output_method = structured_output_method
         self.transport = transport
 
     async def chat_json(
@@ -36,66 +39,11 @@ class QwenProvider:
     ) -> AiJsonCompletion:
         if not self.api_key:
             raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
-
-        trace_id = uuid.uuid4().hex
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-        }
-        started = time.perf_counter()
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                response_payload = response.json()
-        except httpx.TimeoutException as exc:
-            raise AiProviderError("QWEN_PROVIDER_TIMEOUT") from exc
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else "unknown"
-            raise AiProviderError(f"QWEN_PROVIDER_HTTP_{status_code}") from exc
-        except httpx.HTTPError as exc:
-            raise AiProviderError("QWEN_PROVIDER_REQUEST_FAILED") from exc
-        except ValueError as exc:
-            raise AiProviderError("QWEN_PROVIDER_INVALID_RESPONSE_JSON") from exc
-
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        output_text = _extract_content(response_payload)
-        try:
-            parsed_json = json.loads(output_text)
-            parsed = response_model.model_validate(parsed_json)
-        except json.JSONDecodeError as exc:
-            error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
-            error.raw_output = output_text  # type: ignore[attr-defined]
-            error.trace_id = trace_id  # type: ignore[attr-defined]
-            error.request_payload = payload  # type: ignore[attr-defined]
-            error.response_payload = response_payload  # type: ignore[attr-defined]
-            error.latency_ms = latency_ms  # type: ignore[attr-defined]
-            raise error from exc
-        except ValidationError as exc:
-            error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
-            error.raw_output = output_text  # type: ignore[attr-defined]
-            error.trace_id = trace_id  # type: ignore[attr-defined]
-            error.request_payload = payload  # type: ignore[attr-defined]
-            error.response_payload = response_payload  # type: ignore[attr-defined]
-            error.latency_ms = latency_ms  # type: ignore[attr-defined]
-            raise error from exc
-
-        return AiJsonCompletion(
-            trace_id=trace_id,
-            request_payload=payload,
-            response_payload=response_payload,
-            output_text=output_text,
-            parsed=parsed,
-            latency_ms=latency_ms,
+        return await self._invoke_structured(
+            messages=messages,
+            response_model=response_model,
+            temperature=temperature,
+            multimodal=False,
         )
 
     async def vl_chat(
@@ -108,8 +56,6 @@ class QwenProvider:
     ) -> AiJsonCompletion:
         if not self.api_key:
             raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
-
-        trace_id = uuid.uuid4().hex
         content_parts: list[dict[str, Any]] = []
         for url in image_urls:
             content_parts.append(
@@ -120,80 +66,63 @@ class QwenProvider:
             )
         content_parts.append({"type": "text", "text": prompt})
 
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": content_parts},
-            ],
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-        }
-        started = time.perf_counter()
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                response_payload = response.json()
-        except httpx.TimeoutException as exc:
-            raise AiProviderError("QWEN_PROVIDER_TIMEOUT") from exc
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else "unknown"
-            raise AiProviderError(f"QWEN_PROVIDER_HTTP_{status_code}") from exc
-        except httpx.HTTPError as exc:
-            raise AiProviderError("QWEN_PROVIDER_REQUEST_FAILED") from exc
-        except ValueError as exc:
-            raise AiProviderError("QWEN_PROVIDER_INVALID_RESPONSE_JSON") from exc
-
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        output_text = _extract_content(response_payload)
-        try:
-            parsed_json = json.loads(output_text)
-            parsed = response_model.model_validate(parsed_json)
-        except json.JSONDecodeError as exc:
-            error = AiProviderError("QWEN_PROVIDER_OUTPUT_NOT_JSON")
-            error.raw_output = output_text  # type: ignore[attr-defined]
-            error.trace_id = trace_id  # type: ignore[attr-defined]
-            error.request_payload = payload  # type: ignore[attr-defined]
-            error.response_payload = response_payload  # type: ignore[attr-defined]
-            error.latency_ms = latency_ms  # type: ignore[attr-defined]
-            raise error from exc
-        except ValidationError as exc:
-            error = AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
-            error.raw_output = output_text  # type: ignore[attr-defined]
-            error.trace_id = trace_id  # type: ignore[attr-defined]
-            error.request_payload = payload  # type: ignore[attr-defined]
-            error.response_payload = response_payload  # type: ignore[attr-defined]
-            error.latency_ms = latency_ms  # type: ignore[attr-defined]
-            raise error from exc
-
-        return AiJsonCompletion(
-            trace_id=trace_id,
-            request_payload=payload,
-            response_payload=response_payload,
-            output_text=output_text,
-            parsed=parsed,
-            latency_ms=latency_ms,
+        return await self._invoke_structured(
+            messages=[{"role": "user", "content": content_parts}],
+            response_model=response_model,
+            temperature=temperature,
+            multimodal=True,
         )
 
-
-def _extract_content(response_payload: dict[str, Any]) -> str:
-    choices = response_payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise AiProviderError("QWEN_PROVIDER_EMPTY_CHOICES")
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise AiProviderError("QWEN_PROVIDER_INVALID_CHOICE")
-    message = first.get("message")
-    if not isinstance(message, dict):
-        raise AiProviderError("QWEN_PROVIDER_INVALID_MESSAGE")
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise AiProviderError("QWEN_PROVIDER_EMPTY_CONTENT")
-    return content.strip()
+    async def _invoke_structured(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+        temperature: float,
+        multimodal: bool,
+    ) -> AiJsonCompletion:
+        spec = ModelSpec(
+            provider="qwen",
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=0,
+            temperature=temperature,
+            max_tokens=self.max_tokens,
+            structured_output_method=self.structured_output_method,
+            multimodal=multimodal,
+        )
+        client = (
+            httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport)
+            if self.transport is not None
+            else None
+        )
+        try:
+            gateway = LangChainStructuredGateway(
+                create_chat_model(spec, async_client=client),
+                spec,
+            )
+            completion = await gateway.invoke(messages=messages, response_model=response_model)
+            return AiJsonCompletion(**completion.__dict__)
+        except LangChainGatewayError as exc:
+            code = {
+                "TIMEOUT": "QWEN_PROVIDER_TIMEOUT",
+                "EMPTY_CONTENT": "QWEN_PROVIDER_EMPTY_CONTENT",
+                "OUTPUT_NOT_JSON": "QWEN_PROVIDER_OUTPUT_NOT_JSON",
+                "OUTPUT_SCHEMA_INVALID": "QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID",
+                "AUTHENTICATION_FAILED": "QWEN_PROVIDER_AUTHENTICATION_FAILED",
+                "REQUEST_FAILED": "QWEN_PROVIDER_REQUEST_FAILED",
+            }.get(exc.code, f"QWEN_PROVIDER_{exc.code}")
+            error = AiProviderError(code)
+            for name in (
+                "raw_output", "trace_id", "request_payload", "response_payload",
+                "latency_ms", "validation_error_types",
+            ):
+                value = getattr(exc, name, None)
+                if value not in (None, []):
+                    setattr(error, name, value)
+            raise error from exc
+        finally:
+            if client is not None:
+                await client.aclose()

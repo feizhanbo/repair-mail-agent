@@ -757,7 +757,7 @@ async def reparse_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    result = await email_service.reparse_email(session, email_id=email_id, user_id=current_user.id, reason=payload.reason)
+    result = await email_service.dispatch_email_parse(session, email_id=email_id, user_id=current_user.id, reason=payload.reason)
     await session.commit()
     return ok(result, "email reparsed")
 

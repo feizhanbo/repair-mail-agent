@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any
 
+from app.attachments.safety import ArchiveSafetyResult, inspect_archive_safety
 from app.config import settings
 from app.schemas.business import EmailIngestRequest
 from app.services.common import utcnow
@@ -112,15 +113,25 @@ def detect_archive_format(
     return detected, warnings
 
 
-def engineering_reference_metadata(archive_format: str, warnings: list[str] | None = None) -> dict[str, Any]:
+def engineering_reference_metadata(
+    archive_format: str,
+    warnings: list[str] | None = None,
+    *,
+    safety: ArchiveSafetyResult | None = None,
+) -> dict[str, Any]:
+    safety_status = safety.status if safety else "unscanned_archive"
+    safety_warnings = list(safety.warnings) if safety else []
     return {
         "file_type": "archive",
         "detected_format": archive_format,
         "attachment_role": "engineering_reference",
         "business_required": False,
         "ai_parse_required": False,
-        "blocks_ticket_flow": False,
-        "security_status": "unscanned_archive",
+        "blocks_ticket_flow": bool(safety and not safety.safe),
+        "security_status": safety_status,
+        "security_warnings": safety_warnings,
+        "member_count": safety.member_count if safety else None,
+        "expanded_size": safety.expanded_size if safety else None,
         "parse_skip_reason": "ENGINEERING_REFERENCE_NOT_REQUIRED",
         "detection_warnings": list(warnings or []),
         "classified_at": utcnow().isoformat(),
@@ -139,10 +150,11 @@ def classify_engineering_reference(attachment: dict[str, Any], blob: dict[str, A
 
     content_type = ARCHIVE_CONTENT_TYPES[archive_format]
     attachment["content_type"] = content_type
-    attachment["parse_status"] = "skipped"
+    safety = inspect_archive_safety(content if isinstance(content, bytes) else None, archive_format)
+    attachment["parse_status"] = "pending" if safety.safe else "needs_manual_review"
     attachment["extracted_text"] = None
-    attachment["extracted_json"] = engineering_reference_metadata(archive_format, warnings)
-    attachment["parse_error"] = None
+    attachment["extracted_json"] = engineering_reference_metadata(archive_format, warnings, safety=safety)
+    attachment["parse_error"] = None if safety.safe else safety.warnings[0]
     blob["content_type"] = content_type
     return archive_format
 

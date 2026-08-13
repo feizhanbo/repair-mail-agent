@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 37
+    assert len(Base.metadata.tables) == 39
 
 
 def test_phase_one_table_names() -> None:
@@ -44,6 +44,8 @@ def test_phase_one_table_names() -> None:
         "users",
         "workflow_statuses",
         "workflow_transitions",
+        "workflow_executions",
+        "workflow_interrupts",
     }
 
 
@@ -52,6 +54,40 @@ def test_parse_result_apply_status_columns() -> None:
     assert "apply_status" in columns
     assert "applied_by_user_id" in columns
     assert "applied_at" in columns
+
+
+def test_workflow_interrupt_references_execution_business_identity() -> None:
+    execution = Base.metadata.tables["workflow_executions"]
+    interrupt = Base.metadata.tables["workflow_interrupts"]
+    assert execution.c.execution_id.unique is None
+    unique_columns = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in execution.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("execution_id",) in unique_columns
+    assert "checkpoint_id" in execution.columns
+    assert "checkpoint_step" in execution.columns
+    foreign_keys = {foreign_key.target_fullname for foreign_key in interrupt.c.execution_id.foreign_keys}
+    assert foreign_keys == {"workflow_executions.execution_id"}
+    assert "checkpoint_id" in interrupt.columns
+    assert "checkpoint_step" in interrupt.columns
+
+
+def test_workflow_audit_links_do_not_block_business_record_deletion() -> None:
+    execution = Base.metadata.tables["workflow_executions"]
+    interrupt = Base.metadata.tables["workflow_interrupts"]
+
+    for column_name in ("email_id", "ticket_id", "trigger_job_id"):
+        foreign_key = next(iter(execution.c[column_name].foreign_keys))
+        assert foreign_key.ondelete == "SET NULL"
+
+    for column_name in ("manual_task_id", "resumed_by_user_id"):
+        foreign_key = next(iter(interrupt.c[column_name].foreign_keys))
+        assert foreign_key.ondelete == "SET NULL"
+
+    execution_foreign_key = next(iter(interrupt.c.execution_id.foreign_keys))
+    assert execution_foreign_key.ondelete == "CASCADE"
 
 
 def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:

@@ -525,6 +525,7 @@ async def validate_and_mark_ready_for_export(
     user_id: int | None,
     reason: str | None = None,
     resolving_task_id: int | None = None,
+    enqueue_relay_job: bool = True,
 ) -> dict[str, Any]:
     ticket = await session.get(RepairTicket, ticket_id, with_for_update=True)
     if ticket is None:
@@ -609,6 +610,7 @@ async def validate_and_mark_ready_for_export(
     )
 
     jobs: list[dict[str, Any]] = []
+    export_id: int | None = None
     if ticket.rma_required and relay_ready:
         export = await session.scalar(
             select(TicketRelayExport).where(
@@ -627,16 +629,18 @@ async def validate_and_mark_ready_for_export(
             )
             session.add(export)
             await session.flush()
-        relay_job = await enqueue_job(
-            session,
-            job_type="relay_ticket_export",
-            resource_type="ticket_relay_export",
-            resource_id=export.id,
-            idempotency_key=f"relay_ticket_export:{ticket.id}:{ticket.version}:{report['snapshot_hash'][:16]}",
-            metadata={"user_id": user_id, "ticket_id": ticket.id, "ticket_version": ticket.version},
-            max_attempts=5,
-        )
-        jobs.append({"id": relay_job.id, "job_type": relay_job.job_type})
+        export_id = export.id
+        if enqueue_relay_job:
+            relay_job = await enqueue_job(
+                session,
+                job_type="relay_ticket_export",
+                resource_type="ticket_relay_export",
+                resource_id=export.id,
+                idempotency_key=f"relay_ticket_export:{ticket.id}:{ticket.version}:{report['snapshot_hash'][:16]}",
+                metadata={"user_id": user_id, "ticket_id": ticket.id, "ticket_version": ticket.version},
+                max_attempts=5,
+            )
+            jobs.append({"id": relay_job.id, "job_type": relay_job.job_type})
     if ticket.rma_required and not relay_ready:
         await create_manual_task_if_missing(
             session,
@@ -646,4 +650,11 @@ async def validate_and_mark_ready_for_export(
             priority="high",
             assigned_user_id=ticket.assigned_user_id,
         )
-    return {"ticket_id": ticket.id, "status": ticket.current_status_code, "report": report, "jobs": jobs}
+    return {
+        "ticket_id": ticket.id,
+        "status": ticket.current_status_code,
+        "report": report,
+        "jobs": jobs,
+        "sap_required": bool(ticket.rma_required and relay_ready),
+        "export_id": export_id,
+    }

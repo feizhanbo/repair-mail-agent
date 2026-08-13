@@ -30,4 +30,7 @@ tunnel.py
 tmp/
 output/pdf/
 test-results/
+release-evidence/*.json
+release-evidence/*.sha256
+!release-evidence/.gitkeep
 

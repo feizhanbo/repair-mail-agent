@@ -34,6 +34,7 @@ from app.models import (
     TicketRma,
     TicketRmaItem,
     TicketStatusLog,
+    WorkflowExecution,
 )
 from app.services.audit import log_operation
 from app.services.common import normalize_message_id, sha256_text, utcnow
@@ -43,6 +44,7 @@ from app.services.deletions import (
     process_oss_deletion_operation,
 )
 from app.services.mail_safety import TEST_MAIL_SENDER, test_envelope_allowed
+from app.workflows.checkpoint import postgres_checkpointer
 
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_wait"}
@@ -94,6 +96,17 @@ async def assert_gold_replay_environment(session: AsyncSession) -> dict[str, Any
         reasons.append("RUN_REAL_MAIL_INTEGRATION_TESTS_REQUIRED")
     if settings.RELAY_ADAPTER != "test_http":
         reasons.append("TEST_HTTP_RELAY_REQUIRED")
+    if settings.WORKFLOW_ENGINE == "langgraph":
+        checkpoint_url = settings.LANGGRAPH_CHECKPOINT_DATABASE_URL.strip()
+        checkpoint_target = make_url(checkpoint_url) if checkpoint_url else None
+        if checkpoint_target is None:
+            reasons.append("LANGGRAPH_CHECKPOINT_DATABASE_URL_REQUIRED")
+        elif (
+            checkpoint_target.get_backend_name() != "postgresql"
+            or (checkpoint_target.host or "").lower() not in TEST_DATABASE_HOSTS
+            or not str(checkpoint_target.database or "").endswith("_test")
+        ):
+            reasons.append("LANGGRAPH_CHECKPOINT_MUST_USE_LOOPBACK_TEST_DATABASE")
     if reasons:
         raise GoldReplayError("GOLD_REPLAY_ENVIRONMENT_BLOCKED", details={"reasons": reasons})
     return {
@@ -137,7 +150,7 @@ async def plan_gold_test_reset(
                 "emails", "threads", "tickets", "attachments", "parse_results", "ticket_items",
                 "replies", "rmas", "relay_exports", "sap_exports", "manual_tasks", "notifications",
                 "ai_logs", "external_operations", "operation_logs", "system_logs", "jobs",
-                "mail_fetch_records", "oss_objects",
+                "mail_fetch_records", "oss_objects", "workflow_executions", "graph_threads",
             )},
             "affected_counts": {},
             "blockers": [],
@@ -189,7 +202,7 @@ async def plan_gold_test_reset(
                 "ticket_items", "replies", "rmas", "relay_exports", "sap_exports",
                 "manual_tasks", "notifications", "ai_logs", "external_operations",
                 "operation_logs", "system_logs", "jobs", "mail_fetch_records",
-                "oss_objects",
+                "oss_objects", "workflow_executions", "graph_threads",
             )
         }
         resource_ids.update(
@@ -244,6 +257,20 @@ async def plan_gold_test_reset(
         emails = list((await session.execute(select(Email).where(Email.id.in_(email_ids)))).scalars().all())
 
     ticket_id_list = sorted(ticket_ids)
+    workflow_executions = list(
+        (
+            await session.execute(
+                select(WorkflowExecution).where(
+                    or_(
+                        WorkflowExecution.email_id.in_(email_ids),
+                        WorkflowExecution.ticket_id.in_(ticket_id_list or [-1]),
+                    )
+                )
+            )
+        ).scalars().all()
+    )
+    workflow_execution_ids = _ints(row.id for row in workflow_executions)
+    graph_threads = sorted({row.graph_thread_id for row in workflow_executions})
     attachment_ids = await _scalar_ids(session, select(EmailAttachment.id).where(EmailAttachment.email_id.in_(email_ids)))
     parse_ids = await _scalar_ids(session, select(ParseResult.id).where(ParseResult.email_id.in_(email_ids)))
     item_ids = await _scalar_ids(session, select(RepairTicketItem.id).where(RepairTicketItem.ticket_id.in_(ticket_id_list or [-1])))
@@ -260,11 +287,13 @@ async def plan_gold_test_reset(
 
     fetch_job_ids = _ints(row.fetch_job_run_id for row in emails)
     job_ids = set(fetch_job_ids)
+    job_ids.update(_ints(row.trigger_job_id for row in workflow_executions))
     job_ids.update(await _scalar_ids(session, select(JobRunLog.id).where(or_(
         (JobRunLog.resource_type == "email") & JobRunLog.resource_id.in_(email_ids),
         (JobRunLog.resource_type.in_(["ticket", "repair_ticket"])) & JobRunLog.resource_id.in_(ticket_id_list or [-1]),
         (JobRunLog.resource_type == "reply_record") & JobRunLog.resource_id.in_(reply_ids or [-1]),
         (JobRunLog.resource_type == "ticket_relay_export") & JobRunLog.resource_id.in_(relay_ids or [-1]),
+        (JobRunLog.resource_type == "workflow_execution") & JobRunLog.resource_id.in_(workflow_execution_ids or [-1]),
     ))))
     job_ids.update(await _scalar_ids(session, select(AiCallLog.job_run_id).where(AiCallLog.id.in_(ai_ids or [-1]), AiCallLog.job_run_id.is_not(None))))
     job_id_list = sorted(job_ids)
@@ -331,7 +360,8 @@ async def plan_gold_test_reset(
         "sap_exports": sap_ids, "manual_tasks": task_ids, "notifications": notification_ids,
         "ai_logs": ai_ids, "external_operations": external_ids, "operation_logs": operation_ids,
         "system_logs": system_ids, "jobs": job_id_list, "mail_fetch_records": fetch_record_ids,
-        "oss_objects": object_ids,
+        "oss_objects": object_ids, "workflow_executions": workflow_execution_ids,
+        "graph_threads": graph_threads,
     }
     affected_counts = {name: len(values) for name, values in resource_ids.items() if values}
     plan = {
@@ -368,6 +398,9 @@ async def apply_gold_test_reset(
         return {"status": "already_clean", "plan_hash": plan["plan_hash"], "affected_counts": {}}
 
     ids = plan["resource_ids"]
+    remaining_checkpoint_threads = await _delete_gold_graph_checkpoints(
+        list(ids.get("graph_threads") or [])
+    )
     audit = await log_operation(
         session,
         operation_type="gold_test_replay_reset",
@@ -441,6 +474,7 @@ async def apply_gold_test_reset(
     await session.execute(delete(MailFetchRecord).where(MailFetchRecord.id.in_(ids["mail_fetch_records"] or [-1])))
     await session.execute(delete(SystemEventLog).where(SystemEventLog.id.in_(ids["system_logs"] or [-1])))
     await session.execute(delete(OperationLog).where(OperationLog.id.in_(ids["operation_logs"] or [-1])))
+    await session.execute(delete(WorkflowExecution).where(WorkflowExecution.id.in_(ids["workflow_executions"] or [-1])))
     await session.execute(delete(Email).where(Email.id.in_(ids["emails"] or [-1])))
     await session.execute(delete(EmailThread).where(EmailThread.id.in_(ids["threads"] or [-1])))
     await session.execute(delete(JobRunLog).where(JobRunLog.id.in_(ids["jobs"] or [-1])))
@@ -463,17 +497,58 @@ async def apply_gold_test_reset(
         "plan_hash": plan["plan_hash"],
         "affected_counts": plan["affected_counts"],
         "oss_failed_count": int(oss_result.get("failed_count") or 0),
+        "checkpoint_thread_count": remaining_checkpoint_threads,
     }
 
 
-async def verify_gold_test_reset(session: AsyncSession, *, message_ids: list[str]) -> dict[str, Any]:
+async def _delete_gold_graph_checkpoints(graph_thread_ids: list[str]) -> int:
+    if not graph_thread_ids:
+        return 0
+    async with postgres_checkpointer(
+        settings.LANGGRAPH_CHECKPOINT_DATABASE_URL,
+        strict_msgpack=True,
+    ) as saver:
+        remaining = 0
+        for thread_id in graph_thread_ids:
+            await saver.adelete_thread(thread_id)
+            rows = [
+                row
+                async for row in saver.alist(
+                    {"configurable": {"thread_id": thread_id}},
+                    limit=1,
+                )
+            ]
+            remaining += int(bool(rows))
+    if remaining:
+        raise GoldReplayError(
+            "GOLD_REPLAY_CHECKPOINT_CLEANUP_VERIFY_FAILED",
+            details={"remaining_thread_count": remaining},
+        )
+    return remaining
+
+
+async def verify_gold_test_reset(
+    session: AsyncSession,
+    *,
+    message_ids: list[str],
+    graph_thread_ids: list[str] | None = None,
+) -> dict[str, Any]:
     normalized = sorted({normalize_gold_message_id(value) for value in message_ids})
     email_count = int(await session.scalar(select(func.count()).select_from(Email).where(Email.message_id.in_(normalized))) or 0)
     fetch_count = int(await session.scalar(select(func.count()).select_from(MailFetchRecord).where(MailFetchRecord.message_id.in_(normalized))) or 0)
+    execution_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkflowExecution)
+            .where(WorkflowExecution.graph_thread_id.in_(graph_thread_ids or ["__none__"]))
+        )
+        or 0
+    )
     result = {
-        "verified": email_count == 0 and fetch_count == 0,
+        "verified": email_count == 0 and fetch_count == 0 and execution_count == 0,
         "email_count": email_count,
         "mail_fetch_record_count": fetch_count,
+        "workflow_execution_count": execution_count,
         "verified_at": utcnow().isoformat(),
     }
     if not result["verified"]:

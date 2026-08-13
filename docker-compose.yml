@@ -25,6 +25,31 @@ services:
       timeout: 5s
       retries: 10
 
+  langgraph-postgres:
+    image: postgres:16-alpine
+    profiles:
+      - langgraph
+    container_name: repair-langgraph-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${LANGGRAPH_POSTGRES_DB:-repair_langgraph}
+      POSTGRES_USER: ${LANGGRAPH_POSTGRES_USER:-repair_langgraph}
+      # Local/default legacy deployments remain bootable before operators add
+      # Graph secrets. Production Graph mode rejects this development default.
+      POSTGRES_PASSWORD: ${LANGGRAPH_POSTGRES_PASSWORD:-change-me-langgraph}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - langgraph_postgres_data:/var/lib/postgresql/data
+    networks:
+      - repair_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   backend-api:
     build:
       context: .
@@ -40,8 +65,10 @@ services:
       - "8000"
     environment:
       AI_LOG_DIR: /app/logs/ai
+      APP_RELEASE_COMMIT: ${APP_RELEASE_COMMIT:-}
     volumes:
       - ai_log_data:/app/logs/ai
+      - ./release-evidence:/app/release-evidence:ro
     networks:
       - repair_net
 
@@ -72,6 +99,7 @@ services:
 
 volumes:
   mysql_data:
+  langgraph_postgres_data:
   ai_log_data:
 
 networks:

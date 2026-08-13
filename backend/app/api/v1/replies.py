@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
@@ -10,6 +10,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.schemas.business import ReplyDraftRequest, ReplyRejectRequest, ReplySendReconcileRequest, ReplyUpdateRequest
 from app.services import replies as reply_service
+from app.workflows.executions import enqueue_reply_resume_if_bound, reply_has_pending_interrupt
 from app.services.jobs import enqueue_job, serialize_job
 
 router = APIRouter()
@@ -75,7 +76,29 @@ async def approve_send(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await reply_service.approve_reply(session, reply_id=reply_id, user_id=current_user.id)
+    if await reply_has_pending_interrupt(session, reply_id=reply_id):
+        reply = await reply_service.approve_reply_for_async(
+            session,
+            reply_id=reply_id,
+            user_id=current_user.id,
+        )
+        resume = await enqueue_reply_resume_if_bound(
+            session,
+            reply_id=reply.id,
+            reviewer_id=current_user.id,
+        )
+        if resume is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="WORKFLOW_INTERRUPT_NOT_FOUND_FOR_REPLY",
+            )
+        result = {
+            "status": "resume_queued",
+            "reply": reply_service.serialize_reply(reply),
+            "workflow_resume": resume,
+        }
+    else:
+        result = await reply_service.approve_reply(session, reply_id=reply_id, user_id=current_user.id)
     await session.commit()
     return ok(result, "reply approved")
 
@@ -90,6 +113,22 @@ async def approve_send_job(
     if reply.send_status == "sent":
         await session.commit()
         return ok({"reply": reply_service.serialize_reply(reply), "job": None}, "reply already sent")
+    if await reply_has_pending_interrupt(session, reply_id=reply_id):
+        resume = await enqueue_reply_resume_if_bound(
+            session,
+            reply_id=reply.id,
+            reviewer_id=current_user.id,
+        )
+        if resume is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="WORKFLOW_INTERRUPT_NOT_FOUND_FOR_REPLY",
+            )
+        await session.commit()
+        return ok(
+            {"reply": reply_service.serialize_reply(reply), "job": None, "workflow_resume": resume},
+            "reply workflow resume queued",
+        )
     job = await enqueue_job(
         session,
         job_type="smtp_send",
@@ -109,7 +148,30 @@ async def reject_reply(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await reply_service.reject_reply(session, reply_id=reply_id, user_id=current_user.id, reason=payload.reason)
+    graph_owned = await reply_has_pending_interrupt(session, reply_id=reply_id)
+    result = await reply_service.reject_reply(
+        session,
+        reply_id=reply_id,
+        user_id=current_user.id,
+        reason=payload.reason,
+    )
+    if graph_owned:
+        resume = await enqueue_reply_resume_if_bound(
+            session,
+            reply_id=reply_id,
+            reviewer_id=current_user.id,
+            action="reject_send",
+        )
+        if resume is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="WORKFLOW_INTERRUPT_NOT_FOUND_FOR_REPLY",
+            )
+        result = {
+            "status": "resume_queued",
+            "reply": result,
+            "workflow_resume": resume,
+        }
     await session.commit()
     return ok(result, "reply rejected")
 

@@ -4,10 +4,74 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "q4l9g0b1c2d3"
-EXPECTED_BUSINESS_TABLE_COUNT = 37
+EXPECTED_REVISION = "r5m0h1c2d3e4"
+EXPECTED_BUSINESS_TABLE_COUNT = 39
 
 EXPECTED = {
+    "workflow_executions": {
+        "columns": {
+            "execution_id",
+            "graph_thread_id",
+            "workflow_name",
+            "workflow_version",
+            "state_schema_version",
+            "execution_mode",
+            "status",
+            "email_id",
+            "ticket_id",
+            "trigger_job_id",
+            "current_node",
+            "last_route",
+            "last_error_code",
+            "checkpoint_id",
+            "checkpoint_step",
+            "input_fingerprint",
+            "result_summary",
+            "started_at",
+            "completed_at",
+        },
+        "unique": {
+            "uk_workflow_executions_execution",
+            "uk_workflow_executions_graph_thread",
+        },
+        "foreign_keys": {
+            "fk_workflow_executions_email",
+            "fk_workflow_executions_ticket",
+            "fk_workflow_executions_job",
+        },
+        "ondelete": {
+            "fk_workflow_executions_email": "SET NULL",
+            "fk_workflow_executions_ticket": "SET NULL",
+            "fk_workflow_executions_job": "SET NULL",
+        },
+    },
+    "workflow_interrupts": {
+        "columns": {
+            "execution_id",
+            "interrupt_id",
+            "checkpoint_id",
+            "checkpoint_step",
+            "manual_task_id",
+            "status",
+            "request_payload",
+            "response_payload",
+            "expected_ticket_version",
+            "resumed_by_user_id",
+            "resumed_at",
+            "error_message",
+        },
+        "unique": {"uk_workflow_interrupts_execution_interrupt"},
+        "foreign_keys": {
+            "fk_workflow_interrupts_execution",
+            "fk_workflow_interrupts_manual_task",
+            "fk_workflow_interrupts_resumed_by",
+        },
+        "ondelete": {
+            "fk_workflow_interrupts_execution": "CASCADE",
+            "fk_workflow_interrupts_manual_task": "SET NULL",
+            "fk_workflow_interrupts_resumed_by": "SET NULL",
+        },
+    },
     "export_sap": {
         "columns": {
             "ticket_id",
@@ -174,24 +238,38 @@ def _verify(sync_connection) -> dict[str, object]:
             for constraint in inspector.get_unique_constraints(table_name)
             if constraint.get("name")
         }
+        inspected_foreign_keys = inspector.get_foreign_keys(table_name)
         foreign_keys = {
             constraint["name"]
-            for constraint in inspector.get_foreign_keys(table_name)
+            for constraint in inspected_foreign_keys
+            if constraint.get("name")
+        }
+        ondelete = {
+            str(constraint["name"]): str((constraint.get("options") or {}).get("ondelete", "")).upper()
+            for constraint in inspected_foreign_keys
             if constraint.get("name")
         }
         missing_columns = sorted(expected["columns"] - columns)
         missing_unique = sorted(expected["unique"] - unique)
         missing_foreign_keys = sorted(expected["foreign_keys"] - foreign_keys)
+        invalid_ondelete = sorted(
+            constraint_name
+            for constraint_name, action in expected.get("ondelete", {}).items()
+            if ondelete.get(constraint_name) != action
+        )
         if missing_columns:
             errors.append(f"{table_name}:missing_columns={','.join(missing_columns)}")
         if missing_unique:
             errors.append(f"{table_name}:missing_unique={','.join(missing_unique)}")
         if missing_foreign_keys:
             errors.append(f"{table_name}:missing_foreign_keys={','.join(missing_foreign_keys)}")
+        if invalid_ondelete:
+            errors.append(f"{table_name}:invalid_ondelete={','.join(invalid_ondelete)}")
         details[table_name] = {
             "column_count": len(columns),
             "unique_constraints": sorted(unique),
             "foreign_keys": sorted(foreign_keys),
+            "ondelete": ondelete,
         }
     return {
         "business_table_count": len(business_table_names),

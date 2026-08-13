@@ -29,6 +29,21 @@ def _docx_bytes(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def _structured_docx_bytes() -> bytes:
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>Repair form</w:t></w:r></w:p>"
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>SN</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>SN001</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        "</w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("word/document.xml", xml)
+        archive.writestr("word/media/image1.png", _png_header(120, 80))
+    return buffer.getvalue()
+
+
 def _xlsx_bytes(text: str) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -53,6 +68,93 @@ def _attachment(*, file_name: str, content_type: str, size: int, object_id: int 
 
 def _png_header(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+
+def test_docx_deterministic_parser_preserves_tables_and_counts_images() -> None:
+    normalized = attachment_parser.parse_binary_content(
+        "docx",
+        _structured_docx_bytes(),
+        max_pdf_pages=10,
+    )
+
+    assert "Repair form" in normalized.text
+    assert normalized.tables == [[['SN', 'SN001']]]
+    assert normalized.embedded_image_count == 1
+    assert normalized.semantic_mode == "vision"
+
+
+def test_mixed_pdf_preserves_tables_and_routes_images_to_vision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        attachment_parser,
+        "_extract_pdf_text",
+        lambda _content, *, max_pages: ("Repair report", 1),
+    )
+    monkeypatch.setattr(
+        attachment_parser,
+        "_inspect_pdf_layout",
+        lambda _content, *, max_pages: ([[["SN", "SN001"]]], 2),
+    )
+
+    normalized = attachment_parser.parse_binary_content(
+        "pdf",
+        b"%PDF-mixed",
+        max_pdf_pages=10,
+    )
+
+    assert "Repair report" in normalized.text
+    assert "SN | SN001" in normalized.text
+    assert normalized.tables == [[["SN", "SN001"]]]
+    assert normalized.embedded_image_count == 2
+    assert normalized.semantic_mode == "vision"
+
+
+@pytest.mark.anyio
+async def test_docx_with_embedded_image_uses_vl_with_deterministic_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = _structured_docx_bytes()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
+    monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
+
+    class FakeQwenProvider:
+        def __init__(self, **kwargs):
+            seen["model"] = kwargs["model"]
+
+        async def vl_chat(self, *, image_urls, prompt, response_model, **kwargs):
+            del kwargs
+            seen["urls"] = image_urls
+            seen["prompt"] = prompt
+            return SimpleNamespace(
+                parsed=response_model(file_type="docx", summary="visual", raw_text="visual SN001")
+            )
+
+    async def fake_download(_session, *, oss_object_id: int) -> bytes:
+        assert oss_object_id == 12
+        return content
+
+    monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
+    monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
+
+    attachment = _attachment(
+        file_name="repair.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size=len(content),
+    )
+    result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
+
+    urls = seen["urls"]
+    assert seen["model"] == "qwen-vl-plus"
+    assert isinstance(urls, list) and len(urls) == 1
+    assert urls[0].startswith("data:image/png;base64,")
+    assert "Repair form" in str(seen["prompt"])
+    assert "SN | SN001" in str(seen["prompt"])
+    assert result is not None
+    assert result["semantic_mode"] == "vision"
+    assert result["extracted_fields"] == {"embedded_image_count": 1, "table_count": 1}
 
 
 def test_qwen_attachment_schema_normalizes_common_shape_drift() -> None:
@@ -104,8 +206,16 @@ async def test_supported_text_like_attachments_extract_then_use_qwen(
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
 
     class FakeQwenProvider:
-        def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: float):
-            del api_key, base_url, timeout_seconds
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            base_url: str,
+            model: str,
+            timeout_seconds: float,
+            **kwargs,
+        ):
+            del api_key, base_url, timeout_seconds, kwargs
             seen["model"] = model
 
         async def chat_json(self, *, messages, response_model, **kwargs):
@@ -194,9 +304,10 @@ async def test_pdf_textless_attachment_renders_pages_for_qwen_visual(monkeypatch
         def __init__(self, **kwargs):
             del kwargs
 
-        async def vl_chat(self, *, image_urls, response_model, **kwargs):
+        async def vl_chat(self, *, image_urls, prompt, response_model, **kwargs):
             del kwargs
             seen["urls"] = image_urls
+            seen["prompt"] = prompt
             return SimpleNamespace(parsed=response_model(file_type="pdf", summary="pdf visual", raw_text="PDF SN001"))
 
     async def fake_download(_session, *, oss_object_id: int) -> bytes:
@@ -206,6 +317,7 @@ async def test_pdf_textless_attachment_renders_pages_for_qwen_visual(monkeypatch
     monkeypatch.setattr(attachment_parser, "QwenProvider", FakeQwenProvider)
     monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
     monkeypatch.setattr(attachment_parser, "_extract_pdf_text", lambda _content, *, max_pages: ("", 18))
+    monkeypatch.setattr(attachment_parser, "_inspect_pdf_layout", lambda _content, *, max_pages: ([], 0))
     monkeypatch.setattr(attachment_parser, "render_pdf_pages", lambda _content, *, max_pages: ([b"png-page"], 18))
 
     attachment = _attachment(file_name="scan.pdf", content_type="application/pdf", size=1024)
@@ -346,7 +458,7 @@ async def test_large_txt_skips_attachment_qwen_and_keeps_local_result(monkeypatc
 
 
 @pytest.mark.anyio
-async def test_named_archive_is_skipped_without_download_or_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_named_archive_without_readable_content_requires_manual_review(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fail_download(*args, **kwargs):
         del args, kwargs
         raise AssertionError("recognized archive must not be downloaded for content parsing")
@@ -362,26 +474,26 @@ async def test_named_archive_is_skipped_without_download_or_qwen(monkeypatch: py
 
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
-    assert attachment.parse_status == "skipped"
-    assert attachment.parse_error is None
+    assert attachment.parse_status == "needs_manual_review"
+    assert attachment.parse_error == "ARCHIVE_CONTENT_UNAVAILABLE"
     assert attachment.extracted_text is None
     assert attachment.content_type == "application/x-7z-compressed"
     assert result is not None
     assert result["attachment_role"] == "engineering_reference"
     assert result["ai_parse_required"] is False
-    assert result["blocks_ticket_flow"] is False
+    assert result["blocks_ticket_flow"] is True
     assert result["security_status"] == "unscanned_archive"
 
 
 @pytest.mark.anyio
-async def test_extensionless_legacy_zip_is_detected_from_magic_and_then_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_extensionless_legacy_zip_is_detected_and_members_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
     async def fake_download(_session, *, oss_object_id: int) -> bytes:
         nonlocal calls
         calls += 1
         assert oss_object_id == 12
-        return b"PK\x03\x04data"
+        return _docx_bytes("engineering reference")
 
     monkeypatch.setattr(attachment_parser, "download_oss_object_bytes", fake_download)
     attachment = _attachment(file_name="20260629_934", content_type="application/octet-stream", size=128)
@@ -389,8 +501,11 @@ async def test_extensionless_legacy_zip_is_detected_from_magic_and_then_skipped(
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
     assert calls == 1
-    assert attachment.parse_status == "skipped"
+    assert attachment.parse_status == "parsed"
     assert attachment.parse_error is None
     assert attachment.content_type == "application/zip"
     assert result is not None
     assert result["detected_format"] == "zip"
+    assert result["parse_skip_reason"] is None
+    assert result["parsed_member_count"] == 1
+    assert result["member_results"][0]["path"] == "word/document.xml"

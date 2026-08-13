@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import zipfile
 
 import pytest
 from fastapi import HTTPException
@@ -35,6 +37,13 @@ class PreviewSession:
 
 def _png(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+
+def _valid_zip() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("reference.txt", "engineering reference")
+    return buffer.getvalue()
 
 
 def test_decorative_inline_image_is_removed_before_archival() -> None:
@@ -144,7 +153,7 @@ def test_archive_is_marked_as_non_blocking_engineering_reference_before_archival
         from_address="sender@example.com",
         attachments=[{"file_name": "20260629_934", "content_type": "application/octet-stream"}],
     )
-    blobs = [{"file_name": "20260629_934", "content_type": "application/octet-stream", "content": b"PK\x03\x04data"}]
+    blobs = [{"file_name": "20260629_934", "content_type": "application/octet-stream", "content": _valid_zip()}]
 
     kept, result = filter_decorative_attachments(payload, blobs)
 
@@ -152,7 +161,7 @@ def test_archive_is_marked_as_non_blocking_engineering_reference_before_archival
     assert kept[0]["content_type"] == "application/zip"
     attachment = payload.attachments[0]
     assert attachment["content_type"] == "application/zip"
-    assert attachment["parse_status"] == "skipped"
+    assert attachment["parse_status"] == "pending"
     assert attachment["parse_error"] is None
     assert attachment["extracted_text"] is None
     metadata = attachment["extracted_json"]
@@ -162,7 +171,8 @@ def test_archive_is_marked_as_non_blocking_engineering_reference_before_archival
     assert metadata["business_required"] is False
     assert metadata["ai_parse_required"] is False
     assert metadata["blocks_ticket_flow"] is False
-    assert metadata["security_status"] == "unscanned_archive"
+    assert metadata["security_status"] == "inspected_safe"
+    assert metadata["member_count"] == 1
     assert metadata["parse_skip_reason"] == "ENGINEERING_REFERENCE_NOT_REQUIRED"
     assert metadata["detection_warnings"] == []
     assert isinstance(metadata["classified_at"], str)

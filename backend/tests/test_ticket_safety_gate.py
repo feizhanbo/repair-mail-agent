@@ -265,6 +265,8 @@ async def test_manual_ready_resolution_clears_historical_parse_markers(monkeypat
     )
 
     assert result["status"] == "ready_for_export"
+    assert result["sap_required"] is False
+    assert result["export_id"] is None
     assert ticket.missing_fields == {}
     assert ticket.conflict_fields == {}
 

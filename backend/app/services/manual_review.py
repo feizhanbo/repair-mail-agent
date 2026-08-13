@@ -7,12 +7,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Email, EmailAttachment, ManualReviewTask
 from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
-from app.services.emails import reparse_email
 from app.services.replies import create_reply_draft
-from app.services.tickets import get_ticket, get_ticket_detail
+from app.services.tickets import TICKET_WRITE_FIELDS, get_ticket, get_ticket_detail
 from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.notifications import resolve_notifications_for_target
 from app.services.workflow import OPEN_TASK_STATUSES, transition_ticket
@@ -38,6 +38,15 @@ TASK_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+def graph_edited_fields(result_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract ticket edits without treating review metadata as ticket fields."""
+    payload = dict(result_payload or {})
+    nested = payload.get("edited_fields")
+    if isinstance(nested, dict):
+        return {key: value for key, value in nested.items() if key in TICKET_WRITE_FIELDS}
+    return {key: value for key, value in payload.items() if key in TICKET_WRITE_FIELDS}
 
 
 def serialize_task(task: ManualReviewTask) -> dict[str, Any]:
@@ -276,6 +285,10 @@ async def resolve_task(
             ticket_id=ticket.id,
             user_id=user_id,
             resolving_task_id=task.id,
+            # Graph-owned tasks use record_graph_task_decision and never enter
+            # this legacy action branch. An unbound task must keep its legacy
+            # downstream orchestration during percentage/allowlist rollout.
+            enqueue_relay_job=True,
         )
         if safety_result["status"] != "ready_for_export":
             return {
@@ -324,7 +337,9 @@ async def resolve_task(
             task.resolved_at = utcnow()
             task.resolution = resolution
             await session.flush()
-            reparse_result = await reparse_email(session, email_id=task.email_id, user_id=user_id, reason=resolution)
+            from app.services.emails import dispatch_email_parse
+
+            reparse_result = await dispatch_email_parse(session, email_id=task.email_id, user_id=user_id, reason=resolution)
             if ticket.current_status_code == "manual_review":
                 replacement_task_id = await session.scalar(
                     select(ManualReviewTask.id)
@@ -403,6 +418,50 @@ async def resolve_task(
     }
 
 
+async def record_graph_task_decision(
+    session: AsyncSession,
+    *,
+    task_id: int,
+    user_id: int,
+    resolution: str,
+    resolution_type: str | None,
+    next_action: str,
+    result_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve a bound task without executing the action owned by LangGraph."""
+    task = await get_task(session, task_id)
+    if task.status in {"resolved", "closed"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_ALREADY_RESOLVED")
+    task.status = "resolved"
+    task.resolved_by_user_id = user_id
+    task.resolved_at = utcnow()
+    task.resolution = resolution
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="graph_manual_task_decided",
+        target_type="manual_review_task",
+        target_id=task.id,
+        description=resolution,
+        after_data={
+            "resolution_type": resolution_type,
+            "next_action": next_action,
+            "result_payload": result_payload,
+        },
+    )
+    await resolve_notifications_for_target(
+        session,
+        target_type="manual_review_task",
+        target_id=task.id,
+    )
+    return {
+        "task": serialize_task(task),
+        "ticket": await get_ticket_detail(session, task.ticket_id) if task.ticket_id else None,
+        "followup_result": None,
+        "reparse_result": None,
+    }
+
+
 async def reparse_task(
     session: AsyncSession,
     *,
@@ -421,7 +480,9 @@ async def reparse_task(
     if email_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_EMAIL_NOT_FOUND")
 
-    reparse_result = await reparse_email(
+    from app.services.emails import dispatch_email_parse
+
+    reparse_result = await dispatch_email_parse(
         session,
         email_id=email_id,
         user_id=user_id,

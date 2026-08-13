@@ -5,6 +5,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +14,9 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import CurrentUser, get_current_user
 from app.api.v1 import emails as email_api
+from app.api.v1 import jobs as jobs_api
+from app.api.v1 import manual_review as manual_review_api
+from app.api.v1 import replies as reply_api
 from app.api.v1 import system as system_api
 from app.config import settings
 from app.core.database import get_session
@@ -141,6 +146,7 @@ def test_expected_business_routes_are_registered() -> None:
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes
     assert "POST /api/v1/replies/{reply_id}/approve-send/jobs" in routes
     assert "GET /api/v1/jobs/{job_id}" in routes
+    assert "POST /api/v1/jobs/{job_id}/retry-stale-graph" in routes
     assert "POST /api/v1/exports/jobs" in routes
     assert "GET /api/v1/ai-logs" in routes
     assert "GET /api/v1/system/info" in routes
@@ -433,7 +439,7 @@ def test_operator_cannot_list_users() -> None:
     assert payload["message"] == "AUTH_FORBIDDEN"
 
 
-def test_operator_can_approve_reply(monkeypatch) -> None:
+def test_operator_can_approve_reply_via_legacy_service(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_approve(_session, *, reply_id: int, user_id: int):
@@ -452,7 +458,251 @@ def test_operator_can_approve_reply(monkeypatch) -> None:
     assert session.committed is True
 
 
-def test_operator_can_approve_reply(monkeypatch) -> None:
+def test_legacy_rollout_reply_still_uses_legacy_send_when_global_engine_is_graph(monkeypatch) -> None:
+    session = FakeSession()
+    monkeypatch.setattr(settings, "WORKFLOW_ENGINE", "langgraph")
+    monkeypatch.setattr(
+        "app.main.verify_runtime_release_gate",
+        lambda _settings: {
+            "verified": True,
+            "schema_version": 2,
+            "source_commit": "test-commit",
+            "source_dirty": False,
+            "sha256": "0" * 64,
+        },
+    )
+    monkeypatch.setattr(reply_api, "reply_has_pending_interrupt", AsyncMock(return_value=False))
+    approve = AsyncMock(return_value={"id": 5, "review_status": "approved"})
+    monkeypatch.setattr(reply_service, "approve_reply", approve)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post("/api/v1/replies/5/approve-send")
+
+    assert response.status_code == 200
+    approve.assert_awaited_once()
+    assert app.state.langgraph_release_gate["required"] is True
+    assert app.state.langgraph_release_gate["verified"] is True
+
+
+def test_graph_bound_reply_queues_resume(monkeypatch) -> None:
+    session = FakeSession()
+    reply = SimpleNamespace(id=5)
+    monkeypatch.setattr(reply_api, "reply_has_pending_interrupt", AsyncMock(return_value=True))
+    monkeypatch.setattr(reply_service, "approve_reply_for_async", AsyncMock(return_value=reply))
+    monkeypatch.setattr(reply_service, "serialize_reply", lambda value: {"id": value.id})
+    monkeypatch.setattr(
+        reply_api,
+        "enqueue_reply_resume_if_bound",
+        AsyncMock(return_value={"execution_id": "exec-1", "resume_job_id": 9}),
+    )
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post("/api/v1/replies/5/approve-send")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "resume_queued"
+
+
+def test_resume_queued_reply_approval_never_falls_back_to_legacy_smtp(monkeypatch) -> None:
+    session = FakeSession()
+    reply = SimpleNamespace(id=5, send_status="approved_pending_send")
+    monkeypatch.setattr(reply_api, "reply_has_pending_interrupt", AsyncMock(return_value=True))
+    monkeypatch.setattr(reply_service, "approve_reply_for_async", AsyncMock(return_value=reply))
+    monkeypatch.setattr(reply_service, "serialize_reply", lambda value: {"id": value.id})
+    monkeypatch.setattr(
+        reply_api,
+        "enqueue_reply_resume_if_bound",
+        AsyncMock(return_value={"execution_id": "exec-1", "resume_job_id": 9}),
+    )
+    legacy = AsyncMock()
+    monkeypatch.setattr(reply_service, "approve_reply", legacy)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post("/api/v1/replies/5/approve-send")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "resume_queued"
+    legacy.assert_not_awaited()
+
+
+def test_graph_bound_reply_rejection_queues_terminal_resume(monkeypatch) -> None:
+    session = FakeSession()
+    monkeypatch.setattr(reply_api, "reply_has_pending_interrupt", AsyncMock(return_value=True))
+    reject = AsyncMock(return_value={"id": 5, "send_status": "rejected"})
+    monkeypatch.setattr(reply_service, "reject_reply", reject)
+    enqueue = AsyncMock(return_value={"execution_id": "exec-1", "resume_job_id": 12})
+    monkeypatch.setattr(reply_api, "enqueue_reply_resume_if_bound", enqueue)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post("/api/v1/replies/5/reject", json={"reason": "incorrect reply"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "resume_queued"
+    enqueue.assert_awaited_once_with(
+        session,
+        reply_id=5,
+        reviewer_id=7,
+        action="reject_send",
+    )
+    assert session.committed is True
+
+
+def test_admin_can_retry_scheduler_owned_workflow_interrupt(monkeypatch) -> None:
+    session = FakeSession()
+    retry = AsyncMock(
+        return_value={
+            "execution_id": "exec-1",
+            "interrupt_id": "interrupt-1",
+            "resume_job_id": 9,
+            "status": "resume_queued",
+        }
+    )
+    monkeypatch.setattr(system_api, "retry_pending_external_interrupt", retry)
+
+    with make_client(session, roles=["admin"]) as client:
+        response = client.post(
+            "/api/v1/system/workflow-executions/exec-1/interrupts/interrupt-1/retry"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "resume_queued"
+    retry.assert_awaited_once_with(
+        session,
+        execution_id="exec-1",
+        interrupt_id="interrupt-1",
+        operator_user_id=7,
+    )
+    assert session.committed is True
+
+
+def test_operator_cannot_retry_scheduler_owned_workflow_interrupt() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/system/workflow-executions/exec-1/interrupts/interrupt-1/retry"
+        )
+
+    assert response.status_code == 403
+
+
+def test_admin_can_retry_stale_graph_job_after_explicit_worker_confirmation(monkeypatch) -> None:
+    session = FakeSession()
+    job = JobRunLog(
+        id=41,
+        job_name="graph_start",
+        job_type="graph_start",
+        status="queued",
+        processed_count=0,
+        success_count=0,
+        failed_count=0,
+        attempt_count=1,
+        max_attempts=3,
+    )
+    retry = AsyncMock(return_value=job)
+    monkeypatch.setattr(jobs_api, "reactivate_stale_graph_job", retry)
+
+    with make_client(session, roles=["admin"]) as client:
+        response = client.post(
+            "/api/v1/jobs/41/retry-stale-graph",
+            json={
+                "confirm_previous_worker_stopped": True,
+                "reason": "worker pod terminated",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "queued"
+    retry.assert_awaited_once_with(
+        session,
+        job_id=41,
+        operator_user_id=7,
+        confirm_previous_worker_stopped=True,
+        reason="worker pod terminated",
+    )
+    assert session.committed is True
+
+
+def test_operator_cannot_retry_stale_graph_job() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/jobs/41/retry-stale-graph",
+            json={"confirm_previous_worker_stopped": True},
+        )
+
+    assert response.status_code == 403
+
+
+def test_admin_stale_graph_retry_requires_explicit_worker_stop_confirmation(monkeypatch) -> None:
+    retry = AsyncMock(side_effect=ValueError("GRAPH_PREVIOUS_WORKER_STOP_CONFIRMATION_REQUIRED"))
+    monkeypatch.setattr(jobs_api, "reactivate_stale_graph_job", retry)
+
+    with make_client(roles=["admin"]) as client:
+        response = client.post(
+            "/api/v1/jobs/41/retry-stale-graph",
+            json={"confirm_previous_worker_stopped": False},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "GRAPH_PREVIOUS_WORKER_STOP_CONFIRMATION_REQUIRED"
+
+
+def test_admin_can_retry_same_failed_graph_start(monkeypatch) -> None:
+    session = FakeSession()
+    job = JobRunLog(
+        id=42,
+        job_name="graph_start",
+        job_type="graph_start",
+        status="queued",
+        processed_count=0,
+        success_count=0,
+        failed_count=1,
+        attempt_count=3,
+        max_attempts=4,
+    )
+    retry = AsyncMock(return_value=job)
+    monkeypatch.setattr(jobs_api, "reactivate_failed_graph_start_job", retry)
+
+    with make_client(session, roles=["admin"]) as client:
+        response = client.post(
+            "/api/v1/jobs/42/retry-failed-graph-start",
+            json={"reason": "checkpoint repaired"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "queued"
+    retry.assert_awaited_once_with(
+        session,
+        job_id=42,
+        operator_user_id=7,
+        reason="checkpoint repaired",
+    )
+    assert session.committed is True
+
+
+def test_operator_cannot_retry_failed_graph_start() -> None:
+    with make_client(roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/jobs/42/retry-failed-graph-start",
+            json={},
+        )
+
+    assert response.status_code == 403
+
+
+def test_failed_graph_start_retry_rejects_wrong_job_state(monkeypatch) -> None:
+    retry = AsyncMock(side_effect=ValueError("FAILED_GRAPH_START_JOB_NOT_RECOVERABLE"))
+    monkeypatch.setattr(jobs_api, "reactivate_failed_graph_start_job", retry)
+
+    with make_client(roles=["admin"]) as client:
+        response = client.post(
+            "/api/v1/jobs/42/retry-failed-graph-start",
+            json={},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "FAILED_GRAPH_START_JOB_NOT_RECOVERABLE"
+
+
+def test_operator_approval_commits_legacy_reply(monkeypatch) -> None:
     session = FakeSession()
 
     async def fake_approve(_session, *, reply_id: int, user_id: int):
@@ -478,6 +728,176 @@ def test_operator_cannot_assign_manual_task() -> None:
     payload = response.json()
     assert response.status_code == 403
     assert payload["message"] == "AUTH_FORBIDDEN"
+
+
+def test_admin_runtime_status_exposes_process_release_gate_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "WORKFLOW_ENGINE", "langgraph")
+    monkeypatch.setattr(
+        "app.main.verify_runtime_release_gate",
+        lambda _settings: {
+            "verified": True,
+            "schema_version": 2,
+            "source_commit": "abc123",
+            "source_dirty": False,
+            "sha256": "0" * 64,
+        },
+    )
+
+    with make_client(EmptyScalarSession(), roles=["admin"]) as client:
+        response = client.get("/api/v1/system/runtime-status")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["workflow_engine"] == "langgraph"
+    assert payload["langgraph_release_gate"] == {
+        "required": True,
+        "verified": True,
+        "schema_version": 2,
+        "source_commit": "abc123",
+        "source_dirty": False,
+        "sha256": "0" * 64,
+    }
+
+
+def test_operator_cannot_read_runtime_release_gate_snapshot() -> None:
+    with make_client(EmptyScalarSession(), roles=["operator"]) as client:
+        response = client.get("/api/v1/system/runtime-status")
+
+    assert response.status_code == 403
+
+
+def test_bound_manual_task_rejects_action_not_advertised_by_interrupt(monkeypatch) -> None:
+    session = FakeSession()
+    execution = SimpleNamespace(execution_id="exec-1")
+    interrupt = SimpleNamespace(
+        status="pending",
+        request_payload={"allowed_actions": ["reparse", "close"]},
+    )
+    monkeypatch.setattr(
+        manual_review_api,
+        "get_pending_task_interrupt",
+        AsyncMock(return_value=(execution, interrupt)),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr(manual_review_service, "record_graph_task_decision", record)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/manual-review/tasks/9/resolve",
+            json={
+                "resolution": "try invalid action",
+                "next_action": "transition_ready_for_export",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "WORKFLOW_INTERRUPT_ACTION_NOT_ALLOWED"
+    record.assert_not_awaited()
+    assert session.committed is False
+
+
+def test_bound_manual_task_never_falls_back_to_legacy_for_unsupported_action(monkeypatch) -> None:
+    session = FakeSession()
+    interrupt = SimpleNamespace(
+        status="pending",
+        request_payload={"allowed_actions": ["reparse", "close"]},
+    )
+    monkeypatch.setattr(
+        manual_review_api,
+        "get_pending_task_interrupt",
+        AsyncMock(return_value=(SimpleNamespace(execution_id="exec-1"), interrupt)),
+    )
+    legacy_resolve = AsyncMock()
+    graph_record = AsyncMock()
+    monkeypatch.setattr(manual_review_service, "resolve_task", legacy_resolve)
+    monkeypatch.setattr(manual_review_service, "record_graph_task_decision", graph_record)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/manual-review/tasks/9/resolve",
+            json={
+                "resolution": "keep open",
+                "next_action": "keep_manual_review",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "WORKFLOW_INTERRUPT_NEXT_ACTION_NOT_SUPPORTED"
+    legacy_resolve.assert_not_awaited()
+    graph_record.assert_not_awaited()
+    assert session.committed is False
+
+
+def test_resume_queued_manual_task_never_falls_back_to_legacy(monkeypatch) -> None:
+    session = FakeSession()
+    interrupt = SimpleNamespace(
+        status="resume_queued",
+        request_payload={"allowed_actions": ["validate", "reparse", "close"]},
+    )
+    monkeypatch.setattr(
+        manual_review_api,
+        "get_pending_task_interrupt",
+        AsyncMock(return_value=(SimpleNamespace(execution_id="exec-1"), interrupt)),
+    )
+    legacy_resolve = AsyncMock()
+    graph_record = AsyncMock()
+    monkeypatch.setattr(manual_review_service, "resolve_task", legacy_resolve)
+    monkeypatch.setattr(manual_review_service, "record_graph_task_decision", graph_record)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/manual-review/tasks/9/resolve",
+            json={
+                "resolution": "duplicate submit",
+                "next_action": "transition_ready_for_export",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "WORKFLOW_INTERRUPT_RESUME_ALREADY_QUEUED"
+    legacy_resolve.assert_not_awaited()
+    graph_record.assert_not_awaited()
+    assert session.committed is False
+
+
+def test_graph_bound_reparse_resumes_original_execution(monkeypatch) -> None:
+    session = FakeSession()
+    interrupt = SimpleNamespace(
+        status="pending",
+        expected_ticket_version=4,
+        request_payload={"allowed_actions": ["reparse", "close"]},
+    )
+    monkeypatch.setattr(
+        manual_review_api,
+        "get_pending_task_interrupt",
+        AsyncMock(return_value=(SimpleNamespace(execution_id="exec-1"), interrupt)),
+    )
+    record = AsyncMock(return_value={"task": {"id": 9, "status": "resolved"}})
+    resume = AsyncMock(return_value={"execution_id": "exec-1", "resume_job_id": 15})
+    legacy_reparse = AsyncMock()
+    monkeypatch.setattr(manual_review_service, "record_graph_task_decision", record)
+    monkeypatch.setattr(manual_review_api, "enqueue_manual_resume_if_bound", resume)
+    monkeypatch.setattr(manual_review_service, "reparse_task", legacy_reparse)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post(
+            "/api/v1/manual-review/tasks/9/reparse",
+            json={"mode": "classification_and_extract", "reason": "review correction"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["workflow_resume"]["resume_job_id"] == 15
+    resume.assert_awaited_once_with(
+        session,
+        manual_task_id=9,
+        action="reparse",
+        edited_fields={},
+        reviewer_id=7,
+        expected_ticket_version=4,
+        next_action="reparse",
+    )
+    legacy_reparse.assert_not_awaited()
+    assert session.committed is True
 
 
 def test_manual_task_structured_filters_are_forwarded(monkeypatch) -> None:

@@ -4,19 +4,21 @@ import asyncio
 import base64
 import csv
 import io
-import json
+import mimetypes
 import re
 import zipfile
 from html import unescape
-from pathlib import PurePath
 from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.attachments.detector import SUPPORTED_ATTACHMENT_TYPES, detect_file_type
+from app.attachments.archive import extract_archive_members
+from app.attachments.schemas import AttachmentParseJson, NormalizedAttachmentContent
+from app.attachments.safety import inspect_archive_safety
 from app.config import settings
 from app.integrations.ai_provider import AiProviderError
 from app.integrations.qwen_provider import QwenProvider
@@ -31,76 +33,11 @@ from app.services.logging_safety import safe_error_code
 from app.services.storage import download_oss_object_bytes, generate_presigned_url_for_object
 
 
-SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "prc", "html", "image", "pdf"}
 _file_parse_semaphore = asyncio.Semaphore(max(1, settings.FILE_PARSE_CONCURRENCY))
 
-
-class AttachmentParseJson(BaseModel):
-    file_type: str
-    summary: str = ""
-    key_points: list[str] = Field(default_factory=list)
-    extracted_fields: dict[str, Any] = Field(default_factory=dict)
-    extracted_items: list[dict[str, Any]] = Field(default_factory=list)
-    raw_text: str = ""
-    warnings: list[str] = Field(default_factory=list)
-    truncated: bool = False
-
-    @field_validator("summary", "raw_text", mode="before")
-    @classmethod
-    def normalize_text(cls, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        return json.dumps(value, ensure_ascii=False, default=str)
-
-    @field_validator("key_points", "warnings", mode="before")
-    @classmethod
-    def normalize_string_list(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [item if isinstance(item, str) else json.dumps(item, ensure_ascii=False, default=str) for item in value]
-        return [value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)]
-
-    @field_validator("extracted_fields", mode="before")
-    @classmethod
-    def normalize_fields(cls, value: Any) -> dict[str, Any]:
-        return value if isinstance(value, dict) else {}
-
-    @field_validator("extracted_items", mode="before")
-    @classmethod
-    def normalize_items(cls, value: Any) -> list[dict[str, Any]]:
-        if isinstance(value, dict):
-            return [value]
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        return []
-
-    @field_validator("truncated", mode="before")
-    @classmethod
-    def normalize_truncated(cls, value: Any) -> bool:
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "是"}
-        return bool(value)
-
-
 def attachment_type(attachment: EmailAttachment) -> str | None:
-    content_type = (attachment.content_type or "").lower().split(";", 1)[0].strip()
-    suffix = PurePath(attachment.file_name or "").suffix.lower().lstrip(".")
-    if content_type.startswith("image/"):
-        return "image"
-    if content_type == "application/pdf" or suffix == "pdf":
-        return "pdf"
-    if suffix in {"docx", "xlsx", "csv", "txt", "prc", "html", "htm"}:
-        return "html" if suffix == "htm" else suffix
-    if content_type in {"text/plain", "application/json", "application/xml", "text/xml"}:
-        return "txt"
-    if content_type in {"text/csv", "application/csv"}:
-        return "csv"
-    if content_type in {"text/html", "application/xhtml+xml"}:
-        return "html"
-    return None
+    """Compatibility wrapper used by existing email and preview services."""
+    return detect_file_type(file_name=attachment.file_name, content_type=attachment.content_type)
 
 
 def _qwen_configured(*, visual: bool = False) -> bool:
@@ -117,6 +54,8 @@ def _qwen_provider(*, visual: bool = False) -> QwenProvider:
         base_url=settings.QWEN_BASE_URL,
         model=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
         timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+        max_tokens=settings.AI_MAX_TOKENS,
+        structured_output_method=settings.AI_STRUCTURED_OUTPUT_METHOD,
     )
 
 
@@ -207,11 +146,15 @@ def _validate_zip_archive(content: bytes) -> None:
         raise ValueError("ARCHIVE_COMPRESSION_RATIO_EXCEEDED")
 
 
-def _extract_docx(content: bytes) -> str:
+def _extract_docx(content: bytes) -> tuple[str, list[list[list[str]]], int]:
     _validate_zip_archive(content)
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             xml = archive.read("word/document.xml")
+            embedded_image_count = sum(
+                name.startswith("word/media/") and not name.endswith("/")
+                for name in archive.namelist()
+            )
     except Exception as exc:
         raise ValueError("DOCX_TEXT_EXTRACT_FAILED") from exc
     root = ElementTree.fromstring(xml)
@@ -222,7 +165,36 @@ def _extract_docx(content: bytes) -> str:
         text = "".join(parts).strip()
         if text:
             paragraphs.append(text)
-    return "\n".join(paragraphs)
+    tables: list[list[list[str]]] = []
+    for table in root.iter(f"{namespace}tbl"):
+        rows: list[list[str]] = []
+        for row in table.findall(f"{namespace}tr"):
+            cells = [
+                "".join(node.text or "" for node in cell.iter(f"{namespace}t")).strip()
+                for cell in row.findall(f"{namespace}tc")
+            ]
+            if any(cells):
+                rows.append(cells)
+        if rows:
+            tables.append(rows)
+    table_text = [
+        f"# table {index}\n" + "\n".join(" | ".join(row) for row in table)
+        for index, table in enumerate(tables, start=1)
+    ]
+    return "\n".join([*paragraphs, *table_text]), tables, embedded_image_count
+
+
+def _extract_docx_images(content: bytes) -> list[tuple[str, bytes]]:
+    _validate_zip_archive(content)
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            return [
+                (name, archive.read(name))
+                for name in sorted(archive.namelist())
+                if name.startswith("word/media/") and not name.endswith("/")
+            ]
+    except Exception as exc:
+        raise ValueError("DOCX_IMAGE_EXTRACT_FAILED") from exc
 
 
 def _extract_xlsx(content: bytes) -> str:
@@ -275,6 +247,106 @@ def _extract_pdf_text(content: bytes, *, max_pages: int) -> tuple[str, int | Non
         raise
     except Exception:
         raise ValueError("PDF_READ_FAILED")
+
+
+def _inspect_pdf_layout(
+    content: bytes,
+    *,
+    max_pages: int,
+) -> tuple[list[list[list[str]]], int]:
+    """Extract tables and count embedded page images without model inference."""
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return [], 0
+    try:
+        document = fitz.open(stream=content, filetype="pdf")
+        if document.needs_pass:
+            raise ValueError("PDF_ENCRYPTED")
+        tables: list[list[list[str]]] = []
+        embedded_image_count = 0
+        for index in range(min(document.page_count, max_pages)):
+            page = document.load_page(index)
+            embedded_image_count += len(page.get_images(full=True))
+            finder = getattr(page, "find_tables", None)
+            if finder is None:
+                continue
+            for table in finder().tables:
+                rows = [
+                    ["" if cell is None else str(cell).strip() for cell in row]
+                    for row in table.extract()
+                ]
+                if any(any(cell for cell in row) for row in rows):
+                    tables.append(rows)
+        document.close()
+        return tables, embedded_image_count
+    except ValueError:
+        raise
+    except Exception:
+        # Text extraction remains useful when optional layout inspection cannot
+        # understand an otherwise valid PDF.
+        return [], 0
+
+
+def parse_binary_content(
+    file_type: str,
+    content: bytes,
+    *,
+    max_pdf_pages: int,
+) -> NormalizedAttachmentContent:
+    """Route raw bytes through deterministic parsers before any model call."""
+    parser_name = file_type
+    warnings: list[str] = []
+    page_count: int | None = None
+    if file_type == "txt":
+        text = _extract_txt(content)
+    elif file_type == "prc":
+        text = _extract_prc(content)
+    elif file_type == "csv":
+        text = _extract_csv(content)
+    elif file_type == "html":
+        text = _extract_html(content)
+    elif file_type == "docx":
+        text, tables, embedded_image_count = _extract_docx(content)
+    elif file_type == "xlsx":
+        text = _extract_xlsx(content)
+    elif file_type == "pdf":
+        text, page_count = _extract_pdf_text(content, max_pages=max_pdf_pages)
+        tables, embedded_image_count = _inspect_pdf_layout(content, max_pages=max_pdf_pages)
+        if tables:
+            text = "\n".join([
+                text,
+                *(
+                    f"# table {index}\n" + "\n".join(" | ".join(row) for row in table)
+                    for index, table in enumerate(tables, start=1)
+                ),
+            ]).strip()
+        if page_count and page_count > max_pdf_pages:
+            warnings.append(f"PDF_TRUNCATED_TO_{max_pdf_pages}_PAGES")
+    else:
+        raise ValueError("NO_DETERMINISTIC_BINARY_PARSER")
+
+    tables = tables if file_type in {"docx", "pdf"} else []
+    embedded_image_count = embedded_image_count if file_type in {"docx", "pdf"} else 0
+    text, text_truncated = _truncate_text(text)
+    if text_truncated:
+        warnings.append("TEXT_TRUNCATED_FOR_MODEL_INPUT")
+    return NormalizedAttachmentContent(
+        file_type=file_type,
+        parser=parser_name,
+        text=text,
+        tables=tables,
+        embedded_image_count=embedded_image_count,
+        page_count=page_count,
+        warnings=warnings,
+        truncated=text_truncated or bool(page_count and page_count > max_pdf_pages),
+        semantic_mode=(
+            "vision"
+            if (file_type == "pdf" and (not text.strip() or embedded_image_count > 0))
+            or (file_type == "docx" and embedded_image_count > 0)
+            else "text"
+        ),
+    )
 
 
 def render_pdf_pages(content: bytes, *, max_pages: int) -> tuple[list[bytes], int]:
@@ -330,6 +402,8 @@ def _fallback_json(file_type: str, text: str, *, warnings: list[str], truncated:
     summary, key_points = _local_summary(text)
     return AttachmentParseJson(
         file_type=file_type,
+        parser="deterministic_fallback",
+        semantic_mode="none",
         summary=summary,
         key_points=key_points,
         raw_text=text,
@@ -449,6 +523,8 @@ async def _qwen_text_parse(
         ),
     )
     parsed.file_type = parsed.file_type or file_type
+    parsed.parser = "qwen_text"
+    parsed.semantic_mode = "text"
     parsed.warnings = [*warnings, *(parsed.warnings or [])]
     parsed.truncated = bool(parsed.truncated or truncated)
     return parsed
@@ -463,6 +539,7 @@ async def _qwen_visual_parse(
     urls: list[str],
     warnings: list[str],
     truncated: bool,
+    text_context: str = "",
 ) -> AttachmentParseJson:
     if not _qwen_configured(visual=True):
         raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
@@ -471,12 +548,19 @@ async def _qwen_visual_parse(
         "file_type, summary, key_points, extracted_fields, extracted_items, raw_text, warnings, truncated。"
         f"文件名：{file_name}；文件类型：{file_type}；是否截断：{truncated}。"
     )
+    if text_context:
+        prompt += f"\nDeterministically extracted text/table context:\n{text_context[:20000]}"
     parsed = await _invoke_qwen(
         session,
         attachment=attachment,
         call_type="attachment_visual_parse",
         visual=True,
-        input_payload={"file_type": file_type, "visual_count": len(urls), "truncated": truncated},
+        input_payload={
+            "file_type": file_type,
+            "visual_count": len(urls),
+            "truncated": truncated,
+            "text_context_length": len(text_context),
+        },
         invoke=lambda provider: provider.vl_chat(
             image_urls=urls,
             prompt=prompt,
@@ -485,6 +569,8 @@ async def _qwen_visual_parse(
         ),
     )
     parsed.file_type = parsed.file_type or file_type
+    parsed.parser = "qwen_vision"
+    parsed.semantic_mode = "vision"
     parsed.warnings = [*warnings, *(parsed.warnings or [])]
     parsed.truncated = bool(parsed.truncated or truncated)
     return parsed
@@ -519,6 +605,218 @@ def _mark_attachment(
     return attachment.extracted_json
 
 
+async def _parse_archive_attachment(
+    session: AsyncSession,
+    *,
+    attachment: EmailAttachment,
+    content: bytes,
+    archive_format: str,
+    detection_warnings: list[str],
+) -> dict[str, Any] | None:
+    try:
+        extraction = await _file_io(
+            extract_archive_members,
+            content,
+            archive_format,
+            max_depth=settings.ARCHIVE_MAX_DEPTH,
+            max_members=settings.ARCHIVE_MAX_MEMBERS,
+            max_expanded_bytes=settings.ARCHIVE_MAX_EXPANDED_BYTES,
+            max_compression_ratio=settings.ARCHIVE_MAX_COMPRESSION_RATIO,
+        )
+    except Exception as exc:
+        code = safe_error_code(exc, "ARCHIVE_EXTRACTION_FAILED") or "ARCHIVE_EXTRACTION_FAILED"
+        safety = await _file_io(
+            inspect_archive_safety,
+            content,
+            archive_format,
+            max_members=settings.ARCHIVE_MAX_MEMBERS,
+            max_expanded_bytes=settings.ARCHIVE_MAX_EXPANDED_BYTES,
+            max_compression_ratio=settings.ARCHIVE_MAX_COMPRESSION_RATIO,
+        )
+        metadata = engineering_reference_metadata(archive_format, detection_warnings, safety=safety)
+        metadata.update({"parse_skip_reason": None, "member_results": [], "archive_error": code})
+        return _mark_attachment(
+            attachment,
+            status="needs_manual_review",
+            parsed=None,
+            text=None,
+            error=code,
+            extracted_json=metadata,
+        )
+
+    member_results: list[dict[str, Any]] = []
+    aggregate_text: list[str] = []
+    requires_manual = False
+    for member in extraction.members:
+        file_name = member.path
+        content_type = mimetypes.guess_type(file_name)[0]
+        file_type = detect_file_type(file_name=file_name, content_type=content_type)
+        if file_type not in SUPPORTED_ATTACHMENT_TYPES:
+            member_results.append(
+                {
+                    "path": file_name,
+                    "file_type": file_type or "unsupported",
+                    "parse_status": "unsupported",
+                    "error_code": "UNSUPPORTED_FILE_TYPE",
+                    "archive_depth": member.archive_depth,
+                }
+            )
+            requires_manual = True
+            continue
+        try:
+            parsed = await _parse_archive_member(
+                session,
+                attachment=attachment,
+                file_name=file_name,
+                file_type=file_type,
+                content=member.content,
+            )
+            payload = parsed.model_dump()
+            payload.update(
+                {
+                    "path": file_name,
+                    "parse_status": "parsed",
+                    "archive_depth": member.archive_depth,
+                }
+            )
+            member_results.append(payload)
+            if parsed.raw_text:
+                aggregate_text.append(f"# {file_name}\n{parsed.raw_text}")
+        except Exception as exc:
+            code = safe_error_code(exc, "ARCHIVE_MEMBER_PARSE_FAILED") or "ARCHIVE_MEMBER_PARSE_FAILED"
+            member_results.append(
+                {
+                    "path": file_name,
+                    "file_type": file_type,
+                    "parse_status": "failed",
+                    "error_code": code,
+                    "archive_depth": member.archive_depth,
+                }
+            )
+            requires_manual = True
+
+    combined_text, truncated = _truncate_text("\n\n".join(aggregate_text))
+    metadata = engineering_reference_metadata(
+        archive_format,
+        detection_warnings,
+        safety=extraction.safety,
+    )
+    metadata.update(
+        {
+            "parser": "archive_router",
+            "semantic_mode": "mixed",
+            "parse_skip_reason": None,
+            "member_results": member_results,
+            "parsed_member_count": sum(item.get("parse_status") == "parsed" for item in member_results),
+            "failed_member_count": sum(item.get("parse_status") != "parsed" for item in member_results),
+            "archive_warnings": list(extraction.warnings),
+            "raw_text": combined_text,
+            "truncated": truncated,
+            "blocks_ticket_flow": requires_manual,
+        }
+    )
+    return _mark_attachment(
+        attachment,
+        status="needs_manual_review" if requires_manual else "parsed",
+        parsed=None,
+        text=combined_text or None,
+        error="ARCHIVE_MEMBER_REVIEW_REQUIRED" if requires_manual else None,
+        extracted_json=metadata,
+    )
+
+
+async def _parse_archive_member(
+    session: AsyncSession,
+    *,
+    attachment: EmailAttachment,
+    file_name: str,
+    file_type: str,
+    content: bytes,
+) -> AttachmentParseJson:
+    if file_type == "image":
+        data_url = f"data:{mimetypes.guess_type(file_name)[0] or 'image/png'};base64,{base64.b64encode(content).decode('ascii')}"
+        return await _qwen_visual_parse(
+            session,
+            attachment=attachment,
+            file_type=file_type,
+            file_name=file_name,
+            urls=[data_url],
+            warnings=[],
+            truncated=False,
+        )
+    normalized = await _file_io(
+        parse_binary_content,
+        file_type,
+        content,
+        max_pdf_pages=settings.PDF_MAX_PARSE_PAGES,
+    )
+    if file_type == "docx" and normalized.embedded_image_count:
+        images = await _file_io(_extract_docx_images, content)
+        if not images:
+            raise ValueError("DOCX_EMBEDDED_IMAGE_MISSING")
+        parsed = await _qwen_visual_parse(
+            session,
+            attachment=attachment,
+            file_type=file_type,
+            file_name=file_name,
+            urls=[
+                f"data:{mimetypes.guess_type(name)[0] or 'application/octet-stream'};base64,{base64.b64encode(image).decode('ascii')}"
+                for name, image in images
+            ],
+            warnings=normalized.warnings,
+            truncated=normalized.truncated,
+            text_context=normalized.text,
+        )
+        parsed.extracted_fields.setdefault("embedded_image_count", normalized.embedded_image_count)
+        parsed.extracted_fields.setdefault("table_count", len(normalized.tables))
+        return parsed
+    if file_type == "pdf" and normalized.semantic_mode == "vision":
+        pages, page_count = await _file_io(render_pdf_pages, content, max_pages=settings.PDF_MAX_PARSE_PAGES)
+        if not pages:
+            raise ValueError("PDF_RENDER_EMPTY")
+        parsed = await _qwen_visual_parse(
+            session,
+            attachment=attachment,
+            file_type=file_type,
+            file_name=file_name,
+            urls=[f"data:image/png;base64,{base64.b64encode(page).decode('ascii')}" for page in pages],
+            warnings=normalized.warnings,
+            truncated=page_count > settings.PDF_MAX_PARSE_PAGES,
+            text_context=normalized.text,
+        )
+        parsed.extracted_fields.setdefault("embedded_image_count", normalized.embedded_image_count)
+        parsed.extracted_fields.setdefault("table_count", len(normalized.tables))
+        return parsed
+    if not _qwen_configured(visual=False) or (
+        file_type == "txt" and "TEXT_TRUNCATED_FOR_MODEL_INPUT" in normalized.warnings
+    ):
+        return _fallback_json(
+            file_type,
+            normalized.text,
+            warnings=[*normalized.warnings, "ARCHIVE_MEMBER_LOCAL_FALLBACK"],
+            truncated=normalized.truncated,
+        )
+    try:
+        return await _qwen_text_parse(
+            session,
+            attachment=attachment,
+            file_type=file_type,
+            file_name=file_name,
+            text=normalized.text,
+            warnings=normalized.warnings,
+            truncated=normalized.truncated,
+        )
+    except AiProviderError:
+        if normalized.text.strip():
+            return _fallback_json(
+                file_type,
+                normalized.text,
+                warnings=[*normalized.warnings, "QWEN_FAILED_LOCAL_TEXT_FALLBACK"],
+                truncated=normalized.truncated,
+            )
+        raise
+
+
 async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
     archive_format, warnings = detect_archive_format(
         file_name=attachment.file_name,
@@ -526,12 +824,34 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
     )
     if archive_format:
         attachment.content_type = ARCHIVE_CONTENT_TYPES[archive_format]
+        if attachment.file_size and attachment.file_size > settings.ATTACHMENT_MAX_ARCHIVE_BYTES:
+            safety = inspect_archive_safety(None, archive_format)
+            safety = safety.__class__(
+                status="unsafe",
+                safe=False,
+                warnings=("ARCHIVE_SIZE_LIMIT_EXCEEDED",),
+            )
+        elif attachment.oss_object_id:
+            try:
+                content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
+                return await _parse_archive_attachment(
+                    session,
+                    attachment=attachment,
+                    content=content,
+                    archive_format=archive_format,
+                    detection_warnings=warnings,
+                )
+            except Exception:
+                safety = inspect_archive_safety(None, archive_format)
+        else:
+            safety = inspect_archive_safety(None, archive_format)
         return _mark_attachment(
             attachment,
-            status="skipped",
+            status="skipped" if safety.safe else "needs_manual_review",
             parsed=None,
             text=None,
-            extracted_json=engineering_reference_metadata(archive_format, warnings),
+            error=None if safety.safe else safety.warnings[0],
+            extracted_json=engineering_reference_metadata(archive_format, warnings, safety=safety),
         )
 
     file_type = attachment_type(attachment)
@@ -549,13 +869,16 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         )
         if archive_format:
             attachment.content_type = ARCHIVE_CONTENT_TYPES[archive_format]
-            return _mark_attachment(
-                attachment,
-                status="skipped",
-                parsed=None,
-                text=None,
-                extracted_json=engineering_reference_metadata(archive_format, warnings),
-            )
+            if content is not None:
+                return await _parse_archive_attachment(
+                    session,
+                    attachment=attachment,
+                    content=content,
+                    archive_format=archive_format,
+                    detection_warnings=warnings,
+                )
+            safety = inspect_archive_safety(None, archive_format)
+            return _mark_attachment(attachment, status="needs_manual_review", parsed=None, text=None, error=safety.warnings[0], extracted_json=engineering_reference_metadata(archive_format, warnings, safety=safety))
         return _mark_attachment(
             attachment,
             status="unsupported",
@@ -611,24 +934,37 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
             return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text)
 
         content = await download_oss_object_bytes(session, oss_object_id=attachment.oss_object_id)
-        if file_type == "txt":
-            text = await _file_io(_extract_txt, content)
-        elif file_type == "prc":
-            text = await _file_io(_extract_prc, content)
-        elif file_type == "csv":
-            text = await _file_io(_extract_csv, content)
-        elif file_type == "html":
-            text = await _file_io(_extract_html, content)
-        elif file_type == "docx":
-            text = await _file_io(_extract_docx, content)
-        elif file_type == "xlsx":
-            text = await _file_io(_extract_xlsx, content)
-        elif file_type == "pdf":
-            text, page_count = await _file_io(_extract_pdf_text, content, max_pages=settings.PDF_MAX_PARSE_PAGES)
-            if page_count and page_count > settings.PDF_MAX_PARSE_PAGES:
-                truncated = True
-                warnings.append(f"PDF_TRUNCATED_TO_{settings.PDF_MAX_PARSE_PAGES}_PAGES")
-            if not text.strip():
+        normalized = await _file_io(
+            parse_binary_content,
+            file_type,
+            content,
+            max_pdf_pages=settings.PDF_MAX_PARSE_PAGES,
+        )
+        text = normalized.text
+        truncated = normalized.truncated
+        warnings.extend(normalized.warnings)
+        if file_type == "docx" and normalized.embedded_image_count:
+            images = await _file_io(_extract_docx_images, content)
+            if not images:
+                raise ValueError("DOCX_EMBEDDED_IMAGE_MISSING")
+            urls = [
+                f"data:{mimetypes.guess_type(name)[0] or 'application/octet-stream'};base64,{base64.b64encode(image).decode('ascii')}"
+                for name, image in images
+            ]
+            parsed = await _qwen_visual_parse(
+                session,
+                attachment=attachment,
+                file_type=file_type,
+                file_name=attachment.file_name,
+                urls=urls,
+                warnings=warnings,
+                truncated=truncated,
+                text_context=text,
+            )
+            parsed.extracted_fields.setdefault("embedded_image_count", normalized.embedded_image_count)
+            parsed.extracted_fields.setdefault("table_count", len(normalized.tables))
+            return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text or text)
+        if file_type == "pdf" and normalized.semantic_mode == "vision":
                 rendered_pages, rendered_page_count = await _file_io(
                     render_pdf_pages,
                     content,
@@ -643,14 +979,20 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
                     f"data:image/png;base64,{base64.b64encode(page).decode('ascii')}"
                     for page in rendered_pages
                 ]
-                parsed = await _qwen_visual_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, urls=urls, warnings=warnings, truncated=truncated)
+                parsed = await _qwen_visual_parse(
+                    session,
+                    attachment=attachment,
+                    file_type=file_type,
+                    file_name=attachment.file_name,
+                    urls=urls,
+                    warnings=warnings,
+                    truncated=truncated,
+                    text_context=text,
+                )
+                parsed.extracted_fields.setdefault("embedded_image_count", normalized.embedded_image_count)
+                parsed.extracted_fields.setdefault("table_count", len(normalized.tables))
                 return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text)
-
-        text, text_truncated = _truncate_text(text)
-        truncated = truncated or text_truncated
-        if text_truncated:
-            warnings.append("TEXT_TRUNCATED_FOR_MODEL_INPUT")
-        if file_type == "txt" and text_truncated:
+        if file_type == "txt" and "TEXT_TRUNCATED_FOR_MODEL_INPUT" in warnings:
             parsed = _fallback_json(
                 file_type,
                 text,

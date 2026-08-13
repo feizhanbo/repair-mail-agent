@@ -20,6 +20,7 @@ from app.models.review import ManualReviewTask, NotificationEvent, NotificationU
 from app.models.storage import OssObject
 from app.models.tickets import RepairTicket, RepairTicketItem
 from app.models.workflow import FieldAuditLog, TicketStatusLog, WorkflowStatus, WorkflowTransition
+from app.models.workflow_execution import WorkflowExecution, WorkflowInterrupt
 
 __all__ = [
     "Base",
@@ -60,5 +61,7 @@ __all__ = [
     "OperationLog",
     "SystemEventLog",
     "JobRunLog",
+    "WorkflowExecution",
+    "WorkflowInterrupt",
 ]
 

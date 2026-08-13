@@ -1262,6 +1262,7 @@ async def _send_reply_record(
     reply: ReplyRecord,
     user_id: int | None,
     auto: bool,
+    finalize_rma: bool = True,
 ) -> None:
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
@@ -1272,13 +1273,14 @@ async def _send_reply_record(
             ticket.rma_status = "manual_review"
 
     if reply.send_status == "sent" and reply.smtp_message_id:
-        await _finalize_rma_issue(
-            session,
-            ticket=ticket,
-            reply=reply,
-            user_id=user_id,
-            auto=auto,
-        )
+        if finalize_rma:
+            await _finalize_rma_issue(
+                session,
+                ticket=ticket,
+                reply=reply,
+                user_id=user_id,
+                auto=auto,
+            )
         return
     reply.send_attempt_count = int(reply.send_attempt_count or 0) + 1
     guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
@@ -1535,20 +1537,21 @@ async def _send_reply_record(
                     "rma_no": rma_record.rma_no if rma_record is not None else None,
                 },
             )
-            closed = await _finalize_rma_issue(
-                session,
-                ticket=ticket,
-                reply=reply,
-                user_id=user_id,
-                auto=auto,
-            )
-            if not closed:
-                await _enqueue_rma_archive_retry(
+            if finalize_rma:
+                closed = await _finalize_rma_issue(
                     session,
                     ticket=ticket,
                     reply=reply,
                     user_id=user_id,
+                    auto=auto,
                 )
+                if not closed:
+                    await _enqueue_rma_archive_retry(
+                        session,
+                        ticket=ticket,
+                        reply=reply,
+                        user_id=user_id,
+                    )
         if is_followup_reply_type(reply.reply_type) and not was_counted:
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
         if is_followup_reply_type(reply.reply_type) and ticket.current_status_code == "need_customer_info":
@@ -1618,6 +1621,7 @@ async def create_reply_draft(
     related_email_id: int | None = None,
     language: str = "zh-CN",
     missing_fields: dict[str, Any] | None = None,
+    send_immediately: bool = True,
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
@@ -1651,8 +1655,8 @@ async def create_reply_draft(
             ReplyRecord.ticket_id == ticket.id,
             ReplyRecord.related_email_id == effective_related_email_id,
             ReplyRecord.reply_type == reply_kind,
-            ReplyRecord.review_status == "pending",
-            ReplyRecord.send_status == "pending_review",
+            ReplyRecord.review_status.in_({"pending", "auto_approved", "approved"}),
+            ReplyRecord.send_status.in_({"pending_review", "approved_pending_send"}),
         )
         .order_by(ReplyRecord.created_at.desc(), ReplyRecord.id.desc())
     )
@@ -1784,7 +1788,9 @@ async def create_reply_draft(
     if can_auto_send:
         reply.review_status = "auto_approved"
         reply.reviewed_at = utcnow()
-        await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
+        reply.send_status = "approved_pending_send"
+        if send_immediately:
+            await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
     await log_operation(
         session,
         user_id=user_id,
@@ -2055,6 +2061,7 @@ async def create_and_send_rma_authorization(
     expected_sn_validation_hash: str,
     expected_rma_template_version: str,
     expected_rma_no: str = "",
+    send_immediately: bool = True,
 ) -> dict[str, Any]:
     ticket = await session.get(RepairTicket, ticket_id, with_for_update=True)
     if ticket is None:
@@ -2225,13 +2232,20 @@ async def create_and_send_rma_authorization(
                 content=f"工单 {ticket.ticket_no} 的 RMA 模板回复已在原邮件链发送成功。",
                 metadata={"reply_id": existing.id, "rma_no": rma_record.rma_no},
             )
-            if ticket.current_status_code == "rma_sent":
+            if ticket.current_status_code == "rma_sent" and send_immediately:
                 return await retry_rma_archive(
                     session,
                     reply_id=existing.id,
                     user_id=user_id,
                 )
-        return {"status": existing.send_status, "ticket_id": ticket.id, "reply_id": existing.id, "idempotent_reuse": True}
+        return {
+            "status": existing.send_status,
+            "ticket_id": ticket.id,
+            "reply_id": existing.id,
+            "smtp_message_id": existing.smtp_message_id,
+            "archive_status": existing.archive_status,
+            "idempotent_reuse": True,
+        }
 
     pdf_content: bytes | None = None
     pdf_object: OssObject | None = None
@@ -2392,6 +2406,16 @@ async def create_and_send_rma_authorization(
         )
         return {"status": "pending_review", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
 
+    if not send_immediately:
+        ticket.rma_status = "generated" if attach_rma else "manual_review"
+        return {
+            "status": "prepared",
+            "ticket_id": ticket.id,
+            "reply_id": reply.id,
+            "pdf_oss_object_id": pdf_object.id if pdf_object else None,
+            "idempotent_reuse": False,
+        }
+
     ticket.rma_status = "sending" if attach_rma else "manual_review"
     await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
     if reply.send_status == "sent":
@@ -2428,3 +2452,95 @@ async def create_and_send_rma_authorization(
         }
     ticket.rma_status = "manual_review"
     return {"status": "manual_review", "error_code": reply.error_message or reply.send_status, "ticket_id": ticket.id, "reply_id": reply.id}
+
+
+async def prepare_rma_authorization(
+    session: AsyncSession,
+    *,
+    ticket_id: int,
+    user_id: int | None,
+    expected_version: int,
+    expected_safety_hash: str,
+    expected_sn_validation_hash: str,
+    expected_rma_template_version: str,
+    expected_rma_no: str = "",
+) -> dict[str, Any]:
+    """Prepare or reuse RMA PDF/reply without invoking SMTP."""
+    return await create_and_send_rma_authorization(
+        session,
+        ticket_id=ticket_id,
+        user_id=user_id,
+        expected_version=expected_version,
+        expected_safety_hash=expected_safety_hash,
+        expected_sn_validation_hash=expected_sn_validation_hash,
+        expected_rma_template_version=expected_rma_template_version,
+        expected_rma_no=expected_rma_no,
+        send_immediately=False,
+    )
+
+
+async def send_prepared_rma_authorization(
+    session: AsyncSession,
+    *,
+    reply_id: int,
+    user_id: int | None,
+    auto: bool = True,
+) -> dict[str, Any]:
+    """Send one prepared reply; uncertain or completed sends are never repeated."""
+    reply = await get_reply(session, reply_id)
+    if reply.reply_type not in {"rma_authorization", "receipt"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_REPLY_REQUIRED")
+    if reply.send_status == "pending_review":
+        return {"status": "pending_review", "ticket_id": reply.ticket_id, "reply_id": reply.id}
+    if reply.send_status == "send_uncertain":
+        return {
+            "status": "send_uncertain",
+            "ticket_id": reply.ticket_id,
+            "reply_id": reply.id,
+            "idempotent_reuse": True,
+        }
+    await _send_reply_record(
+        session,
+        reply=reply,
+        user_id=user_id,
+        auto=auto,
+        finalize_rma=False,
+    )
+    return {
+        "status": reply.send_status,
+        "ticket_id": reply.ticket_id,
+        "reply_id": reply.id,
+        "smtp_message_id": reply.smtp_message_id,
+        "archive_status": reply.archive_status,
+        "idempotent_reuse": reply.send_status == "sent",
+    }
+
+
+async def send_prepared_reply(
+    session: AsyncSession,
+    *,
+    reply_id: int,
+    user_id: int | None,
+    auto: bool = True,
+) -> dict[str, Any]:
+    """Send a prepared non-RMA reply through the idempotent SMTP ledger."""
+    reply = await get_reply(session, reply_id)
+    if reply.reply_type == "rma_authorization":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="NON_RMA_REPLY_REQUIRED")
+    if reply.send_status == "pending_review":
+        return {"status": "pending_review", "ticket_id": reply.ticket_id, "reply_id": reply.id}
+    if reply.send_status == "send_uncertain":
+        return {
+            "status": "send_uncertain",
+            "ticket_id": reply.ticket_id,
+            "reply_id": reply.id,
+            "idempotent_reuse": True,
+        }
+    await _send_reply_record(session, reply=reply, user_id=user_id, auto=auto)
+    return {
+        "status": reply.send_status,
+        "ticket_id": reply.ticket_id,
+        "reply_id": reply.id,
+        "smtp_message_id": reply.smtp_message_id,
+        "idempotent_reuse": reply.send_status == "sent",
+    }

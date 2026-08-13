@@ -456,6 +456,7 @@ async def test_deepseek_request_payload_does_not_persist_api_key() -> None:
                 "choices": [
                     {
                         "message": {
+                            "role": "assistant",
                             "content": json.dumps(
                                 {
                                     "intent_type": "unknown",

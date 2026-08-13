@@ -324,6 +324,7 @@ async def submit_export_batch(
     session: AsyncSession,
     *,
     export_id: int,
+    schedule_jobs: bool = True,
 ) -> dict[str, Any]:
     export = await session.get(TicketRelayExport, export_id, with_for_update=True)
     if export is None:
@@ -399,6 +400,7 @@ async def submit_export_batch(
             export_id=export.id,
             reason="interrupted_submit_recovery",
             user_id=None,
+            schedule_jobs=schedule_jobs,
         )
     export.status = "submitting"
     export.attempt_count += 1
@@ -459,9 +461,13 @@ async def submit_export_batch(
             recovery_stage="source_request_batch_reconcile",
         )
         result = await reconcile_uncertain_submission(
-            session, export_id=export.id, reason="immediate_unknown_commit_check", user_id=None
+            session,
+            export_id=export.id,
+            reason="immediate_unknown_commit_check",
+            user_id=None,
+            schedule_jobs=schedule_jobs,
         )
-        if result["status"] == "submit_unknown":
+        if result["status"] == "submit_unknown" and schedule_jobs:
             await notify_ticket_once(
                 session,
                 ticket=ticket,
@@ -541,20 +547,22 @@ async def submit_export_batch(
             "source_request_ids": [line.source_request_id for line in lines],
         },
     )
-    poll_job = await enqueue_job(
-        session,
-        job_type="sap_rma_poll",
-        resource_type="ticket_relay_export",
-        resource_id=export.id,
-        idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
-        metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
-        max_attempts=5000,
-    )
+    poll_job = None
+    if schedule_jobs:
+        poll_job = await enqueue_job(
+            session,
+            job_type="sap_rma_poll",
+            resource_type="ticket_relay_export",
+            resource_id=export.id,
+            idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
+            metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
+            max_attempts=5000,
+        )
     return {
         "status": "waiting_sap_result",
         "export_id": export.id,
         "line_count": len(lines),
-        "poll_job_id": poll_job.id,
+        "poll_job_id": poll_job.id if poll_job is not None else None,
     }
 
 
@@ -564,6 +572,7 @@ async def reconcile_uncertain_submission(
     export_id: int,
     reason: str,
     user_id: int | None,
+    schedule_jobs: bool = True,
 ) -> dict[str, Any]:
     export = await session.get(TicketRelayExport, export_id, with_for_update=True)
     if export is None:
@@ -614,20 +623,22 @@ async def reconcile_uncertain_submission(
         export.error_message = None
         export.next_retry_at = None
         ticket.relay_export_status = "waiting_rma"
-        poll_job = await enqueue_job(
-            session,
-            job_type="sap_rma_poll",
-            resource_type="ticket_relay_export",
-            resource_id=export.id,
-            idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
-            metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
-            max_attempts=5000,
-        )
+        poll_job = None
+        if schedule_jobs:
+            poll_job = await enqueue_job(
+                session,
+                job_type="sap_rma_poll",
+                resource_type="ticket_relay_export",
+                resource_id=export.id,
+                idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
+                metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
+                max_attempts=5000,
+            )
         return {
             "status": "waiting_sap_result",
             "export_id": export.id,
             "found_count": len(found_ids),
-            "poll_job_id": poll_job.id,
+            "poll_job_id": poll_job.id if poll_job is not None else None,
         }
     if found_ids:
         export.status = "manual_review"
@@ -660,20 +671,22 @@ async def reconcile_uncertain_submission(
     export.error_code = None
     export.error_message = None
     ticket.relay_export_status = "pending"
-    retry_job = await enqueue_job(
-        session,
-        job_type="relay_ticket_export",
-        resource_type="ticket_relay_export",
-        resource_id=export.id,
-        idempotency_key=f"relay_ticket_export_unknown_retry:{export.id}:{export.attempt_count}",
-        metadata={"ticket_id": ticket.id, "reason": reason, "user_id": user_id},
-        max_attempts=5,
-    )
+    retry_job = None
+    if schedule_jobs:
+        retry_job = await enqueue_job(
+            session,
+            job_type="relay_ticket_export",
+            resource_type="ticket_relay_export",
+            resource_id=export.id,
+            idempotency_key=f"relay_ticket_export_unknown_retry:{export.id}:{export.attempt_count}",
+            metadata={"ticket_id": ticket.id, "reason": reason, "user_id": user_id},
+            max_attempts=5,
+        )
     return {
         "status": "pending",
         "export_id": export.id,
         "ticket_id": ticket.id,
-        "retry_job_id": retry_job.id,
+        "retry_job_id": retry_job.id if retry_job is not None else None,
     }
 
 
@@ -703,6 +716,8 @@ async def poll_export_batch(
     export_id: int,
     allow_late_result: bool = False,
     confirmed_by_user_id: int | None = None,
+    schedule_jobs: bool = True,
+    enqueue_rma_job: bool = True,
 ) -> dict[str, Any]:
     export = await session.get(TicketRelayExport, export_id, with_for_update=True)
     if export is None:
@@ -734,6 +749,7 @@ async def poll_export_batch(
             export_id=export.id,
             reason="scheduled_unknown_commit_confirmation",
             user_id=confirmed_by_user_id,
+            schedule_jobs=schedule_jobs,
         )
 
     now = utcnow()
@@ -965,24 +981,26 @@ async def poll_export_batch(
     export.error_code = None
     export.error_message = None
     rma_no = distinct_rmas[0]
-    job = await enqueue_job(
-        session,
-        job_type="rma_authorization",
-        resource_type="repair_ticket",
-        resource_id=ticket.id,
-        idempotency_key=f"rma_authorization:{ticket.id}:{ticket.version}:{rma_no}",
-        metadata={
-            "ticket_version": ticket.version,
-            "safety_check_hash": ticket.safety_check_hash,
-            "sn_validation_hash": ticket.sn_validation_hash,
-            "rma_no": rma_no,
-            "rma_template_version": RMA_TEMPLATE_VERSION,
-        },
-        max_attempts=1,
-    )
+    job = None
+    if enqueue_rma_job:
+        job = await enqueue_job(
+            session,
+            job_type="rma_authorization",
+            resource_type="repair_ticket",
+            resource_id=ticket.id,
+            idempotency_key=f"rma_authorization:{ticket.id}:{ticket.version}:{rma_no}",
+            metadata={
+                "ticket_version": ticket.version,
+                "safety_check_hash": ticket.safety_check_hash,
+                "sn_validation_hash": ticket.sn_validation_hash,
+                "rma_no": rma_no,
+                "rma_template_version": RMA_TEMPLATE_VERSION,
+            },
+            max_attempts=1,
+        )
     return {
         "status": "rma_received",
         "export_id": export.id,
         "rma_no": rma_no,
-        "rma_job_id": job.id,
+        "rma_job_id": job.id if job is not None else None,
     }
