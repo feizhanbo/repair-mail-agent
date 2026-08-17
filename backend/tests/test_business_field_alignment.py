@@ -109,7 +109,7 @@ async def test_overseas_route_does_not_require_board_fields() -> None:
 
 
 @pytest.mark.anyio
-async def test_domestic_route_uses_board_code_not_sap_material_code() -> None:
+async def test_domestic_route_prefers_exact_sap_material_code() -> None:
     ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
     item = RepairTicketItem(
         id=2,
@@ -120,13 +120,13 @@ async def test_domestic_route_uses_board_code_not_sap_material_code() -> None:
     )
 
     result = await business_resolution.resolve_item_return_route(
-        QueueSession(),
+        QueueSession(execute_rows=[[board("M8002", "beijing", name="PVI")]]),
         ticket=ticket,
         item=item,
     )
 
-    assert result["status"] == "needs_manual"
-    assert result["message"] == "BOARD_INFORMATION_REQUIRED"
+    assert result["status"] == "resolved"
+    assert result["route_source"] == "domestic_material_match"
 
 
 @pytest.mark.anyio

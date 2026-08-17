@@ -333,7 +333,7 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
             auto_canaries += 1
             if (
                 intent != "new_repair"
-                or gold.get("expected_final_status") != "closed"
+                or gold.get("expected_final_status") != "rma_sent"
                 or gold.get("expected_rma_status") != "issued"
                 or expected_outbound_count != 1
             ):
@@ -381,7 +381,7 @@ def _temporary_master_rows(
     manifest: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     sn_rows: dict[str, dict[str, Any]] = {}
-    board_rows: dict[str, dict[str, Any]] = {}
+    board_rows: dict[tuple[str, str], dict[str, Any]] = {}
     policy_rows: dict[str, dict[str, Any]] = {}
     for message in manifest["messages"]:
         gold = message["gold"]
@@ -394,11 +394,13 @@ def _temporary_master_rows(
             sn_rows[sn] = row
         for row in gold.get("temporary_board_cards") or []:
             material = str(row.get("material_code") or "").strip()
+            board_code = str(row.get("board_code") or "").strip()
             if not material:
                 raise BatchError("TEMPORARY_BOARD_CARD_REQUIRES_MATERIAL_CODE")
-            if material in board_rows and board_rows[material] != row:
-                raise BatchError(f"TEMPORARY_BOARD_CARD_CONFLICT:{material}")
-            board_rows[material] = row
+            key = (material, board_code)
+            if key in board_rows and board_rows[key] != row:
+                raise BatchError(f"TEMPORARY_BOARD_CARD_CONFLICT:{material}:{board_code}")
+            board_rows[key] = row
         for row in gold.get("temporary_customer_policies") or []:
             policy_code = str(row.get("policy_code") or "").strip()
             if not policy_code:
@@ -409,20 +411,40 @@ def _temporary_master_rows(
     return list(sn_rows.values()), list(board_rows.values()), list(policy_rows.values())
 
 
-async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path) -> dict[str, Any]:
-    sn_rows, board_rows, policy_rows = _temporary_master_rows(manifest)
-    batch_id = str(manifest["batch_id"])
-    source_hash = hashlib.sha256(batch_id.encode("utf-8")).hexdigest()
+def _fresh_temporary_master_state(
+    state_path: Path, *, batch_id: str
+) -> dict[str, Any]:
     state = (
         json.loads(state_path.read_text(encoding="utf-8"))
         if state_path.exists()
         else {"batch_id": batch_id, "messages": {}, "actual_send_count": 0}
     )
+    completed_cleanup = state.get("cleanup")
+    if isinstance(completed_cleanup, dict) and completed_cleanup.get("completed_at"):
+        return {"batch_id": batch_id, "messages": {}, "actual_send_count": 0}
+    return state
+
+
+async def apply_temporary_master_data(
+    manifest: dict[str, Any],
+    state_path: Path,
+    *,
+    allow_gold_e2e_snapshot_override: bool = False,
+) -> dict[str, Any]:
+    sn_rows, board_rows, policy_rows = _temporary_master_rows(manifest)
+    batch_id = str(manifest["batch_id"])
+    source_hash = hashlib.sha256(batch_id.encode("utf-8")).hexdigest()
+    state = _fresh_temporary_master_state(state_path, batch_id=batch_id)
+    # A reusable gold suite can apply the same fixture again after a prior
+    # cleanup.  Reusing the old completed marker would make the next cleanup
+    # return early and leak freshly-created master data.
     created = state.setdefault(
         "temporary_master_data",
         {"sn_asset_ids": [], "board_card_ids": [], "customer_policy_ids": []},
     )
     created.setdefault("customer_policy_ids", [])
+    overridden_sn_assets = created.setdefault("overridden_sn_assets", [])
+    overridden_board_cards = created.setdefault("overridden_board_cards", [])
     async with AsyncSessionLocal() as session:
         for row_no, row in enumerate(sn_rows, 1):
             sn = str(row["sn"]).strip().upper()
@@ -441,7 +463,80 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
                         "updated_for_recovery": True,
                     }
                     continue
-                raise BatchError(f"TEMPORARY_SN_ALREADY_EXISTS:{sn}")
+                existing_snapshot = next(
+                    (
+                        snapshot
+                        for snapshot in overridden_sn_assets
+                        if int(snapshot.get("id") or 0) == existing.id
+                    ),
+                    None,
+                )
+                raw_data = existing.raw_data if isinstance(existing.raw_data, dict) else {}
+                if not (
+                    allow_gold_e2e_snapshot_override
+                    and (
+                        existing_snapshot is not None
+                        or (
+                            existing.source_system == "e2e_test"
+                            and raw_data.get("gold_confirmed") is True
+                        )
+                    )
+                ):
+                    raise BatchError(f"TEMPORARY_SN_ALREADY_EXISTS:{sn}")
+                required = ("customer_code", "customer_name", "material_code")
+                missing = [
+                    field for field in required if not str(row.get(field) or "").strip()
+                ]
+                if missing:
+                    raise BatchError(
+                        f"TEMPORARY_SN_FIELDS_REQUIRED:{sn}:{','.join(missing)}"
+                    )
+                if existing_snapshot is None:
+                    overridden_sn_assets.append(
+                        {
+                            "id": existing.id,
+                            "sn": existing.sn,
+                            "customer_code": existing.customer_code,
+                            "customer_name": existing.customer_name,
+                            "material_code": existing.material_code,
+                            "material_name": existing.material_name,
+                            "asset_status": existing.asset_status,
+                            "warranty_start_date": existing.warranty_start_date,
+                            "warranty_end_date": existing.warranty_end_date,
+                            "source_file_name": existing.source_file_name,
+                            "source_file_hash": existing.source_file_hash,
+                            "source_row_no": existing.source_row_no,
+                            "source_system": existing.source_system,
+                            "external_id": existing.external_id,
+                            "source_updated_at": existing.source_updated_at,
+                            "raw_data": existing.raw_data,
+                        }
+                    )
+                existing.customer_code = str(row["customer_code"]).strip()
+                existing.customer_name = str(row["customer_name"]).strip()
+                existing.material_code = str(row["material_code"]).strip()
+                existing.material_name = (
+                    str(row.get("material_name") or "").strip() or None
+                )
+                existing.asset_status = "valid"
+                existing.warranty_start_date = _optional_date(
+                    row.get("warranty_start_date")
+                )
+                existing.warranty_end_date = _optional_date(
+                    row.get("warranty_end_date")
+                )
+                existing.source_file_name = batch_id
+                existing.source_file_hash = source_hash
+                existing.source_row_no = row_no
+                existing.source_system = "e2e_test"
+                existing.external_id = None
+                existing.source_updated_at = None
+                existing.raw_data = {
+                    "batch_id": batch_id,
+                    "gold_confirmed": True,
+                    "temporarily_overrode_e2e_gold": True,
+                }
+                continue
             required = ("customer_code", "customer_name", "material_code")
             missing = [field for field in required if not str(row.get(field) or "").strip()]
             if missing:
@@ -466,13 +561,103 @@ async def apply_temporary_master_data(manifest: dict[str, Any], state_path: Path
             created["sn_asset_ids"].append(asset.id)
         for row_no, row in enumerate(board_rows, 1):
             material = str(row["material_code"]).strip()
+            board_code = str(row.get("board_code") or "").strip()
             existing = await session.scalar(
-                select(BoardCard).where(BoardCard.material_code == material)
+                select(BoardCard).where(
+                    BoardCard.material_code == material,
+                    BoardCard.board_code == board_code,
+                )
             )
             if existing is not None:
                 if existing.source_file_name == batch_id and existing.id in created["board_card_ids"]:
                     continue
-                raise BatchError(f"TEMPORARY_BOARD_CARD_ALREADY_EXISTS:{material}")
+                existing_snapshot = next(
+                    (
+                        snapshot
+                        for snapshot in overridden_board_cards
+                        if int(snapshot.get("id") or 0) == existing.id
+                    ),
+                    None,
+                )
+                raw_data = existing.raw_data if isinstance(existing.raw_data, dict) else {}
+                if not (
+                    allow_gold_e2e_snapshot_override
+                    and (
+                        existing_snapshot is not None
+                        or (
+                            existing.source_file_name
+                            in {"controlled-mail-e2e", "e2e_test"}
+                            and (
+                                raw_data.get("gold_confirmed") is True
+                                or raw_data.get("purpose") == "controlled_mail_e2e"
+                            )
+                        )
+                    )
+                ):
+                    raise BatchError(f"TEMPORARY_BOARD_CARD_ALREADY_EXISTS:{material}")
+                if existing_snapshot is None:
+                    overridden_board_cards.append(
+                        {
+                            "id": existing.id,
+                            "board_code": existing.board_code,
+                            "board_name": existing.board_name,
+                            "return_location": existing.return_location,
+                            "route_type": existing.route_type,
+                            "customer_scope": existing.customer_scope,
+                            "material_code": existing.material_code,
+                            "material_name": existing.material_name,
+                            "need_ship_to_beijing": existing.need_ship_to_beijing,
+                            "shipping_address": existing.shipping_address,
+                            "shipping_contact": existing.shipping_contact,
+                            "shipping_phone": existing.shipping_phone,
+                            "postal_code": existing.postal_code,
+                            "status": existing.status,
+                            "source_file_name": existing.source_file_name,
+                            "source_file_hash": existing.source_file_hash,
+                            "source_row_no": existing.source_row_no,
+                            "raw_data": existing.raw_data,
+                        }
+                    )
+                required = (
+                    "board_code",
+                    "return_location",
+                    "route_type",
+                    "customer_scope",
+                    "shipping_address",
+                    "shipping_contact",
+                    "shipping_phone",
+                )
+                missing = [
+                    field for field in required if not str(row.get(field) or "").strip()
+                ]
+                if missing:
+                    raise BatchError(
+                        "TEMPORARY_BOARD_CARD_FIELDS_REQUIRED:"
+                        + material
+                        + ":"
+                        + ",".join(missing)
+                    )
+                existing.board_code = str(row["board_code"]).strip()
+                existing.board_name = str(row.get("board_name") or "").strip() or None
+                existing.return_location = str(row["return_location"]).strip()
+                existing.route_type = str(row["route_type"]).strip()
+                existing.customer_scope = str(row["customer_scope"]).strip()
+                existing.material_name = str(row.get("material_name") or "").strip() or None
+                existing.need_ship_to_beijing = bool(row.get("need_ship_to_beijing", True))
+                existing.shipping_address = str(row["shipping_address"]).strip()
+                existing.shipping_contact = str(row["shipping_contact"]).strip()
+                existing.shipping_phone = str(row["shipping_phone"]).strip()
+                existing.postal_code = str(row.get("postal_code") or "").strip() or None
+                existing.status = "active"
+                existing.source_file_name = batch_id
+                existing.source_file_hash = source_hash
+                existing.source_row_no = row_no
+                existing.raw_data = {
+                    "batch_id": batch_id,
+                    "gold_confirmed": True,
+                    "temporarily_overrode_e2e_gold": True,
+                }
+                continue
             required = (
                 "board_code",
                 "return_location",
@@ -591,20 +776,82 @@ async def cleanup_temporary_master_data(
             "sn_assets_deleted": 0,
             "board_cards_deleted": 0,
             "customer_policies_deleted": 0,
+            "sn_assets_restored": 0,
+            "board_cards_restored": 0,
+            "sn_assets_planned": 0,
+            "board_cards_planned": 0,
+            "customer_policies_planned": 0,
+            "sn_assets_restore_planned": 0,
+            "board_cards_restore_planned": 0,
+            "this_run": {
+                "sn_assets_deleted": 0,
+                "board_cards_deleted": 0,
+                "customer_policies_deleted": 0,
+                "sn_assets_restored": 0,
+                "board_cards_restored": 0,
+            },
         }
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    completed_cleanup = state.get("cleanup")
     created = state.get("temporary_master_data") or {}
     sn_ids = [int(value) for value in created.get("sn_asset_ids") or []]
     board_ids = [int(value) for value in created.get("board_card_ids") or []]
     policy_ids = [int(value) for value in created.get("customer_policy_ids") or []]
+    overridden_sn_assets = list(created.get("overridden_sn_assets") or [])
+    overridden_board_cards = list(created.get("overridden_board_cards") or [])
     batch_id = str(manifest["batch_id"])
+    actual_counts = {
+        "sn_assets_deleted": 0,
+        "board_cards_deleted": 0,
+        "customer_policies_deleted": 0,
+        "sn_assets_restored": 0,
+        "board_cards_restored": 0,
+    }
     async with AsyncSessionLocal() as session:
+        if isinstance(completed_cleanup, dict) and completed_cleanup.get("completed_at"):
+            pending_batch_rows = False
+            checks = (
+                (SnAsset, sn_ids),
+                (BoardCard, board_ids),
+                (CustomerServicePolicy, policy_ids),
+            )
+            for model, ids in checks:
+                if ids and await session.scalar(
+                    select(model.id).where(
+                        model.id.in_(ids), model.source_file_name == batch_id
+                    ).limit(1)
+                ):
+                    pending_batch_rows = True
+                    break
+            if not pending_batch_rows:
+                for model, snapshots in (
+                    (SnAsset, overridden_sn_assets),
+                    (BoardCard, overridden_board_cards),
+                ):
+                    snapshot_ids = [
+                        int(snapshot.get("id") or 0) for snapshot in snapshots
+                    ]
+                    if snapshot_ids and await session.scalar(
+                        select(model.id).where(
+                            model.id.in_(snapshot_ids),
+                            model.source_file_name == batch_id,
+                        ).limit(1)
+                    ):
+                        pending_batch_rows = True
+                        break
+            if not pending_batch_rows:
+                return {
+                    **completed_cleanup,
+                    "already_completed": True,
+                    "this_run": {key: 0 for key in actual_counts},
+                }
         if sn_ids:
             assets = (
                 await session.execute(select(SnAsset).where(SnAsset.id.in_(sn_ids)))
             ).scalars().all()
             if any(asset.source_file_name != batch_id for asset in assets):
                 raise BatchError("TEMPORARY_SN_CLEANUP_SCOPE_MISMATCH")
+            actual_counts["sn_assets_deleted"] = len(assets)
             await session.execute(
                 update(SnValidationResult)
                 .where(SnValidationResult.matched_sn_asset_id.in_(sn_ids))
@@ -624,6 +871,7 @@ async def cleanup_temporary_master_data(
             ).scalars().all()
             if any(card.source_file_name != batch_id for card in cards):
                 raise BatchError("TEMPORARY_BOARD_CLEANUP_SCOPE_MISMATCH")
+            actual_counts["board_cards_deleted"] = len(cards)
             await session.execute(
                 update(RepairTicketItem)
                 .where(RepairTicketItem.matched_board_card_id.in_(board_ids))
@@ -640,6 +888,7 @@ async def cleanup_temporary_master_data(
             ).scalars().all()
             if any(policy.source_file_name != batch_id for policy in policies):
                 raise BatchError("TEMPORARY_CUSTOMER_POLICY_CLEANUP_SCOPE_MISMATCH")
+            actual_counts["customer_policies_deleted"] = len(policies)
             await session.execute(
                 update(RepairTicket)
                 .where(RepairTicket.service_policy_id.in_(policy_ids))
@@ -650,11 +899,117 @@ async def cleanup_temporary_master_data(
                     CustomerServicePolicy.id.in_(policy_ids)
                 )
             )
+        for snapshot in overridden_sn_assets:
+            asset = await session.get(SnAsset, int(snapshot["id"]))
+            if asset is None or asset.sn != snapshot.get("sn"):
+                raise BatchError("TEMPORARY_SN_RESTORE_SCOPE_MISMATCH")
+            if asset.source_file_name != batch_id:
+                restored_fields = (
+                    "customer_code",
+                    "customer_name",
+                    "material_code",
+                    "material_name",
+                    "asset_status",
+                    "source_file_name",
+                    "source_file_hash",
+                    "source_row_no",
+                    "source_system",
+                    "external_id",
+                    "raw_data",
+                )
+                already_restored = all(
+                    getattr(asset, field) == snapshot.get(field)
+                    for field in restored_fields
+                )
+                if not already_restored:
+                    raise BatchError("TEMPORARY_SN_RESTORE_SOURCE_MISMATCH")
+                continue
+            for field in (
+                "customer_code",
+                "customer_name",
+                "material_code",
+                "material_name",
+                "asset_status",
+                "source_file_name",
+                "source_file_hash",
+                "source_row_no",
+                "source_system",
+                "external_id",
+                "raw_data",
+            ):
+                setattr(asset, field, snapshot.get(field))
+            actual_counts["sn_assets_restored"] += 1
+            asset.warranty_start_date = _optional_date(
+                snapshot.get("warranty_start_date")
+            )
+            asset.warranty_end_date = _optional_date(snapshot.get("warranty_end_date"))
+            source_updated_at = snapshot.get("source_updated_at")
+            asset.source_updated_at = (
+                datetime.fromisoformat(source_updated_at)
+                if isinstance(source_updated_at, str) and source_updated_at
+                else source_updated_at
+            )
+        for snapshot in overridden_board_cards:
+            card = await session.get(BoardCard, int(snapshot["id"]))
+            if card is None or card.material_code != snapshot.get("material_code"):
+                raise BatchError("TEMPORARY_BOARD_RESTORE_SCOPE_MISMATCH")
+            if card.source_file_name != batch_id:
+                restored_fields = (
+                    "board_code",
+                    "board_name",
+                    "return_location",
+                    "route_type",
+                    "customer_scope",
+                    "material_code",
+                    "material_name",
+                    "need_ship_to_beijing",
+                    "shipping_address",
+                    "shipping_contact",
+                    "shipping_phone",
+                    "postal_code",
+                    "status",
+                    "source_file_name",
+                    "source_file_hash",
+                    "source_row_no",
+                    "raw_data",
+                )
+                already_restored = all(
+                    getattr(card, field) == snapshot.get(field)
+                    for field in restored_fields
+                )
+                if not already_restored:
+                    raise BatchError("TEMPORARY_BOARD_RESTORE_SOURCE_MISMATCH")
+                continue
+            for field in (
+                "board_code",
+                "board_name",
+                "return_location",
+                "route_type",
+                "customer_scope",
+                "material_code",
+                "material_name",
+                "need_ship_to_beijing",
+                "shipping_address",
+                "shipping_contact",
+                "shipping_phone",
+                "postal_code",
+                "status",
+                "source_file_name",
+                "source_file_hash",
+                "source_row_no",
+                "raw_data",
+            ):
+                setattr(card, field, snapshot.get(field))
+            actual_counts["board_cards_restored"] += 1
         await session.commit()
     state["cleanup"] = {
-        "sn_assets_deleted": len(sn_ids),
-        "board_cards_deleted": len(board_ids),
-        "customer_policies_deleted": len(policy_ids),
+        **actual_counts,
+        "sn_assets_planned": len(sn_ids),
+        "board_cards_planned": len(board_ids),
+        "customer_policies_planned": len(policy_ids),
+        "sn_assets_restore_planned": len(overridden_sn_assets),
+        "board_cards_restore_planned": len(overridden_board_cards),
+        "this_run": dict(actual_counts),
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_json(state_path, state)
@@ -768,7 +1123,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 and row.get("send_status") == "sent"
             ]
             if (
-                existing_ticket.get("current_status_code") == "closed"
+                existing_ticket.get("current_status_code") == "rma_sent"
                 and len(already_sent) == 1
             ):
                 normalized = client.data(
@@ -1033,7 +1388,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             completed = wait_for_ticket(
                 client,
                 email_id,
-                expected_status="closed",
+                expected_status="rma_sent",
                 expected_reply_type="rma_authorization",
             )
             verified = validate_complete_path(completed)
@@ -1111,7 +1466,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             completed = wait_for_ticket(
                 client,
                 email_id,
-                expected_status="closed",
+                expected_status="rma_sent",
                 expected_reply_type="rma_authorization",
             )
             verified = validate_complete_path(completed)
@@ -1285,7 +1640,7 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             completed = wait_for_ticket(
                 client,
                 supplement_email_id,
-                expected_status="closed",
+                expected_status="rma_sent",
                 expected_reply_type="rma_authorization",
             )
             supplement_email = (

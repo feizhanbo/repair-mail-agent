@@ -110,7 +110,7 @@ def test_upgrade_step_timeout_is_reported_and_process_is_killed(
 def test_schema_audit_constants_match_release_head_and_models() -> None:
     from app.models import Base
 
-    assert check_sap_schema.EXPECTED_REVISION == "q4l9g0b1c2d3"
+    assert check_sap_schema.EXPECTED_REVISION == "r5m0h1c2d3e4"
     assert check_sap_schema.EXPECTED_BUSINESS_TABLE_COUNT == len(Base.metadata.tables)
     assert audit_mail_release.REQUIRED_REVISION == check_sap_schema.EXPECTED_REVISION
 
@@ -124,7 +124,7 @@ def test_release_audit_rejects_stale_revision_and_invalid_close_route() -> None:
             "uid_validity_unique_constraint_present": True,
             "device_received_foreign_key": [{"constraint_name": "fk"}],
         },
-        "only_rma_issued_and_archived_enabled": False,
+        "no_automatic_close_route_enabled": False,
         "backup": {"exists": True},
     }
 

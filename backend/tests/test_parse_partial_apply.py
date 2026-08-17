@@ -73,6 +73,7 @@ async def test_partial_item_selection_creates_only_selected_candidate() -> None:
     items = [value for value in session.added if isinstance(value, RepairTicketItem)]
     audits = [value for value in session.added if isinstance(value, FieldAuditLog)]
     assert [item.sn for item in items] == ["TESTSN00000002"]
+    assert items[0].material_code == "PART-B"
     assert len(audits) == 1
 
 
@@ -101,7 +102,7 @@ async def test_reparse_reconciles_existing_placeholder_without_duplicate_line() 
         email_id=3,
         extracted_items={
             "items": [
-                {"line_no": 1, "sn": "M8123260108000171", "failure_description": "Controlled failure"},
+                {"line_no": 1, "sn": "M8123260108000171", "material_code": "PART-X", "material_name": "Part X", "failure_description": "Controlled failure"},
             ]
         },
     )
@@ -109,6 +110,8 @@ async def test_reparse_reconciles_existing_placeholder_without_duplicate_line() 
     await _create_items_from_parse_result(session, ticket, parse, user_id=7)
 
     assert placeholders[0].sn == "M8123260108000171"
+    assert placeholders[0].material_code == "PART-X"
+    assert placeholders[0].material_name == "Part X"
     assert session.deleted == [placeholders[1]]
     assert not [value for value in session.added if isinstance(value, RepairTicketItem)]
 

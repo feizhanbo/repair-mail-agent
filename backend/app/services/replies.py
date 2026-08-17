@@ -46,6 +46,7 @@ from app.services.mail_reply_renderer import (
     ReplyRenderError,
     render_reply_history,
 )
+from app.resources.signature_logo import ACCO_TEST_LOGO_CONTENT_ID, ACCO_TEST_LOGO_PNG
 from app.services.rma_pdf import (
     RmaPdfError,
     TEMPLATE_VERSION as RMA_TEMPLATE_VERSION,
@@ -270,7 +271,8 @@ async def _require_reply_parent(
     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-RMA_REPLY_ZH_VERSION = "rma_reply_zh_v2"
+RMA_REPLY_ZH_IN_WARRANTY_VERSION = "domestic_in_warranty_v1"
+RMA_REPLY_ZH_OUT_OF_WARRANTY_VERSION = "domestic_out_warranty_v1"
 OVERSEAS_WARRANTY_IN_VERSION = "overseas_in_warranty_v1"
 OVERSEAS_WARRANTY_OUT_VERSION = "overseas_out_warranty_v1"
 OVERSEAS_WARRANTY_ST_VERSION = "overseas_st_pickup_v1"
@@ -295,28 +297,35 @@ def _parse_template_date(value: Any) -> date | None:
 
 
 def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
-    if ticket.language_code != "en-US":
-        return "rma_authorization_domestic", RMA_REPLY_ZH_VERSION
-
     email = (ticket.contact_email or "").strip().lower()
     customer = " ".join((ticket.customer_name or "").lower().split())
-    if email.endswith("@amkor.com"):
+    if ticket.language_code == "en-US" and email.endswith("@amkor.com"):
         raise RmaReplyRuleError("rma_amkor_manual", "RMA_AMKOR_MANUAL_HANDLING_REQUIRED")
-    if "stmicroelectronics pte ltd" in customer:
+    if ticket.language_code == "en-US" and "stmicroelectronics pte ltd" in customer:
         raise RmaReplyRuleError(
             "rma_st_manual",
             "RMA_ST_CUSTOM_HANDLING_REQUIRES_MANUAL",
         )
 
     checks = list((ticket.sn_validation_snapshot or {}).get("checks") or [])
-    if len(checks) != 1:
+    if not checks:
         raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_EVIDENCE_MISSING")
-    warranty_start = _parse_template_date(checks[0].get("warranty_start_date"))
-    warranty_end = _parse_template_date(checks[0].get("warranty_end_date"))
     request_date = ticket.request_date
-    if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
-        raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
-    if request_date <= warranty_end:
+    warranty_flags: set[bool] = set()
+    for check in checks:
+        warranty_start = _parse_template_date(check.get("warranty_start_date"))
+        warranty_end = _parse_template_date(check.get("warranty_end_date"))
+        if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
+            raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
+        warranty_flags.add(request_date <= warranty_end)
+    if len(warranty_flags) != 1:
+        raise RmaReplyRuleError("warranty_status_unknown", "RMA_MIXED_WARRANTY_STATUS")
+    in_warranty = True in warranty_flags
+    if ticket.language_code != "en-US":
+        if in_warranty:
+            return "rma_authorization_domestic_in_warranty", RMA_REPLY_ZH_IN_WARRANTY_VERSION
+        return "rma_authorization_domestic_out_of_warranty", RMA_REPLY_ZH_OUT_OF_WARRANTY_VERSION
+    if in_warranty:
         return "rma_authorization_overseas_in_warranty", OVERSEAS_WARRANTY_IN_VERSION
     if email == "daniel@leitik.com":
         raise RmaReplyRuleError("rma_price_required", "RMA_OUT_OF_WARRANTY_PRICE_REQUIRED")
@@ -407,6 +416,9 @@ def _render_template(
     content: str = "",
     original_subject: str = "",
     return_address_block: str = "",
+    city: str = "",
+    repair_fee: str = "",
+    currency_unit: str = "",
     escape_values: bool = False,
 ) -> str:
     def value(item: str) -> str:
@@ -420,6 +432,9 @@ def _render_template(
         .replace("{{ content }}", content if escape_values else value(content))
         .replace("{{ original_subject }}", value(original_subject))
         .replace("{{ return_address_block }}", value(return_address_block))
+        .replace("{{ city }}", value(city))
+        .replace("{{ repair_fee }}", value(repair_fee))
+        .replace("{{ currency_unit }}", value(currency_unit))
     )
 
 
@@ -533,7 +548,24 @@ def _build_reply_message(
         message.add_alternative(rendered_html, subtype="html")
         html_part = message.get_body(preferencelist=("html",))
         if html_part is not None:
-            for resource in related_resources:
+            resources = list(related_resources)
+            if f"cid:{ACCO_TEST_LOGO_CONTENT_ID}" in rendered_html:
+                resources.insert(
+                    0,
+                    RelatedResource(
+                        content=ACCO_TEST_LOGO_PNG,
+                        maintype="image",
+                        subtype="png",
+                        content_id=ACCO_TEST_LOGO_CONTENT_ID,
+                        original_content_id=ACCO_TEST_LOGO_CONTENT_ID,
+                        content_hash=hashlib.sha256(ACCO_TEST_LOGO_PNG).hexdigest(),
+                    ),
+                )
+            seen_cids: set[str] = set()
+            for resource in resources:
+                if resource.content_id in seen_cids:
+                    continue
+                seen_cids.add(resource.content_id)
                 html_part.add_related(
                     resource.content,
                     maintype=resource.maintype,
@@ -603,6 +635,8 @@ async def _select_base_template(
     *,
     hide_company_name: bool = False,
 ) -> ReplyTemplate | None:
+    if language == "en-US" and not hide_company_name:
+        return await _select_template(session, "international_company_base", language)
     if language != "zh-CN":
         return None
     return await _select_template(
@@ -618,6 +652,8 @@ def _return_address_block(
     customer_policy: dict[str, Any] | None = None,
 ) -> str:
     policy = customer_policy or {}
+    if language == "en-US":
+        return settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
     company = str(policy.get("shipping_company") or "").strip()
     address = str(policy.get("shipping_address") or "").strip()
     contact = str(policy.get("shipping_contact") or "").strip()
@@ -645,6 +681,12 @@ async def _render_reply_templates(
 ) -> tuple[str, str, str, ReplyTemplate | None, str, str]:
     original_subject = (parent.subject or f"Repair request {ticket.ticket_no}").strip()
     policy = customer_policy or {}
+    city = {"beijing": "北京", "tianjin": "天津"}.get(
+        str(policy.get("shipping_route") or "").strip().lower(), ""
+    )
+    repair_fee = str(policy.get("repair_price") or "").strip()
+    currency = str(policy.get("currency") or "").strip().upper()
+    currency_unit = {"CNY": "元", "USD": "美元"}.get(currency, currency)
     return_address_block = _return_address_block(
         language=content_template.language,
         customer_policy=policy,
@@ -655,6 +697,9 @@ async def _render_reply_templates(
         missing_fields=missing_fields,
         original_subject=original_subject,
         return_address_block=return_address_block,
+        city=city,
+        repair_fee=repair_fee,
+        currency_unit=currency_unit,
     )
     salutation = str((customer_policy or {}).get("reply_salutation") or "").strip()
     if salutation:
@@ -667,7 +712,11 @@ async def _render_reply_templates(
         content_template.language,
         hide_company_name=bool((customer_policy or {}).get("hide_company_name")),
     )
-    if content_template.language == "zh-CN" and base_template is None:
+    if (
+        content_template.language in {"zh-CN", "en-US"}
+        and not bool((customer_policy or {}).get("hide_company_name"))
+        and base_template is None
+    ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_BASE_TEMPLATE_NOT_FOUND")
     body = (
         _render_template(
@@ -677,6 +726,9 @@ async def _render_reply_templates(
             content=content,
             original_subject=original_subject,
             return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
         )
         if base_template is not None
         else content
@@ -688,22 +740,28 @@ async def _render_reply_templates(
             missing_fields=missing_fields,
             original_subject=original_subject,
             return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
             escape_values=True,
         )
-        if base_template is not None and base_template.html_body_template:
-            html_body = _render_template(
-                base_template.html_body_template,
-                ticket=ticket,
-                missing_fields=missing_fields,
-                content=html_content,
-                original_subject=original_subject,
-                return_address_block=return_address_block,
-                escape_values=True,
-            )
-        else:
-            html_body = html_content
     else:
-        html_body = _plain_to_html(body)
+        html_content = _plain_to_html(content)
+    if base_template is not None and base_template.html_body_template:
+        html_body = _render_template(
+            base_template.html_body_template,
+            ticket=ticket,
+            missing_fields=missing_fields,
+            content=html_content,
+            original_subject=original_subject,
+            return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
+            escape_values=True,
+        )
+    else:
+        html_body = html_content
 
     history = await render_reply_history(
         session,
@@ -883,31 +941,11 @@ async def _finalize_rma_issue(
     rma_record.status = "issued"
     rma_record.issued_at = now
     ticket.rma_status = "issued"
-    if ticket.current_status_code == "rma_sent":
-        await transition_ticket(
-            session,
-            ticket=ticket,
-            to_status_code="closed",
-            trigger_event="rma_issued_and_archived",
-            user_id=user_id,
-            operator_type="system" if auto else "user",
-            reason="正式RMA已回填，PDF关键字段校验、邮件发送及附件归档均已完成。",
-            metadata={
-                "reply_id": reply.id,
-                "rma_no": rma_record.rma_no,
-                "smtp_message_id": reply.smtp_message_id,
-                "pdf_sha256": expected_hash,
-                "closure_gates": {
-                    "rma_received": True,
-                    "pdf_validated": True,
-                    "smtp_sent": True,
-                    "message_id_saved": True,
-                    "pdf_archived": True,
-                    "outbound_archived": True,
-                },
-            },
-        )
-    return ticket.current_status_code == "closed"
+    # RMA issuance is complete here, but the repair business is not. Keep the
+    # main ticket at rma_sent until a separately evidenced device-intake event
+    # closes it. Archive retry callers only need to know that issuance and
+    # archival are complete, not that the ticket is terminal.
+    return True
 
 
 async def retry_rma_archive(
@@ -1188,7 +1226,9 @@ async def _reply_send_guard_error(
         if (
             base_template is None
             or not base_template.enabled
-            or base_template.template_type not in {"domestic_company_base", "neutral_base"}
+            or base_template.template_type not in {
+                "domestic_company_base", "international_company_base", "neutral_base"
+            }
         ):
             return "REPLY_BASE_TEMPLATE_NOT_AVAILABLE"
     if reply.related_email_id is None:
@@ -1657,6 +1697,16 @@ async def create_reply_draft(
         .order_by(ReplyRecord.created_at.desc(), ReplyRecord.id.desc())
     )
     if existing_draft is not None:
+        can_auto_send = _reply_can_auto_send(existing_draft)
+        if can_auto_send:
+            existing_draft.review_status = "auto_approved"
+            existing_draft.reviewed_at = utcnow()
+            await _send_reply_record(
+                session,
+                reply=existing_draft,
+                user_id=user_id,
+                auto=True,
+            )
         return serialize_reply(existing_draft)
     if is_followup_reply_type(reply_kind) and ticket.followup_count >= ticket.max_followup_count:
         if ticket.current_status_code != "manual_review":

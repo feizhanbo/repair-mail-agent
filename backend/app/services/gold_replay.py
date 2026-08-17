@@ -409,6 +409,10 @@ async def apply_gold_test_reset(
 
     await session.execute(delete(NotificationUserState).where(NotificationUserState.notification_id.in_(ids["notifications"] or [-1])))
     await session.execute(delete(NotificationEvent).where(NotificationEvent.id.in_(ids["notifications"] or [-1])))
+    # These audit/event rows carry direct email/ticket/job foreign keys and
+    # must be removed before any of their referenced business parents.
+    await session.execute(delete(SystemEventLog).where(SystemEventLog.id.in_(ids["system_logs"] or [-1])))
+    await session.execute(delete(OperationLog).where(OperationLog.id.in_(ids["operation_logs"] or [-1])))
     await session.execute(update(ReplyRecord).where(ReplyRecord.id.in_(ids["replies"] or [-1])).values(ai_call_log_id=None))
     await session.execute(update(TicketRma).where(TicketRma.id.in_(ids["rmas"] or [-1])).values(reply_record_id=None))
     await session.execute(delete(TicketRmaItem).where(TicketRmaItem.ticket_rma_id.in_(ids["rmas"] or [-1])))
@@ -439,8 +443,6 @@ async def apply_gold_test_reset(
     await session.execute(delete(EmailAttachment).where(EmailAttachment.id.in_(ids["attachments"] or [-1])))
     await session.execute(update(Email).where(Email.duplicate_of_email_id.in_(ids["emails"] or [-1])).values(duplicate_of_email_id=None))
     await session.execute(delete(MailFetchRecord).where(MailFetchRecord.id.in_(ids["mail_fetch_records"] or [-1])))
-    await session.execute(delete(SystemEventLog).where(SystemEventLog.id.in_(ids["system_logs"] or [-1])))
-    await session.execute(delete(OperationLog).where(OperationLog.id.in_(ids["operation_logs"] or [-1])))
     await session.execute(delete(Email).where(Email.id.in_(ids["emails"] or [-1])))
     await session.execute(delete(EmailThread).where(EmailThread.id.in_(ids["threads"] or [-1])))
     await session.execute(delete(JobRunLog).where(JobRunLog.id.in_(ids["jobs"] or [-1])))

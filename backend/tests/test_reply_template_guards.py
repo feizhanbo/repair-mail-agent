@@ -40,6 +40,7 @@ async def test_domestic_reply_composes_content_with_company_base(monkeypatch: py
         template_type="domestic_company_base",
         body="BASE-BEGIN\n{{ content }}\nBASE-END",
     )
+    base.html_body_template = '<div>BASE-BEGIN {{ content }}<img src="cid:accotest_logo"></div>'
     ticket = RepairTicket(id=3, ticket_no="RMA-3", current_status_code="parsed")
     parent = Email(
         id=4,
@@ -76,6 +77,7 @@ async def test_domestic_reply_composes_content_with_company_base(monkeypatch: py
     assert "Original request" in body
     assert body.startswith("BASE-BEGIN\n业务内容 RMA-3\nBASE-END")
     assert "业务内容 RMA-3" in html_body
+    assert 'cid:accotest_logo' in html_body
     assert selected_base is base
     assert len(history_hash) == 64
     assert len(render_hash) == 64
@@ -198,6 +200,7 @@ async def test_send_guard_requires_template_base_and_reply_headers(monkeypatch: 
 def test_seed_contains_all_runtime_reply_templates() -> None:
     keys = {(item["template_type"], item["language"]) for item in REPLY_TEMPLATES}
     assert ("domestic_company_base", "zh-CN") in keys
+    assert ("international_company_base", "en-US") in keys
     for template_type in (
         "receipt",
         "missing_fields",
@@ -208,7 +211,8 @@ def test_seed_contains_all_runtime_reply_templates() -> None:
     ):
         assert (template_type, "zh-CN") in keys
         assert (template_type, "en-US") in keys
-    assert ("rma_authorization_domestic", "zh-CN") in keys
+    assert ("rma_authorization_domestic_in_warranty", "zh-CN") in keys
+    assert ("rma_authorization_domestic_out_of_warranty", "zh-CN") in keys
     assert ("rma_authorization_overseas_in_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_out_of_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_st_pickup", "en-US") in keys
@@ -282,7 +286,8 @@ async def test_followup_send_guard_blocks_stale_draft_after_information_is_compl
     ticket = RepairTicket(
         id=1, ticket_no="RMA-1", current_status_code="need_customer_info",
         customer_name="客户", contact_person="联系人", contact_email="customer@example.com",
-        request_date="2026-08-05", mailing_address="测试地址", problem_description="故障",
+        contact_phone="13800000000", request_date="2026-08-05",
+        mailing_address="测试地址", problem_description="故障",
     )
     item = RepairTicketItem(id=2, ticket_id=1, sn="SN001")
 

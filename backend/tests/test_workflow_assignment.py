@@ -211,7 +211,7 @@ async def test_rma_sent_and_closed_cannot_bypass_evidence_gates() -> None:
             trigger_event="rma_issued_and_archived",
             metadata={"closure_gates": {"smtp_sent": True}},
         )
-    assert close_error.value.detail == "RMA_ISSUE_CLOSURE_GATES_REQUIRED"
+    assert close_error.value.detail == "DEVICE_INTAKE_CLOSURE_ENTRY_NOT_IMPLEMENTED"
 
 
 def test_manual_task_schema_rejects_legacy_close_action() -> None:

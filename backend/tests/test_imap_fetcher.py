@@ -106,6 +106,8 @@ def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: 
     class SearchClient:
         def uid(self, *args):
             calls.append(args)
+            if args[0] == "FETCH":
+                return "OK", [(b"HEADER", b"Message-ID: <recover@example.com>\r\n\r\n")]
             return "OK", [b"101"]
 
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "rmatest1@accotest.com")
@@ -114,7 +116,23 @@ def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: 
     assert imap_fetcher._uid_search(client, message_id=None, unseen_only=True) == ["101"]
     assert calls[-1] == ("SEARCH", None, "UNSEEN", "NOT", "FROM", "rmatest1@accotest.com")
     assert imap_fetcher._uid_search(client, message_id="<recover@example.com>", unseen_only=False) == ["101"]
-    assert calls[-1] == ("SEARCH", None, "HEADER", "Message-ID", "<recover@example.com>")
+    assert calls[-2] == ("SEARCH", None, "HEADER", "Message-ID", "<recover@example.com>")
+
+
+def test_uid_search_filters_reference_header_false_positive() -> None:
+    class SearchClient:
+        def uid(self, *args):
+            if args[0] == "SEARCH":
+                return "OK", [b"101 102"]
+            uid = args[1]
+            message_id = (
+                b"<recover@example.com>" if uid == "101" else b"<supplement@example.com>"
+            )
+            return "OK", [(b"HEADER", b"Message-ID: " + message_id + b"\r\n\r\n")]
+
+    assert imap_fetcher._uid_search(
+        SearchClient(), message_id="<recover@example.com>", unseen_only=False
+    ) == ["101"]
 
 
 def _raw_eml() -> bytes:

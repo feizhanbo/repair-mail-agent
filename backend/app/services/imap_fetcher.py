@@ -7,6 +7,8 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from email import policy
+from email.parser import BytesParser
 from typing import Any
 
 from sqlalchemy import or_, select, text
@@ -19,7 +21,7 @@ from app.models.mail_fetch import MailFetchRecord
 from app.services import emails as email_service
 from app.services.attachment_precheck import filter_decorative_attachments
 from app.services.email_archival import EmailArchivalError, archive_email_bundle
-from app.services.common import utcnow
+from app.services.common import normalize_message_id, utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload, precheck_imap_uid
 from app.services.jobs import enqueue_job
@@ -78,6 +80,9 @@ def _connect() -> imaplib.IMAP4_SSL:
 
 def _uid_search(client: imaplib.IMAP4_SSL, *, message_id: str | None, unseen_only: bool) -> list[str]:
     if message_id:
+        # Some IMAP servers tokenize HEADER searches and may return messages
+        # whose References contains the requested id.  Narrow candidates by
+        # parsing the actual Message-ID header before the ingestion loop.
         typ, data = client.uid("SEARCH", None, "HEADER", "Message-ID", message_id)
     elif unseen_only:
         typ, data = client.uid("SEARCH", None, "UNSEEN", "NOT", "FROM", settings.IMAP_USER)
@@ -86,7 +91,28 @@ def _uid_search(client: imaplib.IMAP4_SSL, *, message_id: str | None, unseen_onl
     if typ != "OK":
         raise ImapFetchError("IMAP_SEARCH_FAILED")
     raw = data[0] if data else b""
-    return [_decode_uid(uid) for uid in raw.split() if uid]
+    uids = [_decode_uid(uid) for uid in raw.split() if uid]
+    if message_id:
+        exact: list[str] = []
+        for uid in uids:
+            fetched_type, fetched = client.uid(
+                "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
+            )
+            if fetched_type != "OK":
+                continue
+            header = next(
+                (
+                    item[1]
+                    for item in fetched or []
+                    if isinstance(item, tuple) and isinstance(item[1], bytes)
+                ),
+                b"",
+            )
+            parsed = BytesParser(policy=policy.default).parsebytes(header)
+            if normalize_message_id(str(parsed.get("Message-ID") or "")) == normalize_message_id(message_id):
+                exact.append(uid)
+        return exact
+    return uids
 
 
 def _uid_fetch_raw(client: imaplib.IMAP4_SSL, uid: str) -> bytes:

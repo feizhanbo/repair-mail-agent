@@ -193,8 +193,6 @@ class Settings(BaseSettings):
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
     RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
-    RMA_PDF_MAILING_CONTACT_PERSON: str = ""
-    RMA_PDF_MAILING_CONTACT_PHONE: str = ""
     RMA_PDF_TYPICAL_MAX_BYTES: int = 500_000
     RMA_PDF_MAX_BYTES: int = 2_000_000
     RMA_DEFAULT_BEIJING_COMPANY: str = "北京华峰测控技术股份有限公司"

@@ -194,12 +194,6 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "trigger_event": "rma_reply_sent",
         "condition_desc": "SAP回填合法RMA编号且模板回复实际发送成功。",
     },
-    {
-        "from_status_code": "rma_sent",
-        "to_status_code": "closed",
-        "trigger_event": "rma_issued_and_archived",
-        "condition_desc": "正式RMA、PDF校验、邮件发送和归档均已完成。",
-    },
 )
 
 
@@ -314,20 +308,53 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited."
         ),
         "html_body_template": (
-            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">{{ content }}<br><br><br>'
-            'Best Regards!<br>-----------------------------------------------------<br>'
-            'Miya Fang (方菲)<br><br>'
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">\n'
+            '{{ content }}<br><br><br>\n\n<div style="color:#6666CC;">\n'
+            'Best Regards!<br>\n-----------------------------------------------------<br>\n'
+            'Miya Fang (方菲)<br><br>\n\n'
             'AccoTEST Business Unit of Beijing Huafeng Test &amp; Control Technology Co.,Ltd<br>'
-            'Tel: +86-512-67678157/62982753*801<br>Cell Phone: 86-15001161080<br>'
-            'E-mail:miya.fang@accotest.com<br>'
-            'Address: Room309, A1 Building, #388 XinPing Street, Suzhou, 215123 P.R. China<br>'
-            '地址:江苏省苏州市工业园区新平街388号 腾飞创新园 塔楼A1-309室<br>www.accotest.com<br>'
+            '\nTel: +86-512-67678157/62982753*801<br>\nCell Phone: 86-15001161080<br>\n'
+            'E-mail:miya.fang@accotest.com<br>\nAddress: Room309, A1 Building, #388 XinPing Street, Suzhou, 215123 P.R. China<br>\n'
+            '地址:江苏省苏州市工业园区新平街388号 腾飞创新园 塔楼A1-309室<br>\n'
+            '<img src="cid:accotest_logo" alt="AccoTEST" width="110" style="display:block;border:0;outline:none;text-decoration:none;margin-top:2px;margin-bottom:0;">\n'
+            '<a href="https://www.accotest.com" style="color:#6666CC;text-decoration:none;">www.accotest.com</a>\n</div>\n\n'
+            '<div style="color:#808080;">\n'
             '本电邮所包含或其随附的信息可能属于保密信息，仅供指定收件方使用。如阁下并非本电邮指明的收件方，请将阁下拥有的本电邮及其所有备份（包括所有附件）删除并销毁，并将阁下误收本电邮一事通知发件方或华峰测控；在此特提请阁下注意不得泄露、复制或散发本电邮，并不得倚赖本电邮而采取任何行动。<br>'
             'The information contained in and accompanying this email may be confidential, and is intended solely for the use of the intended recipient(s).  '
             'If you are not the intended recipient of this email, please delete and destroy all copies (including any attachments) in your possession, '
             'notify the sender or Beijing Huafeng Test &amp; Control Technology Co., Ltd. that you have received this email in error, and you are hereby notified '
-            'that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited.'
-            '</div>'
+            'that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited.\n'
+            '</div>\n</div>'
+        ),
+    },
+    {
+        "template_code": "all_replies_international_company_base_en",
+        "template_name": "All replies base template (Demi full signature)",
+        "template_type": "international_company_base",
+        "language": "en-US",
+        "version": "v1",
+        "subject_template": None,
+        "body_template": (
+            "{{ content }}\n\n\nBest Regards!\n-----------------------------------------------------\n\n"
+            "Demi Wang(王佳慧)\n\n\nAccoTEST Business Unit of Beijing Huafeng Test & Control Technology Co.,Ltd\n\n"
+            "Tel:+86-21-60875371\n\nCell Phone:+86-18721190315\n\nE-mail: demi.wang@accotest.com\n\n"
+            "Address: 10F,#7 Building,#88 ShengRong Road,PuDong District, Shanghai, 201203 P.R.China (New)\n\n"
+            "地址:上海市浦东新区盛荣路88号源创谷7号楼10层\n\n\nwww.accotest.com\n\n"
+            "本电邮所包含或其随附的信息可能属于保密信息，仅供指定收件方使用。如阁下并非本电邮指明的收件方，请将阁下拥有的本电邮及其所有备份（包括所有附件）删除并销毁，并将阁下误收本电邮一事通知发件方或华峰测控；在此特提请阁下注意不得泄露、复制或散发本电邮，并不得倚赖本电邮而采取任何行动。\n"
+            "The information contained in and accompanying this email may be confidential, and is intended solely for the use of the intended recipient(s).  If you are not the intended recipient of this email, please delete and destroy all copies (including any attachments) in your possession, notify the sender or Beijing Huafeng Test & Control Technology Co., Ltd. that you have received this email in error, and you are hereby notified that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited."
+        ),
+        "html_body_template": (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">\n{{ content }}<br><br><br>\n\n'
+            '<div style="color:#000099;">\nBest Regards!<br><br>\n-----------------------------------------------------<br><br>\n'
+            '<span style="background-color:#ffff00;color:#000099;">Demi</span> Wang(王佳慧)<br><br><br>\n'
+            'AccoTEST Business Unit of Beijing Huafeng Test &amp; Control Technology Co.,Ltd<br><br>\nTel:+86-21-60875371<br><br>\n'
+            'Cell Phone:+86-18721190315<br><br>\nE-mail: <span style="background-color:#ffff00;color:#000099;">demi</span>.wang@accotest.com<br><br>\n'
+            'Address: <span style="color:#ff0000;font-weight:bold;">10F,#7 Building,</span>#88 ShengRong Road,PuDong District, Shanghai, 201203 P.R.China <span style="color:#ff0000;font-weight:bold;">(New)</span><br><br>\n'
+            '地址:上海市浦东新区盛荣路88号源创谷<span style="color:#ff0000;font-weight:bold;">7号楼10层</span><br><br>\n'
+            '<img src="cid:accotest_logo" alt="AccoTEST" width="145" style="display:block;border:0;outline:none;text-decoration:none;margin:0 0 2px 0;">\n'
+            '<a href="https://www.accotest.com" style="color:#3366cc;text-decoration:none;">www.accotest.com</a>\n</div>\n\n<br>\n\n<div style="color:#666666;">\n'
+            '本电邮所包含或其随附的信息可能属于保密信息，仅供指定收件方使用。如阁下并非本电邮指明的收件方，请将阁下拥有的本电邮及其所有备份（包括所有附件）删除并销毁，并将阁下误收本电邮一事通知发件方或华峰测控；在此特提请阁下注意不得泄露、复制或散发本电邮，并不得倚赖本电邮而采取任何行动。<br>\n'
+            'The information contained in and accompanying this email may be confidential, and is intended solely for the use of the intended recipient(s).  If you are not the intended recipient of this email, please delete and destroy all copies (including any attachments) in your possession, notify the sender or Beijing Huafeng Test &amp; Control Technology Co., Ltd. that you have received this email in error, and you are hereby notified that any disclosure, duplication or dissemination of, or the taking of any action in reliance on, this email is expressly prohibited.\n</div>\n</div>'
         ),
     },
     {
@@ -401,6 +428,7 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         "template_type": "rma_authorization_domestic",
         "language": "zh-CN",
         "version": "rma_reply_zh_v1",
+        "enabled": False,
         "subject_template": "Re: {{ original_subject }}",
         "body_template": (
             "您好：\n\nRMA维修授权表见附件。\n"
@@ -412,20 +440,20 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         ),
     },
     {
-        "template_code": "rma_authorization_domestic_zh",
-        "template_name": "国内 RMA 维修授权回复（参考邮件 v2）",
-        "template_type": "rma_authorization_domestic",
+        "template_code": "rma_authorization_domestic_in_warranty_zh",
+        "template_name": "国内在保 RMA 维修授权回复",
+        "template_type": "rma_authorization_domestic_in_warranty",
         "language": "zh-CN",
-        "version": "rma_reply_zh_v2",
+        "version": "domestic_in_warranty_v1",
         "subject_template": "{{ rma_attachment_basename }}",
         "body_template": (
             "Dear {{ contact_person }} ：\n"
             "RMA表格见附件。\n"
             "为了不耽误贵司维修进度，请注意以下事项：\n"
-            "1.请务必打印出RMA表，并与报修板一起寄出。\n"
+            "1.请务必打印出RMA表，并与报修板一起寄到{{ city }}质量部 。\n"
             "2.请务必注意板子的包装良好及核对板子的返回地址是否正确,如若中途改地址请提前告知\n"
             "3.维修工期：10个工作日\n"
-            "  请寄如下地址：(寄错会延长返修时效）\n"
+            "请寄如下地址：(寄错会延长返修时效）\n"
             "{{ return_address_block }}"
         ),
         "html_body_template": (
@@ -433,11 +461,35 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             'Dear {{ contact_person }} ：<br>'
             'RMA表格见附件。<br>'
             '为了不耽误贵司维修进度，请注意以下事项：<br>'
-            '1.请务必打印出RMA表，并与报修板一起寄出。<br>'
-            '2.请务必注意板子的包装良好及核对板子的返回地址是否正确,如若中途改地址请提前告知<br>'
-            '3.维修工期：10个工作日<br>'
+            '<span style="color:red;">1.请务必打印出RMA表，并与报修板一起寄到{{ city }}质量部 。</span><br>'
+            '<span style="color:red;">2.请务必注意板子的包装良好及核对板子的返回地址是否正确,如若中途改地址请提前告知</span><br>'
+            '<span style="color:red;">3.维修工期：10个工作日</span><br>'
             '请寄如下地址：(寄错会延长返修时效）<br>'
             '<span style="white-space:pre-line">{{ return_address_block }}</span></div>'
+        ),
+    },
+    {
+        "template_code": "rma_authorization_domestic_out_of_warranty_zh",
+        "template_name": "国内超保 RMA 维修授权回复",
+        "template_type": "rma_authorization_domestic_out_of_warranty",
+        "language": "zh-CN",
+        "version": "domestic_out_warranty_v1",
+        "subject_template": "{{ rma_attachment_basename }}",
+        "body_template": (
+            "Dear {{ contact_person }} ：\n为了不耽误贵司维修进度，请注意以下事项：\n"
+            "1.请打印出附件RMA表，并与报修板一起寄到{{ city }}质量部。(请核对板子的返回地址，如若中途改地址请提前告知）\n"
+            "2.已超保板卡，请将维修订单盖章，邮件提供电子版（我司收到有效订单后，SAP系统放行）,请尽快安排付款\n"
+            "邮寄地址：\n{{ return_address_block }}\n维修工期：10个工作日。维修后板卡质保期：90天\n"
+            "维修费：{{ repair_fee }}{{ currency_unit }}/块（含13%VAT税票与单程快递费），维修发票单独邮寄。"
+        ),
+        "html_body_template": (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">'
+            'Dear {{ contact_person }} ：<br>为了不耽误贵司维修进度，请注意以下事项：<br>'
+            '1.请打印出附件RMA表，并与报修板一起寄到{{ city }}质量部。(请核对板子的返回地址，如若中途改地址请提前告知）<br>'
+            '2.<span style="background-color:yellow;">已超保板卡，请将维修订单盖章，邮件提供电子版</span>（我司收到有效订单后，SAP系统放行）,请尽快安排付款<br>'
+            '邮寄地址：<br><span style="white-space:pre-line">{{ return_address_block }}</span><br>'
+            '维修工期：10个工作日。维修后板卡质保期：90天<br>'
+            '维修费：{{ repair_fee }}{{ currency_unit }}/块（含13%VAT税票与单程快递费），维修发票单独邮寄。\n</div>'
         ),
     },
     {
@@ -652,13 +704,7 @@ async def _seed_workflow_transitions(session: AsyncSession) -> int:
             _apply_values(transition, payload, payload.keys())
     await session.execute(
         update(WorkflowTransition)
-        .where(
-            WorkflowTransition.to_status_code == "closed",
-            or_(
-                WorkflowTransition.from_status_code != "rma_sent",
-                WorkflowTransition.trigger_event != "rma_issued_and_archived",
-            ),
-        )
+        .where(WorkflowTransition.to_status_code == "closed")
         .values(enabled=False)
     )
     return len(WORKFLOW_TRANSITIONS)

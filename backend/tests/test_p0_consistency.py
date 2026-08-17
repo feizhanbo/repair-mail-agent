@@ -187,6 +187,24 @@ def test_auto_apply_uses_dedicated_high_confidence_threshold(monkeypatch: pytest
     assert _parse_requires_manual(candidate, []) is False
 
 
+def test_clear_incomplete_repair_uses_followup_path_below_auto_apply_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.emails.settings.AUTO_APPLY_MIN_CONFIDENCE", 0.85)
+    monkeypatch.setattr("app.services.emails.settings.CONFIDENCE_THRESHOLD", 0.70)
+    candidate = ParseResult(
+        email_id=1,
+        parser_type="deepseek",
+        intent_type="new_repair",
+        confidence_score=0.75,
+        missing_fields={"contact_phone": "missing"},
+        conflict_fields={},
+    )
+    assert _parse_requires_manual(candidate, []) is False
+    candidate.confidence_score = 0.69
+    assert _parse_requires_manual(candidate, []) is True
+
+
 def test_skipped_engineering_archive_does_not_require_manual_review() -> None:
     candidate = ParseResult(
         email_id=1,

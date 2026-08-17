@@ -10,6 +10,9 @@
     "1": ["Customer Name", "Mailing Add", "Total cost", "www.accotest.com"]
   },
   "barcode": {"rect": [362.1, 22.9, 693.876, 58.9], "bar_width": 0.75, "bar_height": 36.0},
+  "blank_regions": {
+    "approved_by_value": {"page": 0, "rect": [207.0, 243.0, 229.0, 260.0]}
+  },
   "table": {
     "footer_clip": [0.0, 550.0, 842.0, 595.0],
     "footer_dpi": 300,

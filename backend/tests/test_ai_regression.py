@@ -15,14 +15,17 @@ from app.integrations.ai_provider import (
     _normalize_response_payload,
 )
 from app.core.repair_items import normalize_repair_item, normalize_repair_items
-from app.models import AiCallLog, Email, EmailAttachment
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, RepairTicket
 from app.services.ai import (
     _apply_request_date_fallback,
+    _can_auto_recover_customer_supplement,
     _enrich_ai_quality,
+    _apply_deterministic_supplement_fields,
     _key_result,
     _merge_attachment_business_data,
     _status_for,
     ai_log_diagnostics,
+    _normalize_customer_mailing_address,
 )
 
 
@@ -50,6 +53,207 @@ def test_ai_extract_schema_accepts_sample_output() -> None:
     assert _status_for(parsed, None) == "success"
 
 
+def test_customer_mailing_address_removes_only_adjacent_municipality_duplicate() -> None:
+    assert (
+        _normalize_customer_mailing_address(
+            "上海市上海市松江区香闵路1188弄1-4号"
+        )
+        == "上海市松江区香闵路1188弄1-4号"
+    )
+    assert (
+        _normalize_customer_mailing_address("江苏省徐州市上海路1号")
+        == "江苏省徐州市上海路1号"
+    )
+
+
+@pytest.mark.anyio
+async def test_enrichment_rejects_signature_only_return_fields_and_repairs_shifted_sn_columns() -> None:
+    assets = {
+        "M81232105400093": SimpleNamespace(
+            sn="M81232105400093",
+            asset_status="valid",
+            customer_code="JSICAT",
+            customer_name="江苏爱矽半导体科技有限公司",
+            material_code="A8200B31327",
+            material_name="STS8200B FOVI",
+        ),
+        "M81172009050036Y": SimpleNamespace(
+            sn="M81172009050036Y",
+            asset_status="valid",
+            customer_code="JSICAT",
+            customer_name="江苏爱矽半导体科技有限公司",
+            material_code="A8200B30057",
+            material_name="STS8200B DIO",
+        ),
+    }
+
+    class Session:
+        async def scalar(self, statement):
+            params = statement.compile().params
+            value = next(iter(params.values()), "")
+            return assets.get(str(value).upper())
+
+    email = Email(
+        id=72,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 8, 12, 14, 24),
+        clean_body=(
+            "需要返厂维修，请帮忙提供下地址。\n"
+            "STS8200BA8200B31327FOVIM81232105400093校准FAIL\n"
+            "STS8200BA8200B30057DIOM81172009050036Y校准FAIL\n\n"
+            "张跃 测试助理工程师\n江苏爱矽半导体科技有限公司\n"
+            "地址：徐州经济技术开发区\n手机：15298760948"
+        ),
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={
+            "customer_name": "江苏爱矽半导体科技有限公司",
+            "contact_person": "张跃",
+            "contact_phone": "15298760948",
+            "mailing_address": "徐州经济技术开发区",
+            "problem_description": "校准FAIL",
+        },
+        extracted_items=[
+            {"sn": "A8200B31327", "board_code": "M81232105400093", "board_name": "FOVI", "failure_description": "校准FAIL"},
+            {"sn": "A8200B30057", "board_code": "M81172009050036", "board_name": "DIO", "failure_description": "校准FAIL"},
+        ],
+        missing_fields={},
+        confidence_score=0.85,
+    )
+
+    enriched = await _enrich_ai_quality(Session(), parsed=parsed, email=email, attachments=[])
+
+    assert [row["sn"] for row in enriched.extracted_items] == [
+        "M81232105400093",
+        "M81172009050036Y",
+    ]
+    assert enriched.extracted_fields["customer_code"] == "JSICAT"
+    assert [row["material_code"] for row in enriched.extracted_items] == [
+        "A8200B31327",
+        "A8200B30057",
+    ]
+    assert not {
+        "contact_person",
+        "contact_phone",
+        "mailing_address",
+    } & set(enriched.extracted_fields)
+    assert set(enriched.missing_fields) == {
+        "contact_person",
+        "contact_phone",
+        "mailing_address",
+    }
+
+
+@pytest.mark.anyio
+async def test_enrichment_keeps_explicit_english_post_repair_address_block() -> None:
+    class Session:
+        async def scalar(self, _statement):
+            return SimpleNamespace(
+                sn="M81252101025023",
+                asset_status="valid",
+                customer_code="JP001",
+                customer_name="Example Japan Inc.",
+                material_code="M8125",
+                material_name="SVI40",
+            )
+
+    email = Email(
+        id=73,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 8, 12, 14, 27),
+        clean_body=(
+            "Regarding to shipping information after repaired, please send back to Japan office.\n"
+            "Teruhiko Kodama\nExample Japan Inc.\n"
+            "Addr : #601, Shouan 3-20-11, Suginami, Tokyo\n"
+            "TEL : +81-3-6312-2251\nSN M81252101025023"
+        ),
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={
+            "customer_name": "Example Japan Inc.",
+            "contact_person": "Teruhiko Kodama",
+            "contact_phone": "+81-3-6312-2251",
+            "mailing_address": "#601 Shouan 3-20-11, Suginami, Tokyo",
+            "problem_description": "selfcheck FAIL",
+        },
+        extracted_items=[
+            {"sn": "M81252101025023", "failure_description": "selfcheck FAIL"}
+        ],
+        missing_fields={},
+        confidence_score=0.75,
+        evidence={"manual_review_direction": "Please verify the return address."},
+        manual_review_direction="Please verify the return address.",
+    )
+
+    enriched = await _enrich_ai_quality(Session(), parsed=parsed, email=email, attachments=[])
+
+    assert enriched.extracted_fields["mailing_address"] == "#601, Shouan 3-20-11, Suginami, Tokyo"
+    assert enriched.extracted_items[0]["material_code"] == "M8125"
+    assert "mailing_address" not in enriched.missing_fields
+    assert enriched.confidence_score == pytest.approx(0.85)
+    assert enriched.manual_review_direction is None
+    assert enriched.evidence["quality_controls"][
+        "explicit_customer_return_context"
+    ]["allowed"] is True
+
+
+@pytest.mark.anyio
+async def test_enrichment_replaces_generic_ai_address_with_explicit_addr_line() -> None:
+    class Session:
+        async def scalar(self, _statement):
+            return SimpleNamespace(
+                sn="M81252101025023",
+                asset_status="valid",
+                customer_code="JP001",
+                customer_name="Example Japan Inc.",
+                material_code="M8125",
+                material_name="SVI40",
+            )
+
+    email = Email(
+        id=74,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 8, 12, 14, 27),
+        clean_body=(
+            "Regarding to shipping information after repaired, please send back to Japan office.\n"
+            "Teruhiko Kodama\nExample Japan Inc.\n"
+            "Addr : #601, Shouan 3-20-11, Suginami, Tokyo\n"
+            "ZIP : 167-0054\n"
+            "TEL : +81-3-6312-2251\nSN M81252101025023"
+        ),
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={
+            "customer_name": "Example Japan Inc.",
+            "contact_person": "Teruhiko Kodama",
+            "contact_phone": "+81-3-6312-2251",
+            "mailing_address": "Japan office",
+            "problem_description": "selfcheck FAIL",
+        },
+        extracted_items=[
+            {"sn": "M81252101025023", "failure_description": "selfcheck FAIL"}
+        ],
+        missing_fields={},
+        confidence_score=0.75,
+    )
+
+    enriched = await _enrich_ai_quality(
+        Session(), parsed=parsed, email=email, attachments=[]
+    )
+
+    assert enriched.extracted_fields["mailing_address"] == (
+        "#601, Shouan 3-20-11, Suginami, Tokyo ZIP: 167-0054"
+    )
+    assert enriched.field_confidences["mailing_address"] == 1.0
+    assert enriched.evidence["derived_fields"]["mailing_address"] == {
+        "source": "explicit_english_address_label"
+    }
 def test_ai_extract_schema_rejects_invalid_confidence() -> None:
     with pytest.raises(ValidationError):
         AiExtractResponse.model_validate({"confidence_score": 1.2})
@@ -80,6 +284,8 @@ def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
     )
     parsed = AiExtractResponse.model_validate(normalized)
     assert parsed.extracted_items == [{"sn": "SN001"}]
+    # Shape normalization has no intent context; the business-required matrix
+    # adds contact_phone after classification/enrichment.
     assert parsed.missing_fields == {}
     assert parsed.confidence_score == 0.86
     assert parsed.field_confidences == {"sn": 0.92}
@@ -299,6 +505,153 @@ def test_customer_supplement_keeps_existing_ticket_request_date() -> None:
     assert evidence["derived_fields"]["request_date"]["source"] == "existing_ticket"
 
 
+def test_customer_supplement_explicit_phone_overrides_ai_omission() -> None:
+    email = Email(
+        id=52,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        latest_reply_segment="寄回联系电话：18200517485",
+    )
+    fields: dict = {}
+    evidence: dict = {}
+    confidences: dict = {}
+
+    _apply_deterministic_supplement_fields(
+        fields=fields,
+        email=email,
+        evidence=evidence,
+        field_confidences=confidences,
+    )
+
+    assert fields["contact_phone"] == "18200517485"
+    assert confidences["contact_phone"] == 1.0
+    assert evidence["derived_fields"]["contact_phone"]["source"] == "explicit_supplement_label"
+
+
+@pytest.mark.anyio
+async def test_complete_linked_supplement_ignores_generic_model_review_advice() -> None:
+    source_email = Email(
+        id=50,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 8, 12, 14, 26),
+    )
+    ticket = RepairTicket(
+        id=91,
+        ticket_no="E2E-91",
+        source_email_id=source_email.id,
+        request_date=date(2026, 8, 12),
+        missing_fields={"contact_phone": "missing"},
+    )
+    thread = EmailThread(id=71, thread_key="e2e-thread-71", ticket_id=ticket.id)
+    email = Email(
+        id=52,
+        thread_id=thread.id,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        latest_reply_segment="寄回联系电话：18200517485",
+        sent_at=datetime(2026, 8, 12, 14, 30),
+    )
+    asset = SimpleNamespace(
+        sn="M81232504500155",
+        asset_status="valid",
+        customer_code="E2E-JOULWATT-20260805",
+        customer_name="Example Customer",
+        material_code="Z.SM.8123V120A",
+        material_name="FOVI100",
+    )
+
+    class Session:
+        async def get(self, model, identity):
+            return {
+                (EmailThread, thread.id): thread,
+                (RepairTicket, ticket.id): ticket,
+                (Email, source_email.id): source_email,
+            }.get((model, identity))
+
+        async def scalar(self, _statement):
+            return asset
+
+        async def execute(self, _statement):
+            item = SimpleNamespace(
+                line_no=1,
+                sn=asset.sn,
+                material_code=asset.material_code,
+                material_name=asset.material_name,
+                board_code=None,
+                board_name=None,
+                failure_description="selfcheck FAIL",
+                id=501,
+            )
+
+            class Result:
+                def scalars(self):
+                    return self
+
+                def all(self):
+                    return [item]
+
+            return Result()
+
+    parsed = AiExtractResponse(
+        intent_type="customer_supplement",
+        extracted_fields={},
+        extracted_items=[{"sn": asset.sn, "failure_description": "selfcheck FAIL"}],
+        missing_fields={"contact_phone": "missing"},
+        conflict_fields={"sn": "VIM81232504500155: asset not found"},
+        confidence_score=0.75,
+        evidence={"manual_review_direction": "Please manually verify the customer reply."},
+        manual_review_direction="Please manually verify the customer reply.",
+    )
+
+    enriched = await _enrich_ai_quality(
+        Session(), parsed=parsed, email=email, attachments=[]
+    )
+
+    assert enriched.extracted_fields["contact_phone"] == "18200517485"
+    assert enriched.missing_fields == {}
+    assert enriched.conflict_fields == {}
+    assert [item["sn"] for item in enriched.extracted_items] == [asset.sn]
+    assert enriched.evidence["quality_controls"][
+        "customer_supplement_item_preservation"
+    ]["item_count"] == 1
+    assert enriched.confidence_score == pytest.approx(0.85)
+    assert enriched.manual_review_direction is None
+    assert "manual_review_direction" not in enriched.evidence
+    assert enriched.evidence["quality_controls"][
+        "customer_supplement_auto_recovery"
+    ] == {
+        "allowed": True,
+        "reason": "linked_ticket_complete_without_conflicts",
+        "ticket_id": 91,
+        "resolved_field_keys": ["contact_phone"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("existing_ticket", "expected_missing_fields", "missing", "conflicts"),
+    [
+        (None, {"contact_phone"}, {}, {}),
+        (RepairTicket(id=92, ticket_no="E2E-92"), set(), {}, {}),
+        (RepairTicket(id=93, ticket_no="E2E-93"), {"contact_phone"}, {"contact_phone": "missing"}, {}),
+        (RepairTicket(id=94, ticket_no="E2E-94"), {"contact_phone"}, {}, {"contact_phone": "conflict"}),
+    ],
+)
+def test_supplement_does_not_auto_recover_without_all_safety_conditions(
+    existing_ticket: RepairTicket | None,
+    expected_missing_fields: set[str],
+    missing: dict[str, str],
+    conflicts: dict[str, str],
+) -> None:
+    assert not _can_auto_recover_customer_supplement(
+        intent_type="customer_supplement",
+        existing_ticket=existing_ticket,
+        expected_missing_fields=expected_missing_fields,
+        missing=missing,
+        conflicts=conflicts,
+    )
+
+
 @pytest.mark.anyio
 async def test_missing_field_email_uses_failure_description_and_email_date() -> None:
     class Session:
@@ -335,7 +688,12 @@ async def test_missing_field_email_uses_failure_description_and_email_date() -> 
     assert enriched.extracted_fields["request_date"] == "2026-07-24"
     assert enriched.extracted_fields["contact_email"] == "rmatest2@accotest.com"
     assert enriched.extracted_fields["problem_description"] == "自检FAIL\n校准FAIL"
-    assert set(enriched.missing_fields) == {"customer_name", "contact_person", "mailing_address"}
+    assert set(enriched.missing_fields) == {
+        "customer_name",
+        "contact_person",
+        "contact_phone",
+        "mailing_address",
+    }
 
 
 @pytest.mark.anyio
@@ -361,6 +719,7 @@ async def test_customer_name_uses_unanimous_valid_sn_asset_master_data() -> None
             "contact_email": "rmatest2@accotest.com",
             "mailing_address": "test mailing address",
             "problem_description": "CBIT128 upgrade",
+            "contact_phone": "18286702632",
         },
         extracted_items=[
             {"sn": "M81072420200031", "failure_description": "CBIT128 upgrade"},

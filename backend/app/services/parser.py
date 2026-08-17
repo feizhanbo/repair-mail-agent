@@ -73,6 +73,11 @@ class RuleAnalysisResult:
 SN_PATTERN = re.compile(r"(?:SN(?:号|號)?|S/N|序列号|设备编号)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,})", re.IGNORECASE)
 LONG_SN_PATTERN = re.compile(r"\b[A-Z0-9]{12,}\b", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+SUPPLEMENT_PHONE_PATTERN = re.compile(
+    r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
+    r"[ \t]*[:：]?[ \t]*(\+?\d[\d \t()\-]{5,28}\d)",
+    re.IGNORECASE,
+)
 HISTORY_MARKER = re.compile(
     r"^(?:-{2,}\s*Original Message\s*-{2,}|原始邮件|发件人[：:]|From\s*:|On .+ wrote:)",
     re.IGNORECASE,
@@ -169,7 +174,7 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
     return "unknown", 0.45, "未命中明确分类规则。"
 
 
-def extract_fields(email: Email) -> dict[str, Any]:
+def extract_fields(email: Email, *, intent_type: str | None = None) -> dict[str, Any]:
     body = clean_email_body(email)
     conversation = normalize_email_body(email.clean_body or email.text_body or body)
     subject = email.subject or ""
@@ -194,6 +199,12 @@ def extract_fields(email: Email) -> dict[str, Any]:
         "contact_email": contact_emails[0] if contact_emails else None,
         "problem_description": problem_description,
     }
+    if intent_type == "customer_supplement":
+        phone_match = SUPPLEMENT_PHONE_PATTERN.search(body)
+        if phone_match:
+            fields["contact_phone"] = re.sub(
+                r"\s+", "", phone_match.group(1).strip()
+            )
     items = [{"line_no": index + 1, "sn": sn, "failure_description": problem_description} for index, sn in enumerate(sns)]
     missing_fields: dict[str, str] = {}
     if not sns:
@@ -233,7 +244,7 @@ def extract_fields(email: Email) -> dict[str, Any]:
 def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     body = clean_email_body(email)
     intent_type, classification_confidence, classification_reason = classify_email(email, body)
-    extracted = extract_fields(email)
+    extracted = extract_fields(email, intent_type=intent_type)
     extracted["missing_fields"] = required_missing_for_values(
         intent_type=intent_type,
         fields=extracted["fields"],

@@ -1456,6 +1456,8 @@ async def _create_items_from_parse_result(
                 or placeholder.board_code
             )
             placeholder.board_name = payload.get("board_name") or placeholder.board_name
+            placeholder.material_code = payload.get("material_code") or placeholder.material_code
+            placeholder.material_name = payload.get("material_name") or placeholder.material_name
             placeholder.quantity = payload.get("quantity") or placeholder.quantity or 1
             placeholder.failure_description = payload.get("failure_description") or placeholder.failure_description or ticket.problem_description
             placeholder.failure_information = payload.get("failure_information") or placeholder.failure_information
@@ -1486,6 +1488,8 @@ async def _create_items_from_parse_result(
             line_no=line_no,
             board_code=payload.get("board_code") or payload.get("board_model"),
             board_name=payload.get("board_name"),
+            material_code=payload.get("material_code"),
+            material_name=payload.get("material_name"),
             sn=sn or None,
             quantity=payload.get("quantity") or 1,
             failure_description=payload.get("failure_description") or ticket.problem_description,

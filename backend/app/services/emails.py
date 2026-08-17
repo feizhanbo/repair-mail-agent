@@ -536,8 +536,19 @@ def _parse_requires_manual(
     confidence = float(parse_result.confidence_score or 0)
     if (
         parse_result.intent_type in {None, "", "unknown"}
-        or confidence < settings.AUTO_APPLY_MIN_CONFIDENCE
         or bool(parse_result.conflict_fields)
+    ):
+        return True
+    # A clear repair request with only explicit missing fields is exactly the
+    # automatic follow-up path.  DeepSeek commonly lowers the aggregate score
+    # because those fields are absent; forcing such mail into manual review
+    # prevents the system from asking for the missing information it already
+    # identified.  Keep the strict auto-apply threshold for otherwise complete
+    # mail, and require at least the normal confidence threshold here.
+    if confidence < settings.AUTO_APPLY_MIN_CONFIDENCE and not (
+        parse_result.intent_type in {"new_repair", "customer_supplement"}
+        and bool(parse_result.missing_fields)
+        and confidence >= settings.CONFIDENCE_THRESHOLD
     ):
         return True
     for attachment in attachments or []:

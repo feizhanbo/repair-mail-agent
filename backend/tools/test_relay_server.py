@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import re
@@ -13,11 +14,13 @@ from typing import Any, Iterator
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 SCENARIOS = {"normal", "delayed", "partial", "invalid_rma", "multi_rma", "timeout", "late"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class RelayRecord(BaseModel):
@@ -355,11 +358,22 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--database", type=Path, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token")
     args = parser.parse_args()
     if args.host not in LOOPBACK_HOSTS:
         raise SystemExit("TEST_RELAY_LOOPBACK_BIND_REQUIRED")
-    uvicorn.run(create_app(database=args.database, token=args.token), host=args.host, port=args.port)
+    token = (
+        args.token
+        or os.environ.get("TEST_RELAY_TOKEN")
+        or dotenv_values(PROJECT_ROOT / ".env").get("TEST_RELAY_TOKEN")
+    )
+    if not token:
+        raise SystemExit("TEST_RELAY_TOKEN_REQUIRED")
+    uvicorn.run(
+        create_app(database=args.database, token=str(token)),
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":

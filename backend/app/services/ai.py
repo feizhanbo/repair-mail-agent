@@ -14,11 +14,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.repair_items import canonical_sn, normalize_repair_item, normalize_repair_items
+from app.core.repair_items import (
+    canonical_sn,
+    normalize_board_code,
+    normalize_repair_item,
+    normalize_repair_items,
+)
 from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
 from app.integrations.qwen_provider import QwenProvider
-from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, SnAsset
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem, SnAsset
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
@@ -32,10 +37,13 @@ field_confidences, evidence, confidence_reasons, manual_review_direction, origin
 置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
 如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
 不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
-联系电话或手机号可以抽取为 contact_phone，但它是选填字段，缺失时不得放入 missing_fields。
+联系电话或手机号抽取为 contact_phone；new_repair 缺失时必须放入 missing_fields。
 工单明细只从邮件提取 sn、board_code（板卡型号）、board_name（板卡名称）和故障信息。
 material_code/material_name 是 SAP 物料主数据，只能由 SN 反查，禁止根据邮件内容猜测或写入。
 mailing_address/contact_person/contact_phone 是客户方邮寄信息；维修寄回地址由系统规则计算，禁止从邮件字段混用。
+邮件签名档、公司落款、名片区中的地址、姓名和电话不能自动作为设备维修后寄回信息；
+只有正文业务段明确表述为寄回地址、寄回联系人或寄回电话时才可抽取。
+若正文要求对方提供寄回地址或联系方式，即使签名档存在相同内容，这些字段仍必须判为缺失。
 """.strip()
 
 AI_EXTRACT_SYSTEM_PROMPT += """
@@ -121,6 +129,206 @@ def _compact_text(value: str | None, limit: int) -> str:
         return ""
     normalized = value.strip()
     return normalized[:limit]
+
+
+_BODY_TOKEN_PATTERN = re.compile(r"\b[A-Z0-9][A-Z0-9._-]{7,99}\b", re.IGNORECASE)
+_EMBEDDED_SN_PATTERN = re.compile(
+    r"M[A-Z0-9]{13,20}(?=(?:校准|自检|FAIL|异常|故障|损坏|[,，。;；\s]|$))",
+    re.IGNORECASE,
+)
+_RETURN_CONTEXT_PATTERNS = (
+    re.compile(r"(?:维修返回地址|返修寄回地址|维修后寄回地址|寄回地址|收件地址|邮寄地址)\s*[:：]?", re.IGNORECASE),
+    re.compile(r"(?:shipping information after repaired|send back to|return address)\s*[:：]?", re.IGNORECASE),
+)
+_FIELD_LABEL_PATTERNS = {
+    "contact_person": re.compile(r"(?:寄回联系人|收件人|联系人|contact|attn)\s*[:：]?", re.IGNORECASE),
+    "contact_phone": re.compile(r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel|phone|mob)\s*[/A-Za-z]*\s*[:：]?", re.IGNORECASE),
+}
+_SUPPLEMENT_PHONE_PATTERN = re.compile(
+    r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
+    r"[ \t]*[:：]?[ \t]*(\+?\d[\d \t()\-]{5,28}\d)",
+    re.IGNORECASE,
+)
+_EXPLICIT_ENGLISH_ADDRESS_PATTERN = re.compile(
+    r"(?:^|\n)[ \t]*(?:addr(?:ess)?|shipping[ \t]+address)"
+    r"[ \t]*[:：][ \t]*([^\r\n]{8,220})"
+    r"(?:\r?\n[ \t]*ZIP[ \t]*[:：][ \t]*([^\r\n]{3,20}))?",
+    re.IGNORECASE,
+)
+
+
+def _apply_deterministic_explicit_return_fields(
+    *, fields: dict[str, Any], email: Email, evidence: dict[str, Any],
+    field_confidences: dict[str, float]
+) -> None:
+    """Preserve explicit current-message labels when the model paraphrases them."""
+    body = clean_email_body(email)
+    address_match = _EXPLICIT_ENGLISH_ADDRESS_PATTERN.search(body)
+    if address_match:
+        address = address_match.group(1).strip()
+        postal_code = (address_match.group(2) or "").strip()
+        if postal_code:
+            address = f"{address} ZIP: {postal_code}"
+        fields["mailing_address"] = address
+        field_confidences["mailing_address"] = 1.0
+        evidence.setdefault("derived_fields", {})["mailing_address"] = {
+            "source": "explicit_english_address_label"
+        }
+
+
+def _apply_deterministic_supplement_fields(
+    *, fields: dict[str, Any], email: Email, evidence: dict[str, Any],
+    field_confidences: dict[str, float]
+) -> None:
+    """Prefer explicit labels in the customer's latest reply over AI omission."""
+    body = clean_email_body(email)
+    phone_match = _SUPPLEMENT_PHONE_PATTERN.search(body)
+    if phone_match:
+        fields["contact_phone"] = re.sub(
+            r"\s+", "", phone_match.group(1).strip()
+        )
+        field_confidences["contact_phone"] = 1.0
+        evidence.setdefault("derived_fields", {})["contact_phone"] = {
+            "source": "explicit_supplement_label"
+        }
+
+
+def _normalize_customer_mailing_address(value: Any) -> Any:
+    """Remove only an immediately repeated municipality prefix.
+
+    This deliberately avoids broad address rewriting: the source mail remains
+    unchanged and only an unambiguous adjacent duplication is normalized.
+    """
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    for municipality in ("北京市", "上海市", "天津市", "重庆市"):
+        normalized = re.sub(
+            rf"^(?:{re.escape(municipality)}){{2,}}",
+            municipality,
+            normalized,
+        )
+    return normalized
+
+
+def _return_context(body: str) -> str:
+    starts = [
+        match.start()
+        for pattern in _RETURN_CONTEXT_PATTERNS
+        for match in pattern.finditer(body)
+    ]
+    if not starts:
+        return ""
+    # A return-information declaration normally covers the remaining contact
+    # block. Limit its size so unrelated quoted history cannot become evidence.
+    return body[min(starts) : min(len(body), min(starts) + 1200)]
+
+
+def _sanitize_customer_return_fields(
+    *,
+    fields: dict[str, Any],
+    email: Email,
+    evidence: dict[str, Any],
+    field_confidences: dict[str, float],
+) -> None:
+    """Reject signature-only customer return details after AI extraction."""
+    body = clean_email_body(email)
+    if not body:
+        return
+    context = _return_context(body)
+    rejected: list[str] = []
+    accepted: list[str] = []
+    for name in ("mailing_address", "contact_person", "contact_phone"):
+        value = str(fields.get(name) or "").strip()
+        if not value:
+            continue
+        value_present = value.casefold() in context.casefold()
+        if name == "mailing_address":
+            supported = bool(
+                context
+                and (
+                    value_present
+                    or re.search(
+                        r"(?:^|\n)\s*(?:addr(?:ess)?|ship(?:ping)? address)\s*[:：]",
+                        context,
+                        re.IGNORECASE,
+                    )
+                )
+            )
+        elif name == "contact_person":
+            supported = bool(
+                context
+                and value_present
+                and (
+                    _FIELD_LABEL_PATTERNS[name].search(context)
+                    or re.search(r"shipping information after repaired|send back to", context, re.IGNORECASE)
+                )
+            )
+        else:
+            supported = bool(
+                context
+                and value_present
+                and _FIELD_LABEL_PATTERNS[name].search(context)
+            )
+        if not supported:
+            fields.pop(name, None)
+            rejected.append(name)
+        else:
+            accepted.append(name)
+            field_confidences[name] = 1.0
+    if rejected:
+        evidence.setdefault("derived_fields", {})["rejected_signature_only_fields"] = {
+            "fields": rejected,
+            "reason": "explicit_customer_return_context_required",
+        }
+    if accepted:
+        evidence.setdefault("derived_fields", {})["accepted_customer_return_fields"] = {
+            "fields": accepted,
+            "reason": "explicit_customer_return_context",
+        }
+
+
+async def _replace_ai_sns_with_known_body_assets(
+    session: AsyncSession,
+    *,
+    email: Email,
+    items: list[dict[str, Any]],
+    evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Prefer exact, valid SN master hits found in the body over AI column guesses."""
+    body = clean_email_body(email)
+    tokens = list(
+        dict.fromkeys(
+            [match.group(0).upper() for match in _BODY_TOKEN_PATTERN.finditer(body)]
+            + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
+        )
+    )
+    assets: list[SnAsset] = []
+    for token in tokens:
+        asset = await session.scalar(select(SnAsset).where(SnAsset.sn == token))
+        if asset is not None and asset.asset_status == "valid":
+            assets.append(asset)
+    known_sns = list(dict.fromkeys(str(asset.sn).strip().upper() for asset in assets))
+    actual_sns = [canonical_sn(item) for item in items if canonical_sn(item)]
+    if not known_sns or known_sns == actual_sns:
+        return items
+    if len(known_sns) != len(items):
+        return items
+    corrected: list[dict[str, Any]] = []
+    for item, sn in zip(items, known_sns, strict=True):
+        row = dict(item)
+        row["sn"] = sn
+        # If the AI put the actual SN into board_code because it shifted a
+        # flattened table column, that value is not a valid board code.
+        if normalize_board_code(row.get("board_code")) in set(known_sns):
+            row.pop("board_code", None)
+        corrected.append(row)
+    evidence.setdefault("derived_fields", {})["sn_list"] = {
+        "source": "valid_sn_assets_present_in_email_body",
+        "sn_count": len(known_sns),
+        "replaced_ai_candidates": actual_sns,
+    }
+    return corrected
 
 
 def _safe_json(value: Any) -> str:
@@ -877,6 +1085,24 @@ async def _request_date_source(
     return source_email or email, ticket
 
 
+def _can_auto_recover_customer_supplement(
+    *,
+    intent_type: str | None,
+    existing_ticket: RepairTicket | None,
+    expected_missing_fields: set[str],
+    missing: dict[str, Any],
+    conflicts: dict[str, Any],
+) -> bool:
+    """Whether a linked supplement can safely resume automated processing."""
+    return (
+        intent_type == "customer_supplement"
+        and existing_ticket is not None
+        and bool(expected_missing_fields)
+        and not missing
+        and not conflicts
+    )
+
+
 def _apply_request_date_fallback(
     *,
     fields: dict[str, Any],
@@ -926,11 +1152,42 @@ async def _enrich_ai_quality(
     evidence = dict(parsed.evidence or {})
     confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
+    existing_ticket: RepairTicket | None = None
+    expected_supplement_fields: set[str] = set()
 
     normalized_items = normalize_repair_items(
         dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)
     )
+    normalized_items = await _replace_ai_sns_with_known_body_assets(
+        session,
+        email=email,
+        items=normalized_items,
+        evidence=evidence,
+    )
     parsed.extracted_items = normalized_items
+    if fields.get("mailing_address"):
+        fields["mailing_address"] = _normalize_customer_mailing_address(
+            fields["mailing_address"]
+        )
+    _apply_deterministic_explicit_return_fields(
+        fields=fields,
+        email=email,
+        evidence=evidence,
+        field_confidences=field_confidences,
+    )
+    _sanitize_customer_return_fields(
+        fields=fields,
+        email=email,
+        evidence=evidence,
+        field_confidences=field_confidences,
+    )
+    if parsed.intent_type == "customer_supplement":
+        _apply_deterministic_supplement_fields(
+            fields=fields,
+            email=email,
+            evidence=evidence,
+            field_confidences=field_confidences,
+        )
     if not fields.get("problem_description"):
         descriptions = [
             str(item.get("failure_description")).strip()
@@ -973,7 +1230,18 @@ async def _enrich_ai_quality(
                     resolved_assets.append(asset)
             if invalid_sns:
                 conflicts.setdefault("sn", "；".join(invalid_sns))
-            elif len(resolved_assets) == len(item_sns) and not fields.get("customer_name"):
+            elif len(resolved_assets) == len(item_sns):
+                assets_by_sn = {
+                    sn: asset for sn, asset in zip(item_sns, resolved_assets, strict=True)
+                }
+                for item in normalized_items:
+                    asset = assets_by_sn.get(canonical_sn(item))
+                    if asset is None:
+                        continue
+                    if not item.get("material_code"):
+                        item["material_code"] = getattr(asset, "material_code", None)
+                    if not item.get("material_name"):
+                        item["material_name"] = getattr(asset, "material_name", None)
                 customer_names = {
                     str(getattr(asset, "customer_name", "") or "").strip()
                     for asset in resolved_assets
@@ -984,12 +1252,17 @@ async def _enrich_ai_quality(
                     for asset in resolved_assets
                     if str(getattr(asset, "customer_code", "") or "").strip()
                 }
-                if len(customer_names) == 1:
+                if len(customer_names) == 1 and not fields.get("customer_name"):
                     fields["customer_name"] = next(iter(customer_names))
-                    if len(customer_codes) == 1 and not fields.get("customer_code"):
-                        fields["customer_code"] = next(iter(customer_codes))
                     field_confidences["customer_name"] = 1.0
                     evidence.setdefault("derived_fields", {})["customer_name"] = {
+                        "source": "sn_asset_consensus",
+                        "sn_count": len(resolved_assets),
+                    }
+                if len(customer_codes) == 1 and not fields.get("customer_code"):
+                    fields["customer_code"] = next(iter(customer_codes))
+                    field_confidences["customer_code"] = 1.0
+                    evidence.setdefault("derived_fields", {})["customer_code"] = {
                         "source": "sn_asset_consensus",
                         "sn_count": len(resolved_assets),
                     }
@@ -1007,6 +1280,46 @@ async def _enrich_ai_quality(
             source_email=source_email,
             existing_request_date=existing_ticket.request_date if existing_ticket else None,
         )
+        if parsed.intent_type == "customer_supplement" and existing_ticket is not None:
+            original_missing = set((existing_ticket.missing_fields or {}).keys())
+            expected_supplement_fields = original_missing
+            # A supplement reply contains quoted history by definition.  When
+            # the customer is only answering fields that we explicitly asked
+            # for, never let AI re-interpret quoted table columns as new SNs or
+            # overwrite the original ticket's item structure.
+            existing_items = (
+                await session.execute(
+                    select(RepairTicketItem)
+                    .where(RepairTicketItem.ticket_id == existing_ticket.id)
+                    .order_by(RepairTicketItem.line_no.asc(), RepairTicketItem.id.asc())
+                )
+            ).scalars().all()
+            parsed.extracted_items = [
+                {
+                    "line_no": item.line_no,
+                    "sn": item.sn,
+                    "material_code": item.material_code,
+                    "material_name": item.material_name,
+                    "board_code": item.board_code,
+                    "board_name": item.board_name,
+                    "failure_description": item.failure_description,
+                }
+                for item in existing_items
+            ]
+            conflicts.pop("sn", None)
+            evidence.setdefault("quality_controls", {})[
+                "customer_supplement_item_preservation"
+            ] = {
+                "allowed": True,
+                "reason": "linked_ticket_items_are_authoritative_for_requested_field_supplement",
+                "ticket_id": existing_ticket.id,
+                "item_count": len(existing_items),
+            }
+            missing = {
+                key: value
+                for key, value in missing.items()
+                if key in original_missing and not fields.get(key)
+            }
 
     missing = required_missing_for_values(
         intent_type=parsed.intent_type,
@@ -1032,8 +1345,60 @@ async def _enrich_ai_quality(
         evidence["confidence_reasons"] = confidence_reasons
     if parsed.original_evidence:
         evidence["original_evidence"] = parsed.original_evidence
-    if parsed.manual_review_direction:
+    auto_recover_supplement = _can_auto_recover_customer_supplement(
+        intent_type=parsed.intent_type,
+        existing_ticket=existing_ticket,
+        expected_missing_fields=expected_supplement_fields,
+        missing=missing,
+        conflicts=conflicts,
+    )
+    accepted_return_fields = set(
+        (
+            evidence.get("derived_fields", {})
+            .get("accepted_customer_return_fields", {})
+            .get("fields", [])
+        )
+    )
+    explicit_return_context_resolved = (
+        parsed.intent_type == "new_repair"
+        and not missing
+        and not conflicts
+        and {"mailing_address", "contact_person", "contact_phone"}.issubset(
+            accepted_return_fields
+        )
+    )
+    if explicit_return_context_resolved:
+        evidence.pop("manual_review_direction", None)
+        evidence.setdefault("quality_controls", {})[
+            "explicit_customer_return_context"
+        ] = {
+            "allowed": True,
+            "reason": "all_customer_return_fields_supported_by_explicit_return_context",
+        }
+        parsed.confidence_score = max(
+            float(parsed.confidence_score or 0),
+            float(settings.AUTO_APPLY_MIN_CONFIDENCE),
+        )
+    if (
+        parsed.manual_review_direction
+        and not auto_recover_supplement
+        and not explicit_return_context_resolved
+    ):
         manual_directions.insert(0, parsed.manual_review_direction)
+    if auto_recover_supplement:
+        evidence.pop("manual_review_direction", None)
+        evidence.setdefault("quality_controls", {})[
+            "customer_supplement_auto_recovery"
+        ] = {
+            "allowed": True,
+            "reason": "linked_ticket_complete_without_conflicts",
+            "ticket_id": existing_ticket.id,
+            "resolved_field_keys": sorted(expected_supplement_fields),
+        }
+        parsed.confidence_score = max(
+            float(parsed.confidence_score or 0),
+            float(settings.AUTO_APPLY_MIN_CONFIDENCE),
+        )
     if manual_directions:
         evidence["manual_review_direction"] = "；".join(manual_directions)
 

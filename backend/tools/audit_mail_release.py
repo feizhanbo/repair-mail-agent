@@ -18,7 +18,7 @@ REQUIRED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "q4l9g0b1c2d3"
+REQUIRED_REVISION = "r5m0h1c2d3e4"
 
 
 def _sha256(path: Path) -> str:
@@ -146,8 +146,7 @@ async def audit(expected_database: str, backup: Path | None) -> dict[str, Any]:
             "receipt_status_counts": default_counts,
         },
         "close_transitions": close_transitions,
-        "only_rma_issued_and_archived_enabled": enabled_close_routes
-        == [("rma_sent", "rma_issued_and_archived")],
+        "no_automatic_close_route_enabled": enabled_close_routes == [],
         "minimum_eligible_test_asset": assets[0] if assets else None,
     }
     if backup is not None:
@@ -177,7 +176,7 @@ def _audit_failures(report: dict[str, Any], *, require_backup: bool) -> list[str
         failures.append("UID_VALIDITY_UNIQUE_CONSTRAINT_MISSING")
     if not schema["device_received_foreign_key"]:
         failures.append("DEVICE_RECEIVED_FOREIGN_KEY_MISSING")
-    if not report["only_rma_issued_and_archived_enabled"]:
+    if not report["no_automatic_close_route_enabled"]:
         failures.append("CLOSE_TRANSITION_GATE_INVALID")
     if require_backup and not report.get("backup", {}).get("exists"):
         failures.append("BACKUP_MISSING")

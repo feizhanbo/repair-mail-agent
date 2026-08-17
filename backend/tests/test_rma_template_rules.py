@@ -41,9 +41,9 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
     zh_type, zh_version = replies._rma_reply_template_type(_ticket(language_code="zh-CN"))
     en_type, en_version = replies._rma_reply_template_type(_ticket())
 
-    assert zh_version == "rma_reply_zh_v2"
+    assert zh_version == "domestic_in_warranty_v1"
     assert en_version == "overseas_in_warranty_v1"
-    assert zh_type == "rma_authorization_domestic"
+    assert zh_type == "rma_authorization_domestic_in_warranty"
     assert en_type == "rma_authorization_overseas_in_warranty"
     templates = {item["template_type"]: item for item in REPLY_TEMPLATES}
     assert "RMA表格见附件" in templates[zh_type]["body_template"]
@@ -56,10 +56,10 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
     )
 
 
-def test_domestic_rma_v2_contains_reference_body_and_full_miya_signature_in_both_formats() -> None:
+def test_domestic_rma_templates_and_miya_signature_match_approved_copy() -> None:
     rma = next(
         item for item in REPLY_TEMPLATES
-        if item["template_type"] == "rma_authorization_domestic" and item["version"] == "rma_reply_zh_v2"
+        if item["template_type"] == "rma_authorization_domestic_in_warranty"
     )
     base = next(
         item for item in REPLY_TEMPLATES
@@ -69,6 +69,7 @@ def test_domestic_rma_v2_contains_reference_body_and_full_miya_signature_in_both
         "Dear {{ contact_person }}",
         "RMA表格见附件",
         "请务必打印出RMA表",
+        "{{ city }}质量部",
         "维修工期：10个工作日",
         "{{ return_address_block }}",
     )
@@ -87,6 +88,7 @@ def test_domestic_rma_v2_contains_reference_body_and_full_miya_signature_in_both
     for phrase in required_signature_phrases:
         assert phrase in base["body_template"]
         assert phrase in base["html_body_template"]
+    assert 'cid:accotest_logo' in base["html_body_template"]
 
 
 def test_return_address_blocks_match_confirmed_business_text() -> None:
@@ -121,7 +123,56 @@ def test_return_address_blocks_match_confirmed_business_text() -> None:
         "天津市滨海新区生态城川博道华峰测控1201号\n"
         "郭洋（收）  电话：022-67253518-8108"
     )
-    assert replies._return_address_block(language="en-US") == ""
+    assert replies._return_address_block(language="en-US") == settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
+
+
+def test_english_return_address_and_demi_signature_are_english_routed() -> None:
+    block = replies._return_address_block(
+        language="en-US",
+        customer_policy={"shipping_address": "北京市海淀区丰豪东路9号院5号楼"},
+    )
+    demi = next(item for item in REPLY_TEMPLATES if item["template_type"] == "international_company_base")
+
+    assert block == settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
+    assert "北京市" not in block
+    assert "Demi Wang(王佳慧)" in demi["body_template"]
+    assert "demi</span>.wang@accotest.com" in demi["html_body_template"]
+    assert 'cid:accotest_logo' in demi["html_body_template"]
+
+
+def test_domestic_warranty_routing_uses_sn_dates_and_rejects_mixed_status() -> None:
+    out_type, out_version = replies._rma_reply_template_type(
+        _ticket(language_code="zh-CN", request_date=date(2027, 1, 1))
+    )
+    assert (out_type, out_version) == (
+        "rma_authorization_domestic_out_of_warranty", "domestic_out_warranty_v1"
+    )
+
+    mixed = _ticket(
+        language_code="zh-CN",
+        sn_validation_snapshot={"checks": [
+            {"warranty_start_date": "2026-01-01", "warranty_end_date": "2026-12-31"},
+            {"warranty_start_date": "2025-01-01", "warranty_end_date": "2025-12-31"},
+        ]},
+    )
+    with pytest.raises(replies.RmaReplyRuleError, match="RMA_MIXED_WARRANTY_STATUS"):
+        replies._rma_reply_template_type(mixed)
+
+
+def test_domestic_out_of_warranty_template_renders_actual_price_and_city() -> None:
+    template = next(
+        item for item in REPLY_TEMPLATES
+        if item["template_type"] == "rma_authorization_domestic_out_of_warranty"
+    )
+    ticket = _ticket(language_code="zh-CN", contact_person="刘家利")
+    rendered = replies._render_template(
+        template["body_template"], ticket=ticket, missing_fields=None,
+        city="北京", repair_fee="1200.00", currency_unit="元",
+        return_address_block="北京维修地址",
+    )
+    assert "寄到北京质量部" in rendered
+    assert "维修费：1200.00元/块" in rendered
+    assert "北京维修地址" in rendered
 
 
 def test_overseas_out_of_warranty_and_special_rules() -> None:
@@ -174,6 +225,22 @@ def test_rma_mime_contains_one_pdf_and_never_inherits_cc(monkeypatch) -> None:
     assert len(attachments) == 1
     assert attachments[0].get_content_type() == "application/pdf"
     assert attachments[0].get_filename() == "RMATEST.pdf"
+
+
+def test_signature_logo_is_embedded_once_with_canonical_cid(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "SMTP_USER", "rmatest1@accotest.com")
+    reply = ReplyRecord(
+        id=10, ticket_id=1, reply_type="rma_authorization",
+        to_addresses="rmatest2@accotest.com", cc_addresses=None,
+        subject="RMA logo", final_body="plain",
+        final_html_body='<div><img src="cid:accotest_logo"></div>',
+    )
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        replies._build_reply_message(reply, "<logo@accotest.com>").as_bytes(policy=policy.SMTP)
+    )
+    logos = [part for part in parsed.walk() if str(part.get("Content-ID") or "") == "<accotest_logo>"]
+    assert len(logos) == 1
+    assert logos[0].get_content_type() == "image/png"
 
 
 def test_offline_preflight_fails_for_wrong_smtp_login_without_network(monkeypatch) -> None:

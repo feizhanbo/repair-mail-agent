@@ -412,6 +412,7 @@ async def build_rma_pdf_data(
         "customer_name": ticket.customer_name,
         "mailing_address": ticket.mailing_address,
         "contact_person": ticket.contact_person,
+        "contact_phone": ticket.contact_phone,
         "contact_email": ticket.contact_email,
         "request_date": ticket.request_date,
     }
@@ -495,8 +496,8 @@ async def build_rma_pdf_data(
             customer_code=ticket.customer_code,
             customer_name=ticket.customer_name,
             mailing_address=ticket.mailing_address,
-            mailing_contact_person=settings.RMA_PDF_MAILING_CONTACT_PERSON,
-            mailing_contact_phone=settings.RMA_PDF_MAILING_CONTACT_PHONE,
+            mailing_contact_person=ticket.contact_person,
+            mailing_contact_phone=ticket.contact_phone,
             delivery_fee_paid_by_customer=settings.RMA_PDF_DEFAULT_DELIVERY_FEE,
             repair_fee_paid_by_customer=(
                 settings.RMA_PDF_DEFAULT_REPAIR_FEE
@@ -575,6 +576,19 @@ def _continuation_footer_resource(template: fitz.Document, table: dict[str, Any]
     scale = float(table.get("footer_dpi", 300)) / 72.0
     pixmap = template[1].get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
     return pixmap.tobytes("png")
+
+
+def _clear_locked_blank_regions(
+    document: fitz.Document, layout: dict[str, Any]
+) -> None:
+    """Remove template placeholder glyphs from fields that must stay empty."""
+    for raw in (layout.get("blank_regions") or {}).values():
+        page_index = int(raw["page"])
+        if page_index < 0 or page_index >= document.page_count:
+            raise RmaPdfError("RMA_TEMPLATE_INTEGRITY_FAILED")
+        page = document[page_index]
+        page.add_redact_annot(fitz.Rect(*raw["rect"]), fill=(1, 1, 1))
+        page.apply_redactions(images=0, graphics=0)
 
 
 def _draw_first_page_extension(page: fitz.Page, row_count: int, table: dict[str, Any]) -> None:
@@ -678,6 +692,7 @@ def render_rma_pdf(
         document.insert_pdf(template, from_page=1, to_page=1)
         if document.page_count != rma_pdf_page_count(len(data.items)):
             raise RmaPdfError("RMA_PAGINATION_FAILED")
+        _clear_locked_blank_regions(document, layout)
 
         writer = _FixedBoxTextWriter(_subset_cjk_font(_resolve_cjk_font_path(), _dynamic_text(data)))
         for page in document:

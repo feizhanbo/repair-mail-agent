@@ -7,6 +7,8 @@ from tools.run_rmatest_batch_e2e import (
     BatchError,
     RECOVERY_READY_OR_COMPLETED_STATUSES,
     _mail_gate,
+    _fresh_temporary_master_state,
+    _temporary_master_rows,
     validate_manifest,
 )
 
@@ -47,7 +49,7 @@ def _manifest() -> dict:
                     "reply_allowed": True,
                     "send_mode": "auto_canary",
                     "expected_outbound_count": 1,
-                    "expected_final_status": "closed",
+                    "expected_final_status": "rma_sent",
                     "expected_rma_status": "issued",
                     "expected_manual_action": "approve RMA",
                 },
@@ -78,9 +80,9 @@ def test_manifest_requires_irrelevant_subtype(tmp_path: Path) -> None:
         validate_manifest(path)
 
 
-def test_manifest_rejects_stale_rma_sent_canary_contract(tmp_path: Path) -> None:
+def test_manifest_rejects_stale_closed_canary_contract(tmp_path: Path) -> None:
     manifest = _manifest()
-    manifest["messages"][1]["gold"]["expected_final_status"] = "rma_sent"
+    manifest["messages"][1]["gold"]["expected_final_status"] = "closed"
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(BatchError, match="auto_canary_MUST_BE_COMPLETE_NEW_REPAIR"):
@@ -108,3 +110,46 @@ def test_mail_gate_uses_persisted_runtime_config(monkeypatch) -> None:
     )
     with pytest.raises(BatchError, match="ALL_AUTO_SEND_DISABLED"):
         _mail_gate()
+
+
+def test_temporary_board_rows_keep_distinct_board_codes_for_same_material() -> None:
+    manifest = {
+        "messages": [
+            {
+                "gold": {
+                    "temporary_sn_assets": [],
+                    "temporary_customer_policies": [],
+                    "temporary_board_cards": [
+                        {"material_code": "ROUTE-X", "board_code": "FOVI"},
+                        {"material_code": "ROUTE-X", "board_code": "DIO"},
+                    ],
+                }
+            }
+        ]
+    }
+
+    _, rows, _ = _temporary_master_rows(manifest)
+
+    assert {row["board_code"] for row in rows} == {"FOVI", "DIO"}
+
+
+def test_completed_fixture_state_starts_a_new_cleanup_cycle(tmp_path: Path) -> None:
+    state_path = tmp_path / "temporary-master-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "batch_id": "gold-batch",
+                "temporary_master_data": {"board_card_ids": [123]},
+                "cleanup": {"completed_at": "2026-08-12T10:00:00+00:00"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = _fresh_temporary_master_state(state_path, batch_id="gold-batch")
+
+    assert state == {
+        "batch_id": "gold-batch",
+        "messages": {},
+        "actual_send_count": 0,
+    }

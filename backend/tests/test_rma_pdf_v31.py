@@ -152,18 +152,27 @@ def test_pdf_size_hard_limit_blocks_delivery(monkeypatch) -> None:
         render_rma_pdf(_data(1))
 
 
-def test_rma_filename_and_contact_follow_fixed_template_format() -> None:
+def test_rma_filename_and_contact_follow_ticket_data_format() -> None:
     data = _data(1)
     data.rma_no = "2026070910"
     data.customer_name = "南京矽力微电子技术有限公司"
-    data.mailing_contact_person = "牛世磊"
-    data.mailing_contact_phone = "086-15101248952"
+    data.mailing_contact_person = "张跃"
+    data.mailing_contact_phone = "15298760948"
 
-    assert data.mailing_contact == "牛世磊086-15101248952"
+    assert data.mailing_contact == "张跃15298760948"
     assert rma_pdf_file_name(data) == "RMA2026070910南京矽力微电子技术有限公司.pdf"
     with fitz.open(stream=render_rma_pdf(data), filetype="pdf") as document:
         compact = "".join(page.get_text() for page in document).replace(" ", "").replace("\n", "")
-    assert "牛世磊086-15101248952" in compact
+    assert "张跃15298760948" in compact
+
+
+def test_rma_pdf_clears_invalid_approved_by_placeholder() -> None:
+    with fitz.open(stream=render_rma_pdf(_data(1)), filetype="pdf") as document:
+        page_text = document[0].get_text()
+
+    assert "方方" not in page_text
+    assert "Approved by" in page_text
+    assert "/核准人:" in page_text
 
 
 def test_fixed_box_overflow_aborts_generation() -> None:
