@@ -1,8 +1,18 @@
-from app.models import Base
+from app.models import Base, Email, RepairTicket
+from app.services.tickets import EMAIL_FIELDS, TICKET_FIELDS
 
 
 def test_phase_one_table_count() -> None:
     assert len(Base.metadata.tables) == 38
+
+
+def test_ticket_serializer_fields_exist_on_ticket_model() -> None:
+    assert not [field for field in TICKET_FIELDS if not hasattr(RepairTicket, field)]
+
+
+def test_email_serializer_fields_exist_and_expose_persistence_contract() -> None:
+    assert not [field for field in EMAIL_FIELDS if not hasattr(Email, field)]
+    assert {"persistence_tier", "classification_locked"} <= set(EMAIL_FIELDS)
 
 
 def test_phase_one_table_names() -> None:

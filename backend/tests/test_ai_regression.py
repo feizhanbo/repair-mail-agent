@@ -4,16 +4,16 @@ import json
 from datetime import date, datetime
 from types import SimpleNamespace
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
 from app.integrations.ai_provider import (
     AiExtractResponse,
     AiReplyDraftResponse,
-    DeepSeekProvider,
     _normalize_response_payload,
 )
+from app.config import settings
+from app.integrations.llm_gateway import public_llm_routes
 from app.core.repair_items import normalize_repair_item, normalize_repair_items
 from app.models import AiCallLog, Email, EmailAttachment, EmailThread, RepairTicket
 from app.services.ai import (
@@ -26,6 +26,8 @@ from app.services.ai import (
     _status_for,
     ai_log_diagnostics,
     _normalize_customer_mailing_address,
+    _problem_description_from_latest_reply,
+    create_ai_parse_candidate,
 )
 
 
@@ -51,6 +53,98 @@ def test_ai_extract_schema_accepts_sample_output() -> None:
     assert parsed.intent_type == "new_repair"
     assert parsed.extracted_items[0]["sn"] == "SN202607040001"
     assert _status_for(parsed, None) == "success"
+
+
+def test_problem_description_falls_back_to_explicit_latest_reply_failure() -> None:
+    email = Email(
+        text_body=(
+            "I am preparing to send SVI40 which is detected FAIL on selfcheck.\n"
+            "Contact: Example Person\n"
+            "Please find attached file, as I will send FAIL log."
+        )
+    )
+
+    result = _problem_description_from_latest_reply(email)
+
+    assert result is not None
+    assert "detected FAIL" in result
+    assert "Contact" not in result
+
+
+def test_problem_description_fallback_ignores_negated_problem_statement() -> None:
+    email = Email(text_body="No issue was found during selfcheck.")
+
+    assert _problem_description_from_latest_reply(email) is None
+
+
+@pytest.mark.anyio
+async def test_field_extraction_quality_uses_locked_preclassification_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        async def scalar(self, _statement):
+            return SimpleNamespace(
+                sn="M81252101025023",
+                asset_status="valid",
+                customer_code="E2EJP006",
+                customer_name="Example Japan Inc.",
+                material_code="M8125",
+                material_name="SVI40",
+            )
+
+        def add(self, value: object) -> None:
+            self.added.append(value)
+
+        async def flush(self) -> None:
+            return None
+
+    parsed = AiExtractResponse(
+        intent_type="unknown",
+        extracted_fields={},
+        extracted_items=[{"sn": "M81252101025023"}],
+        missing_fields={},
+        confidence_score=0.9,
+    )
+    ai_log = SimpleNamespace(
+        id=9,
+        trace_id="trace-9",
+        provider_name="deepseek",
+        model_name="deepseek-chat",
+        route_name="repair_field_extract",
+        fallback_used=False,
+    )
+
+    async def run_ai_json(*_args, **_kwargs):
+        return parsed, ai_log
+
+    monkeypatch.setattr("app.services.ai._run_ai_json", run_ai_json)
+    email = Email(
+        id=73,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        intent_type="new_repair",
+        classification_reason_code="customer_initiated_repair_request",
+        clean_body=(
+            "I am preparing to send SVI40 which is detected FAIL on selfcheck.\n"
+            "SN M81252101025023"
+        ),
+        sent_at=datetime(2026, 8, 12, 14, 27),
+    )
+
+    result = await create_ai_parse_candidate(
+        Session(), email=email, attachments=[], mode="repair_field_extract"
+    )
+
+    assert result is not None
+    candidate = result["parse_result"]
+    assert candidate.intent_type == "new_repair"
+    assert candidate.extracted_fields["problem_description"] == (
+        "I am preparing to send SVI40 which is detected FAIL on selfcheck."
+    )
+    assert "problem_description" not in candidate.missing_fields
 
 
 def test_customer_mailing_address_removes_only_adjacent_municipality_duplicate() -> None:
@@ -805,42 +899,9 @@ def test_ai_log_diagnostics_describes_model_stage_reason_and_action() -> None:
     assert diagnostics["resolution_suggestion"]
 
 
-@pytest.mark.anyio
-async def test_deepseek_request_payload_does_not_persist_api_key() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == "Bearer secret-test-key"
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "intent_type": "unknown",
-                                    "extracted_fields": {},
-                                    "extracted_items": [],
-                                    "missing_fields": {},
-                                    "conflict_fields": {},
-                                    "confidence_score": 0.4,
-                                    "field_confidences": {},
-                                    "evidence": {},
-                                }
-                            )
-                        }
-                    }
-                ]
-            },
-        )
-
-    provider = DeepSeekProvider(
-        api_key="secret-test-key",
-        base_url="https://api.deepseek.example",
-        model="deepseek-v4-flash",
-        timeout_seconds=3,
-        transport=httpx.MockTransport(handler),
-    )
-    completion = await provider.chat_json(messages=[{"role": "user", "content": "return JSON"}], response_model=AiExtractResponse)
-
-    assert "secret-test-key" not in json.dumps(completion.request_payload)
-    assert _status_for(completion.parsed, None) == "low_confidence"
+def test_llm_route_public_contract_does_not_persist_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AI_API_KEY", "secret-test-key")
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "secret-qwen-key")
+    payload = json.dumps(public_llm_routes())
+    assert "secret-test-key" not in payload
+    assert "secret-qwen-key" not in payload

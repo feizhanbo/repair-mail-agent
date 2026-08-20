@@ -47,7 +47,7 @@ from app.services.mail_safety import TEST_MAIL_SENDER, test_envelope_allowed
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_wait"}
 UNCERTAIN_EXTERNAL_STATUSES = {"planned", "running", "uncertain", "failed_retryable"}
-TEST_DATABASE_NAME = "repair_system_test"
+TEST_DATABASE_NAMES = {"repair_system_test", "AIRMA_test"}
 TEST_DATABASE_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -84,8 +84,8 @@ async def assert_gold_replay_environment(session: AsyncSession) -> dict[str, Any
     reasons: list[str] = []
     if settings.APP_ENV.strip().lower() not in {"dev", "test"}:
         reasons.append("APP_ENV_MUST_BE_DEV_OR_TEST")
-    if database_name != TEST_DATABASE_NAME or url.database != TEST_DATABASE_NAME:
-        reasons.append("DATABASE_MUST_BE_REPAIR_SYSTEM_TEST")
+    if database_name not in TEST_DATABASE_NAMES or url.database != database_name:
+        reasons.append("DATABASE_MUST_BE_APPROVED_GOLD_TEST_DATABASE")
     if (url.host or "").lower() not in TEST_DATABASE_HOSTS or int(url.port or 3306) != 13307:
         reasons.append("DATABASE_MUST_USE_LOOPBACK_13307")
     if not settings.E2E_GOLD_RUN_ENABLED:
@@ -147,7 +147,25 @@ async def plan_gold_test_reset(
         return empty
     if not seed_emails:
         fetch_record_ids = _ints(row.id for row in standalone_fetch_records)
-        job_id_list = _ints(row.fetch_job_run_id for row in standalone_fetch_records)
+        ai_ids = await _scalar_ids(
+            session,
+            select(AiCallLog.id).where(
+                AiCallLog.mail_fetch_record_id.in_(fetch_record_ids or [-1])
+            ),
+        )
+        ai_job_ids = await _scalar_ids(
+            session,
+            select(AiCallLog.job_run_id).where(
+                AiCallLog.id.in_(ai_ids or [-1]),
+                AiCallLog.job_run_id.is_not(None),
+            ),
+        )
+        job_id_list = _ints(
+            [
+                *(row.fetch_job_run_id for row in standalone_fetch_records),
+                *ai_job_ids,
+            ]
+        )
         jobs = list(
             (
                 await session.execute(
@@ -197,6 +215,7 @@ async def plan_gold_test_reset(
                 "system_logs": system_ids,
                 "jobs": job_id_list,
                 "mail_fetch_records": fetch_record_ids,
+                "ai_logs": ai_ids,
                 "oss_objects": object_ids,
             }
         )
@@ -246,6 +265,15 @@ async def plan_gold_test_reset(
     ticket_id_list = sorted(ticket_ids)
     attachment_ids = await _scalar_ids(session, select(EmailAttachment.id).where(EmailAttachment.email_id.in_(email_ids)))
     parse_ids = await _scalar_ids(session, select(ParseResult.id).where(ParseResult.email_id.in_(email_ids)))
+    fetch_record_ids = await _scalar_ids(
+        session,
+        select(MailFetchRecord.id).where(
+            or_(
+                MailFetchRecord.email_id.in_(email_ids),
+                MailFetchRecord.message_id.in_(normalized),
+            )
+        ),
+    )
     item_ids = await _scalar_ids(session, select(RepairTicketItem.id).where(RepairTicketItem.ticket_id.in_(ticket_id_list or [-1])))
     reply_ids = await _scalar_ids(session, select(ReplyRecord.id).where(ReplyRecord.ticket_id.in_(ticket_id_list or [-1])))
     rma_ids = await _scalar_ids(session, select(TicketRma.id).where(TicketRma.ticket_id.in_(ticket_id_list or [-1])))
@@ -253,7 +281,17 @@ async def plan_gold_test_reset(
     sap_ids = await _scalar_ids(session, select(ExportSap.id).where(ExportSap.ticket_id.in_(ticket_id_list or [-1])))
     task_ids = await _scalar_ids(session, select(ManualReviewTask.id).where(or_(ManualReviewTask.ticket_id.in_(ticket_id_list or [-1]), ManualReviewTask.email_id.in_(email_ids), ManualReviewTask.thread_id.in_(thread_ids or [-1]))))
     notification_ids = await _scalar_ids(session, select(NotificationEvent.id).where(or_(NotificationEvent.ticket_id.in_(ticket_id_list or [-1]), (NotificationEvent.target_type.in_(["ticket", "repair_ticket"])) & NotificationEvent.target_id.in_(ticket_id_list or [-1]), (NotificationEvent.target_type == "manual_review_task") & NotificationEvent.target_id.in_(task_ids or [-1]))))
-    ai_ids = await _scalar_ids(session, select(AiCallLog.id).where(or_(AiCallLog.email_id.in_(email_ids), AiCallLog.ticket_id.in_(ticket_id_list or [-1]), AiCallLog.attachment_id.in_(attachment_ids or [-1]))))
+    ai_ids = await _scalar_ids(
+        session,
+        select(AiCallLog.id).where(
+            or_(
+                AiCallLog.email_id.in_(email_ids),
+                AiCallLog.ticket_id.in_(ticket_id_list or [-1]),
+                AiCallLog.attachment_id.in_(attachment_ids or [-1]),
+                AiCallLog.mail_fetch_record_id.in_(fetch_record_ids or [-1]),
+            )
+        ),
+    )
     external_ids = await _scalar_ids(session, select(ExternalOperationRecord.id).where(or_(ExternalOperationRecord.email_id.in_(email_ids), ExternalOperationRecord.ticket_id.in_(ticket_id_list or [-1]), ExternalOperationRecord.reply_record_id.in_(reply_ids or [-1]), ExternalOperationRecord.export_sap_id.in_(sap_ids or [-1]))))
     operation_ids = await _scalar_ids(session, select(OperationLog.id).where(or_(OperationLog.email_id.in_(email_ids), OperationLog.ticket_id.in_(ticket_id_list or [-1]))))
     system_ids = await _scalar_ids(session, select(SystemEventLog.id).where(or_(SystemEventLog.email_id.in_(email_ids), SystemEventLog.ticket_id.in_(ticket_id_list or [-1]))))
@@ -270,7 +308,6 @@ async def plan_gold_test_reset(
     job_id_list = sorted(job_ids)
     system_ids = sorted(set(system_ids) | set(await _scalar_ids(session, select(SystemEventLog.id).where(SystemEventLog.job_run_id.in_(job_id_list or [-1])))))
 
-    fetch_record_ids = await _scalar_ids(session, select(MailFetchRecord.id).where(or_(MailFetchRecord.email_id.in_(email_ids), MailFetchRecord.message_id.in_(normalized))))
     attachments = list((await session.execute(select(EmailAttachment).where(EmailAttachment.id.in_(attachment_ids or [-1])))).scalars().all())
     replies = list((await session.execute(select(ReplyRecord).where(ReplyRecord.id.in_(reply_ids or [-1])))).scalars().all())
     rmas = list((await session.execute(select(TicketRma).where(TicketRma.id.in_(rma_ids or [-1])))).scalars().all())

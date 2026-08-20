@@ -67,6 +67,7 @@ type ResolveForm = {
   resolution: string;
   resolution_type?: string;
   next_action: string;
+  target_first_intent?: 'new_repair' | 'thread_new_repair' | 'customer_supplement';
   result_payload_text?: string;
 };
 
@@ -89,6 +90,7 @@ const taskStatusOptions = [
 ];
 
 const resolveActionOptions = [
+  { value: 'promote_to_first', label: '晋升为 FIRST 自动报修' },
   { value: 'finish_external_handling', label: '完成邮件级人工处理' },
   { value: 'resolve_manual_business', label: '完成 SECOND 人工业务工单' },
   { value: 'transition_ready_for_export', label: '进入可导出' },
@@ -186,6 +188,7 @@ export default function ManualReviewPage() {
         resolution_type: values.resolution_type,
         next_action: values.next_action,
         result_payload,
+        target_first_intent: values.target_first_intent,
       });
     },
     onSuccess: () => {
@@ -594,6 +597,13 @@ export default function ManualReviewPage() {
           </Form.Item>
           <Form.Item label="处理结论" name="resolution" rules={[{ required: true }]}>
             <Input.TextArea rows={4} />
+          </Form.Item>
+          <Form.Item label="晋升后的 FIRST 意图" name="target_first_intent">
+            <Select allowClear placeholder="仅“晋升为 FIRST”时必选" options={[
+              { value: 'new_repair', label: '新报修' },
+              { value: 'thread_new_repair', label: '回复链新报修' },
+              { value: 'customer_supplement', label: '客户补充报修信息' },
+            ]} />
           </Form.Item>
           <Form.Item label="结构化结果 JSON/备注" name="result_payload_text">
             <Input.TextArea rows={3} placeholder='例如 {"fixed_fields":["sn"]}；非 JSON 将按备注保存' />

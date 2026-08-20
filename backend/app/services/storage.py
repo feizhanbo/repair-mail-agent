@@ -284,6 +284,12 @@ async def delete_oss_object(
     except Exception as exc:
         status_code = getattr(exc, "status", None) or getattr(exc, "status_code", None)
         provider_code = str(getattr(exc, "code", "") or getattr(exc, "error_code", ""))
+        # Another cleanup worker can delete the object after object_exists()
+        # and before delete_object().  OSS reports that race as NoSuchKey;
+        # deletion is already complete, so preserve the method's idempotent
+        # contract instead of scheduling a pointless retry.
+        if status_code == 404 or provider_code in {"NoSuchKey", "NoSuchObject", "NotFound"}:
+            return OssDeleteResult(bucket, object_key, True, already_missing=True)
         code = (
             "OSS_DELETE_FORBIDDEN"
             if status_code == 403

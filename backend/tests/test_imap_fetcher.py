@@ -8,7 +8,7 @@ import pytest
 
 from app.models import JobRunLog
 from app.models.mail_fetch import MailFetchRecord
-from app.services import email_archival, imap_fetcher
+from app.services import email_archival, imap_fetcher, mail_ingress
 
 
 @pytest.fixture
@@ -22,6 +22,15 @@ def configured_oss(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(imap_fetcher.settings, "OSS_BUCKET", "test-bucket")
     monkeypatch.setattr(imap_fetcher.settings, "OSS_ACCESS_KEY", "test-access")
     monkeypatch.setattr(imap_fetcher.settings, "OSS_SECRET_KEY", "test-secret")
+
+    async def classify_first(*_args, **_kwargs):
+        return SimpleNamespace(
+            intent_type="new_repair", handling_level="auto_repair", confidence=0.95,
+            reason_code="TEST_FIRST", candidates=[], needs_attachment_content=False,
+            evidence=["test"], classification_version="test-preclassification-v1",
+        )
+
+    monkeypatch.setattr(mail_ingress, "classify_mail", classify_first)
 
 
 class FakeSession:
@@ -38,6 +47,12 @@ class FakeSession:
 
     async def execute(self, _statement):
         return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    async def get(self, model, object_id, **_kwargs):
+        return next(
+            (item for item in self.added if isinstance(item, model) and getattr(item, "id", None) == object_id),
+            None,
+        )
 
     async def flush(self) -> None:
         for instance in self.added:
@@ -180,7 +195,7 @@ async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(m
         return {"duplicate": False, "email": {"id": 77, "parse_status": "pending"}}
 
     monkeypatch.setattr(email_archival, "upload_bytes_to_oss", fake_upload)
-    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
 
@@ -254,7 +269,7 @@ async def test_fetch_imap_emails_skips_irrelevant_before_oss_upload(monkeypatch:
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
     monkeypatch.setattr(email_archival, "upload_bytes_to_oss", fail_upload)
-    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fail_ingest)
+    monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fail_ingest)
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
 
@@ -289,8 +304,8 @@ async def test_fetch_filters_processed_uids_before_applying_batch_limit(monkeypa
 
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", fake_uid_precheck)
-    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
-    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(mail_ingress, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
 
     result = await imap_fetcher.fetch_imap_emails(
@@ -407,14 +422,15 @@ async def test_retry_success_updates_existing_uidvalidity_record(monkeypatch: py
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", allow_uid)
     monkeypatch.setattr(imap_fetcher, "precheck_email_payload", accept_payload)
-    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
-    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(mail_ingress, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
 
     assert result["status"] == "success"
-    assert existing.fetch_status == "ingested"
+    assert existing.fetch_status == "classified_first"
+    assert existing.processing_stage == "first_ingested"
     assert existing.email_id == 77
     assert existing.attempt_count == 2
     assert existing.next_retry_at is None
@@ -443,8 +459,8 @@ async def test_due_seen_retry_uid_is_merged_with_unseen_search(monkeypatch: pyte
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher, "_due_retry_uids", due_retries)
     monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", allow_uid)
-    monkeypatch.setattr(imap_fetcher, "archive_email_bundle", fake_archive)
-    monkeypatch.setattr(imap_fetcher.email_service, "ingest_email", fake_ingest)
+    monkeypatch.setattr(mail_ingress, "archive_email_bundle", fake_archive)
+    monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
 
     result = await imap_fetcher.fetch_imap_emails(

@@ -1591,6 +1591,12 @@ async def _send_reply_record(
                     "rma_no": rma_record.rma_no if rma_record is not None else None,
                 },
             )
+            # SMTP acceptance is an irreversible external effect.  Persist the
+            # acceptance evidence, outbound archive and rma_sent transition
+            # before attempting the independently recoverable close step.  A
+            # close failure can then retry from the durable SMTP operation
+            # without sending the customer another message.
+            await _commit_if_available(session)
             closed = await _finalize_rma_issue(
                 session,
                 ticket=ticket,

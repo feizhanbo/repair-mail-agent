@@ -33,6 +33,38 @@ class ArchiveBundleResult:
     source_content_sha256: str = ""
 
 
+async def archive_raw_email(
+    session: AsyncSession,
+    *,
+    payload: EmailIngestRequest,
+    raw_eml: bytes,
+    raw_file_name: str,
+    user_id: int | None = None,
+) -> ArchiveBundleResult:
+    """Archive only the RFC822 source for minimal SECOND/UNKNOWN persistence."""
+    if not raw_eml:
+        raise EmailArchivalError("EML_FILE_EMPTY", stage="validate")
+    if len(raw_eml) > settings.EMAIL_MAX_ARCHIVE_BYTES:
+        raise EmailArchivalError("EMAIL_ARCHIVE_TOO_LARGE", stage="validate")
+    source_hash = hashlib.sha256(raw_eml).hexdigest()
+    try:
+        raw_object = await upload_bytes_to_oss(
+            session,
+            content=raw_eml,
+            original_file_name=raw_file_name,
+            content_type="message/rfc822",
+            source_type="raw_eml",
+            user_id=user_id,
+        )
+    except StorageConfigurationError as exc:
+        raise EmailArchivalError("OSS_NOT_CONFIGURED", stage="configuration") from exc
+    except StorageUploadError as exc:
+        raise EmailArchivalError("OSS_ARCHIVAL_FAILED", stage="raw_eml") from exc
+    payload.raw_eml_oss_object_id = raw_object.id
+    payload.raw_eml_sha256 = source_hash
+    return ArchiveBundleResult(raw_object_id=raw_object.id, source_content_sha256=source_hash)
+
+
 def validate_archive_bundle(raw_eml: bytes, attachment_blobs: list[dict[str, Any]]) -> None:
     if not raw_eml:
         raise EmailArchivalError("EML_FILE_EMPTY", stage="validate")

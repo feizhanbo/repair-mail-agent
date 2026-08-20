@@ -88,6 +88,7 @@ class Email(TimestampMixin, Base):
         Index("idx_emails_handling_intent", "handling_level", "intent_type"),
         Index("idx_emails_from_domain", "from_domain"),
         Index("idx_emails_processing_trace", "processing_trace_id"),
+        Index("idx_emails_persistence_tier", "persistence_tier"),
         UniqueConstraint("source_content_sha256", name="uk_emails_source_content_sha256"),
     )
 
@@ -96,6 +97,8 @@ class Email(TimestampMixin, Base):
     thread_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_threads.id", name="fk_emails_thread"))
     raw_eml_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_emails_raw_eml_oss"))
     processing_trace_id: Mapped[str | None] = mapped_column(String(100))
+    persistence_tier: Mapped[str] = mapped_column(String(20), nullable=False, server_default="business")
+    classification_locked: Mapped[bool] = bool_column(False)
     source_content_sha256: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     mail_direction: Mapped[str] = mapped_column(String(20), nullable=False, server_default="inbound")
     mailbox_account: Mapped[str] = mapped_column(String(255), nullable=False)

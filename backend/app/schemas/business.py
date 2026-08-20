@@ -20,6 +20,7 @@ class EmailIngestRequest(BaseModel):
     in_reply_to: str | None = Field(default=None, max_length=500)
     references_header: str | None = None
     from_address: str = Field(max_length=500)
+    sender_address: str | None = Field(default=None, max_length=500)
     to_addresses: str | None = None
     cc_addresses: str | None = None
     delivered_to_addresses: str | None = None
@@ -153,11 +154,13 @@ class ManualTaskResolveRequest(BaseModel):
         "keep_manual_review",
         "finish_external_handling",
         "resolve_manual_business",
+        "promote_to_first",
     ] = "keep_manual_review"
+    target_first_intent: Literal["new_repair", "thread_new_repair", "customer_supplement"] | None = None
 
 
 class ManualTaskReparseRequest(BaseModel):
-    mode: Literal["field_extract", "classification_and_extract"] = "field_extract"
+    mode: Literal["field_extract"] = "field_extract"
     reason: str | None = Field(default=None, max_length=500)
 
 

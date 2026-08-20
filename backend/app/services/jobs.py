@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from datetime import timedelta
 from typing import Any
@@ -14,6 +15,9 @@ from app.models import JobRunLog
 from app.services.audit import log_system_event
 from app.services.common import model_to_dict, utcnow
 from app.services.logging_safety import safe_error_code, sanitize_log_payload
+
+
+logger = logging.getLogger(__name__)
 
 
 JOB_TYPES = {
@@ -182,6 +186,7 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
                 if isinstance(metadata.get("rule_parse_result_id"), int)
                 else None
             ),
+            mode="field_extract",
         )
     if job.job_type == "imap_fetch":
         from app.services.imap_fetcher import run_imap_fetch_locked
@@ -383,6 +388,13 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             job.error_code = None
             job.error_message = None
     except Exception as exc:
+        logger.exception(
+            "Background job execution failed: job_id=%s job_type=%s resource_type=%s resource_id=%s",
+            job_id,
+            job.job_type,
+            job.resource_type,
+            job.resource_id,
+        )
         class_error_codes = {
             "TypeError": "JOB_TYPE_ERROR",
             "StatementError": "DB_STATEMENT_ERROR",

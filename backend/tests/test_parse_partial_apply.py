@@ -117,6 +117,41 @@ async def test_reparse_reconciles_existing_placeholder_without_duplicate_line() 
 
 
 @pytest.mark.anyio
+async def test_reparse_enriches_existing_same_sn_without_duplicate_item() -> None:
+    existing = RepairTicketItem(
+        id=11,
+        ticket_id=1,
+        line_no=1,
+        sn="M81252101025023",
+        quantity=1,
+        material_code="M8125",
+    )
+
+    class ReconcileSession(ItemSession):
+        async def execute(self, _statement):
+            return ScalarRows([existing])
+
+    session = ReconcileSession()
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="RMATEST",
+        problem_description="selfcheck FAIL",
+    )
+    parse = ParseResult(
+        id=2,
+        email_id=3,
+        extracted_items={"items": [{"sn": "m81252101025023", "material_name": "SVI40"}]},
+    )
+
+    await _create_items_from_parse_result(session, ticket, parse, user_id=None)
+
+    assert existing.material_name == "SVI40"
+    assert existing.failure_description == "selfcheck FAIL"
+    assert not [value for value in session.added if isinstance(value, RepairTicketItem)]
+    assert len([value for value in session.added if isinstance(value, FieldAuditLog)]) == 1
+
+
+@pytest.mark.anyio
 async def test_customer_supplement_explicit_sn_correction_replaces_unlocked_old_items() -> None:
     old_items = [
         RepairTicketItem(id=11, ticket_id=1, line_no=1, sn="OLD-SN-1", quantity=1),

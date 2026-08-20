@@ -18,13 +18,12 @@ from app.config import settings
 from app.core.database import engine
 from app.models import JobRunLog
 from app.models.mail_fetch import MailFetchRecord
-from app.services import emails as email_service
 from app.services.attachment_precheck import filter_decorative_attachments
-from app.services.email_archival import EmailArchivalError, archive_email_bundle
+from app.services.email_archival import EmailArchivalError
 from app.services.common import normalize_message_id, utcnow
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload, precheck_imap_uid
-from app.services.jobs import enqueue_job
+from app.services.mail_ingress import process_preclassified_ingress
 from app.services.logging_safety import safe_error_code
 
 
@@ -222,7 +221,11 @@ async def _save_fetch_result(
     record.email_id = email_id
     record.duplicate = duplicate
     record.fetch_status = fetch_status
-    record.attempt_count = previous_attempts + 1
+    record.attempt_count = (
+        previous_attempts + 1
+        if record.id is not None and fetch_status == "processing"
+        else max(1, previous_attempts)
+    )
     record.last_attempt_at = utcnow()
     record.next_retry_at = None
     record.error_message = error_message
@@ -417,45 +420,7 @@ async def fetch_imap_emails(
                     await _commit(session)
                     continue
 
-                try:
-                    await archive_email_bundle(
-                        session,
-                        payload=payload,
-                        raw_eml=raw,
-                        raw_file_name=f"imap-{uid}.eml",
-                        attachment_blobs=blobs,
-                        source="imap",
-                        user_id=user_id,
-                        correlation_id=job.correlation_id,
-                    )
-                    await _commit(session)
-                except EmailArchivalError:
-                    # Preserve successful/failed OSS object metadata for an idempotent retry.
-                    await _commit(session)
-                    raise
-                ingest_result = await email_service.ingest_email(
-                    session,
-                    payload=payload,
-                    user_id=user_id,
-                    auto_parse=False,
-                    rule_analysis=payload_precheck.rule_analysis,
-                )
-                if auto_parse and not ingest_result.get("duplicate"):
-                    email_id = int(ingest_result["email"]["id"])
-                    await enqueue_job(
-                        session,
-                        job_type="email_parse",
-                        resource_type="email",
-                        resource_id=email_id,
-                        idempotency_key=f"email_parse:{email_id}:initial",
-                        correlation_id=job.correlation_id,
-                        metadata={
-                            "user_id": user_id,
-                            "reason": "initial IMAP asynchronous parse",
-                            "rule_parse_result_id": ingest_result["rule_parse_result_id"],
-                        },
-                    )
-                await _save_fetch_result(
+                fetch_record = await _save_fetch_result(
                     session,
                     mailbox_account=settings.IMAP_USER,
                     folder_name=folder_name,
@@ -463,18 +428,35 @@ async def fetch_imap_emails(
                     imap_uid=uid,
                     message_id=payload.message_id,
                     fetch_job_run_id=job.id,
-                    email_id=ingest_result.get("email", {}).get("id"),
-                    duplicate=ingest_result.get("duplicate", False),
-                    fetch_status="duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
+                    email_id=None,
+                    duplicate=False,
+                    fetch_status="processing",
+                )
+                fetch_record.processing_stage = "classifying"
+                await _commit(session)
+                routed = await process_preclassified_ingress(
+                    session,
+                    payload=payload,
+                    raw_eml=raw,
+                    raw_file_name=f"imap-{uid}.eml",
+                    attachment_blobs=blobs,
+                    source="imap",
+                    precheck=payload_precheck,
+                    user_id=user_id,
+                    auto_parse=auto_parse,
+                    fetch_record=fetch_record,
+                    uid_validity=uid_validity,
                 )
                 fetched.append(
                     {
                         "uid": uid,
                         "message_id": payload.message_id,
-                        "email_id": ingest_result.get("email", {}).get("id"),
-                        "duplicate": ingest_result.get("duplicate", False),
-                        "fetch_status": "duplicate_message_skipped" if ingest_result.get("duplicate", False) else "ingested",
-                        "parse_status": ingest_result.get("email", {}).get("parse_status"),
+                        "email_id": (routed.get("email") or {}).get("id"),
+                        "duplicate": routed.get("fetch_status") == "duplicate_message_skipped",
+                        "fetch_status": routed["fetch_status"],
+                        "intent_type": routed["classification"]["intent_type"],
+                        "handling_level": routed["classification"]["handling_level"],
+                        "parse_status": (routed.get("email") or {}).get("parse_status"),
                     }
                 )
                 job.success_count += 1

@@ -148,8 +148,6 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
         return "contract_confirmation", 0.93, "邮件属于合同确认业务。"
     if any(term in text for term in ("非我司设备", "其他厂家设备", "第三方设备报价", "third-party equipment quotation", "other vendor quotation")):
         return "third_party_equipment_quote", 0.94, "邮件属于非我司设备报价。"
-    if email.mail_direction == "outbound" and "rma" in text:
-        return "rma_sent", 0.9, "系统外发的 RMA 邮件。"
     if email.in_reply_to or email.references_header:
         new_request_terms = ("另外", "新增", "还有一", "再次报修", "另有", "another unit", "additional", "new repair")
         if any(term in text for term in new_request_terms):

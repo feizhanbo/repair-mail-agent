@@ -30,6 +30,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.config import settings
+from app.core.email_classification import EmailIntent, INTENT_LEVEL
 from app.core.database import AsyncSessionLocal, engine
 from app.models import BoardCard, CustomerServicePolicy, SnAsset, User
 from app.services.gold_replay import (
@@ -52,9 +53,9 @@ from tools.run_rmatest_batch_e2e import apply_temporary_master_data, cleanup_tem
 SCHEMA_VERSION = 3
 MESSAGE_ID_PATTERN = re.compile(r"^<[^<>\s]+>$")
 RMA_PATTERN = re.compile(r"^\d{10}$")
-INTENTS = {
-    "new_repair", "customer_supplement", "normal_reply", "rma_sent",
-    "device_received", "irrelevant", "unknown",
+INTENTS = {str(intent) for intent in EmailIntent}
+EXPECTED_LEVEL_BY_INTENT = {
+    str(intent): str(INTENT_LEVEL[intent]) for intent in EmailIntent
 }
 SEND_MODES = {"none", "auto_rma", "auto_followup", "followup_then_rma"}
 TERMINAL_PARSE_STATUSES = {"parsed", "failed", "manual_review", "irrelevant"}
@@ -188,16 +189,23 @@ def file_sha256(path: Path) -> str:
 
 
 def _classification_source_sha256(root: Path | None = None) -> str:
-    """Hash the business source tree that determines classification results."""
+    """Hash code and route configuration that determine classification results."""
     source_root = root or (BACKEND_ROOT / "app")
     digest = hashlib.sha256()
-    files = sorted(
+    files = list(sorted(
         path
         for path in source_root.rglob("*.py")
         if "__pycache__" not in path.parts
-    )
+    ))
+    route_file = source_root.parent / "config" / "llm_routes.yaml"
+    if route_file.is_file():
+        files.append(route_file)
     for source_path in files:
-        relative = source_path.relative_to(source_root).as_posix().encode("utf-8")
+        relative = (
+            source_path.relative_to(source_root).as_posix()
+            if source_path.is_relative_to(source_root)
+            else f"config/{source_path.name}"
+        ).encode("utf-8")
         payload = source_path.read_bytes()
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
@@ -393,17 +401,17 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
             errors.append(f"{prefix}.raw_sha256_INVALID")
         gold = item.get("gold") if isinstance(item.get("gold"), dict) else {}
         intent = gold.get("expected_intent")
-        subtype = gold.get("expected_subtype")
         if intent not in INTENTS:
             errors.append(f"{prefix}.expected_intent_INVALID")
-        if intent == "irrelevant" and subtype not in {"general_irrelevant", "out_of_scope_repair"}:
-            errors.append(f"{prefix}.expected_subtype_REQUIRED")
-        if intent != "irrelevant" and subtype is not None:
+        if gold.get("expected_subtype") is not None:
             errors.append(f"{prefix}.expected_subtype_MUST_BE_NULL")
         if not isinstance(gold.get("create_ticket"), bool):
             errors.append(f"{prefix}.create_ticket_REQUIRED")
         if gold.get("send_mode") not in SEND_MODES:
             errors.append(f"{prefix}.send_mode_INVALID")
+        expected_level = EXPECTED_LEVEL_BY_INTENT.get(str(intent))
+        if gold.get("send_mode") != "none" and expected_level != "auto_repair":
+            errors.append(f"{prefix}.SEND_MODE_REQUIRES_FIRST_INTENT")
         count = gold.get("expected_outbound_count")
         if not isinstance(count, int) or count < 0:
             errors.append(f"{prefix}.expected_outbound_count_INVALID")
@@ -979,14 +987,12 @@ def classify_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                 )
                 email_id, fetch_result = _fetch_system_message(client, message_id)
                 if email_id is None:
-                    precheck = fetch_result.get("precheck") or {}
-                    rule = precheck.get("rule_analysis") or {}
                     result["cases"].append(
                         {
                             "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
                             "email_id": None,
-                            "intent_type": rule.get("intent_type"),
-                            "intent_subtype": rule.get("intent_subtype"),
+                            "intent_type": fetch_result.get("intent_type"),
+                            "handling_level": fetch_result.get("handling_level"),
                             "parse_status": fetch_result.get("fetch_status"),
                             "ticket": None,
                             "items": [],
@@ -1002,8 +1008,8 @@ def classify_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                     "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
                     "email_id": email_id,
                     "intent_type": email.get("intent_type"),
-                    "intent_subtype": email.get("intent_subtype"),
                     "handling_level": email.get("handling_level"),
+                    "persistence_tier": email.get("persistence_tier"),
                     "classification_reason_code": email.get("classification_reason_code"),
                     "parse_status": email.get("parse_status"),
                     "ticket": (
@@ -1015,6 +1021,7 @@ def classify_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                             "contact_person": ticket.get("contact_person"),
                             "contact_phone": ticket.get("contact_phone"),
                             "mailing_address": ticket.get("mailing_address"),
+                            "problem_description": ticket.get("problem_description"),
                             "missing_fields": ticket.get("missing_fields"),
                             "language_code": ticket.get("language_code"),
                         }
@@ -1026,7 +1033,7 @@ def classify_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                             "sn": row.get("sn"),
                             "material_code": row.get("material_code"),
                             "material_name": row.get("material_name"),
-                            "problem_description": row.get("problem_description"),
+                            "failure_description": row.get("failure_description"),
                         }
                         for row in (ticket_detail or {}).get("items") or []
                     ],
@@ -1041,13 +1048,23 @@ def classify_suite(path: Path, confirm_suite: str) -> dict[str, Any]:
                     ],
                 })
             finally:
-                run_database_async(
-                    cleanup_temporary_master_data(
-                        mini,
-                        state_path=temporary_state,
-                        skip_manifest_validation=True,
+                try:
+                    run_database_async(
+                        cleanup_temporary_master_data(
+                            mini,
+                            state_path=temporary_state,
+                            skip_manifest_validation=True,
+                        )
                     )
-                )
+                finally:
+                    run_database_async(
+                        _reset(
+                            [message_id],
+                            suite_id=suite_id,
+                            run_id=f"classification-post-{index + 1}",
+                            apply=True,
+                        )
+                    )
         classification_issues = _classification_issues(manifest, result)
         result["issues"] = classification_issues
         result["status"] = "passed" if not classification_issues else "failed"
@@ -1141,7 +1158,9 @@ def _wait_for_case(
                         details={"sent_followup_count": len(sent_followups)},
                     )
             last = {"email_detail": email_detail, "ticket_detail": ticket_detail}
-            if ticket.get("current_status_code") == expected_status and len(sent) >= expected_outbound:
+            if _status_satisfies_expected(
+                ticket.get("current_status_code"), expected_status
+            ) and len(sent) >= expected_outbound:
                 return last
         else:
             last = {"email_detail": email_detail, "ticket_detail": None}
@@ -1150,6 +1169,11 @@ def _wait_for_case(
                 return last
         time.sleep(2)
     raise GoldCliError("CASE_TIMEOUT", details={"last": last})
+
+
+def _status_satisfies_expected(actual: str | None, expected: str | None) -> bool:
+    """Accept evidence-gated closure as the completed successor of rma_sent."""
+    return actual == expected or (expected == "rma_sent" and actual == "closed")
 
 
 def _mailbox_max_uid(
@@ -1490,15 +1514,25 @@ def _assert_case(item: dict[str, Any], value: dict[str, Any], outbound: list[dic
     gold = item["gold"]
     issues: list[str] = []
     email = (value.get("email_detail") or {}).get("email") or {}
+    classification = email or value.get("fetch_result") or {}
     ticket_detail = value.get("ticket_detail") or {}
     ticket = ticket_detail.get("ticket") or {}
-    if email.get("intent_type") != gold.get("expected_intent"):
+    if classification.get("intent_type") != gold.get("expected_intent"):
         issues.append("INTENT_MISMATCH")
-    if email.get("intent_subtype") != gold.get("expected_subtype"):
-        issues.append("INTENT_SUBTYPE_MISMATCH")
+    expected_level = EXPECTED_LEVEL_BY_INTENT.get(str(gold.get("expected_intent")))
+    if classification.get("handling_level") != expected_level:
+        issues.append("HANDLING_LEVEL_MISMATCH")
+    expected_tier = "business" if expected_level == "auto_repair" else "minimal"
+    if expected_level == "lifecycle_only":
+        if email:
+            issues.append("THIRD_CREATED_EMAIL")
+    elif email.get("persistence_tier") != expected_tier:
+        issues.append("PERSISTENCE_TIER_MISMATCH")
     if bool(ticket) != bool(gold.get("create_ticket")):
         issues.append("TICKET_CREATION_MISMATCH")
-    if ticket and ticket.get("current_status_code") != gold.get("expected_final_status"):
+    if ticket and not _status_satisfies_expected(
+        ticket.get("current_status_code"), gold.get("expected_final_status")
+    ):
         issues.append("FINAL_STATUS_MISMATCH")
     final_fields = gold.get("expected_final_fields") or gold.get("expected_fields") or {}
     for key, expected in final_fields.items():
@@ -1645,8 +1679,15 @@ def _classification_issues(
         else:
             if actual.get("intent_type") != gold.get("expected_intent"):
                 codes.append("INTENT_MISMATCH")
-            if actual.get("intent_subtype") != gold.get("expected_subtype"):
-                codes.append("INTENT_SUBTYPE_MISMATCH")
+            expected_level = EXPECTED_LEVEL_BY_INTENT.get(str(gold.get("expected_intent")))
+            if actual.get("handling_level") != expected_level:
+                codes.append("HANDLING_LEVEL_MISMATCH")
+            expected_tier = "business" if expected_level == "auto_repair" else "minimal"
+            if expected_level == "lifecycle_only":
+                if actual.get("email_id") is not None:
+                    codes.append("THIRD_CREATED_EMAIL")
+            elif actual.get("persistence_tier") != expected_tier:
+                codes.append("PERSISTENCE_TIER_MISMATCH")
             ticket = actual.get("ticket") or None
             if bool(ticket) != bool(gold.get("create_ticket")):
                 codes.append("TICKET_CREATION_MISMATCH")
@@ -1909,9 +1950,14 @@ def _run_suite_unlocked(
                         expected_switches=expected_switches,
                     )
                 else:
-                    precheck = fetch_result.get("precheck") or {}
-                    rule = precheck.get("rule_analysis") or {}
-                    value = {"email_detail": {"email": {"intent_type": fetch_result.get("intent_type") or rule.get("intent_type"), "intent_subtype": fetch_result.get("intent_subtype") or rule.get("intent_subtype"), "parse_status": fetch_result.get("fetch_status"), "terminal_reason_code": precheck.get("reason_code")}}, "ticket_detail": None}
+                    value = {
+                        "email_detail": {
+                            "email": {
+                            }
+                        },
+                        "fetch_result": fetch_result,
+                        "ticket_detail": None,
+                    }
                 if mode == "followup_then_rma":
                     original_email_detail = value.get("email_detail")
                     first = _rmatest2_new_messages(baseline_uid)
@@ -1957,8 +2003,9 @@ def _run_suite_unlocked(
                 )
                 case["issues"] = _assert_case(item, value, outbound)
                 email = (value.get("email_detail") or {}).get("email") or {}
+                classification = email or value.get("fetch_result") or {}
                 ticket = (value.get("ticket_detail") or {}).get("ticket") or {}
-                case.update({"actual_intent": email.get("intent_type"), "actual_status": ticket.get("current_status_code"), "outbound_count": len(outbound), "status": "passed" if not case["issues"] else "failed"})
+                case.update({"actual_intent": classification.get("intent_type"), "actual_status": ticket.get("current_status_code"), "outbound_count": len(outbound), "status": "passed" if not case["issues"] else "failed"})
                 result["actual_system_outbound_count"] += len(outbound)
                 result["actual_total_smtp_count"] = (
                     result["actual_system_outbound_count"]

@@ -56,6 +56,31 @@ async def test_delete_oss_object_uses_version(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.anyio
+async def test_delete_oss_object_treats_concurrent_no_such_key_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConcurrentDeleteBucket(FakeBucket):
+        def delete_object(self, key: str, params: dict | None = None) -> None:
+            error = RuntimeError("object disappeared between exists and delete")
+            error.status = 404
+            error.code = "NoSuchKey"
+            raise error
+
+    monkeypatch.setattr(storage.settings, "OSS_ACCESS_KEY", "test")
+    monkeypatch.setattr(storage.settings, "OSS_SECRET_KEY", "test")
+    monkeypatch.setattr(
+        storage,
+        "_build_bucket",
+        lambda **kwargs: ConcurrentDeleteBucket({"raw/test.eml"}),
+    )
+
+    result = await storage.delete_oss_object(bucket="test", object_key="raw/test.eml")
+
+    assert result.deleted is True
+    assert result.already_missing is True
+
+
+@pytest.mark.anyio
 async def test_delete_oss_objects_reports_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_delete(**kwargs):
         if kwargs["object_key"] == "bad":

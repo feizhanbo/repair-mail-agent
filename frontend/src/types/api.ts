@@ -150,6 +150,8 @@ export type DashboardSummary = {
 export type EmailItem = {
   id: number;
   thread_id?: number | null;
+  persistence_tier: 'minimal' | 'business';
+  classification_locked?: boolean;
   raw_eml_oss_object_id?: number | null;
   mail_direction: string;
   mailbox_account: string;
@@ -190,6 +192,7 @@ export type Attachment = {
   id: number;
   email_id: number;
   oss_object_id?: number | null;
+  storage_availability?: 'object' | 'raw_eml_only';
   file_name: string;
   content_type?: string | null;
   file_size?: number | null;

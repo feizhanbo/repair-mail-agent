@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.ai.prompts import PROMPTS, REPAIR_FIELD_EXTRACT, REPLY_DRAFT
+from app.core.email_classification import CLASSIFICATION_VERSION, decision_for_intent, normalize_intent
 from app.core.repair_items import (
     canonical_sn,
     normalize_board_code,
@@ -21,65 +23,13 @@ from app.core.repair_items import (
     normalize_repair_items,
 )
 from app.core.request_context import get_correlation_id
-from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
-from app.integrations.qwen_provider import QwenProvider
+from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse
+from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
 from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem, SnAsset
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
 from app.services.parser import clean_email_body
-
-AI_EXTRACT_SYSTEM_PROMPT = """
-你是邮件报修系统的结构化解析助手，只能输出 JSON 对象。
-所有邮件都必须由你判断最终类型；规则解析只作为候选上下文，不能直接决定结果。
-请输出 intent_type, extracted_fields, extracted_items, missing_fields, conflict_fields, confidence_score,
-field_confidences, evidence, confidence_reasons, manual_review_direction, original_evidence。
-置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
-如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
-不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
-联系电话或手机号抽取为 contact_phone；new_repair 缺失时必须放入 missing_fields。
-工单明细只从邮件提取 sn、board_code（板卡型号）、board_name（板卡名称）和故障信息。
-material_code/material_name 是 SAP 物料主数据，只能由 SN 反查，禁止根据邮件内容猜测或写入。
-mailing_address/contact_person/contact_phone 是客户方邮寄信息；维修寄回地址由系统规则计算，禁止从邮件字段混用。
-邮件签名档、公司落款、名片区中的地址、姓名和电话不能自动作为设备维修后寄回信息；
-只有正文业务段明确表述为寄回地址、寄回联系人或寄回电话时才可抽取。
-若正文要求对方提供寄回地址或联系方式，即使签名档存在相同内容，这些字段仍必须判为缺失。
-""".strip()
-
-AI_EXTRACT_SYSTEM_PROMPT += """
-
-业务范围规则：
-- 本系统只处理客户将板卡寄回本公司维修并申请 RMA 的业务。
-- 只有邮件明确说明属于其他维修或服务业务时，才分类为 intent_type=irrelevant，
-  并在 evidence.scope_decision 中提供原文范围证据和判断说明。
-- 广告、系统通知等普通无关邮件同样使用 intent_type=irrelevant，并在 evidence 中说明原因。
-- SN 未知、SN 不存在、资料缺失或描述不完整都不能作为超范围依据。
-""".strip()
-
-AI_EXTRACT_SYSTEM_PROMPT += """
-
-邮件业务分层分类：
-- FIRST/auto_repair: new_repair、thread_new_repair、customer_supplement。
-- SECOND/manual_rma_business: component_replacement_repair、onsite_service、
-  warranty_status_inquiry、repair_thread_other。
-- THIRD/lifecycle_only: device_intake_received、repaired_device_dispatched、
-  customer_repaired_device_received、contract_confirmation、invoice、
-  third_party_equipment_quote。
-- UNKNOWN: unknown。
-明确询问某个 SN/板卡/设备是否过保、保修状态或保修截止日期时，必须使用
-warranty_status_inquiry；客户仅陈述已经过保并明确申请标准寄修时，不得仅因“过保”
-判为咨询。回复链不等于补充信息；修改 RMA/SN/地址、撤销、异议和进度询问使用
-repair_thread_other。回复链中明确提出另一台、新增或再次报修时使用 thread_new_repair。
-同一邮件同时补充旧工单并提出新报修时使用 repair_thread_other，并列出
-candidate_intents。清晰的新报修动作优先于纯 THIRD 通知。输出 handling_level、
-candidate_intents 和 classification_reason_code；不得让 SECOND 与 unknown 混淆。
-""".strip()
-
-AI_REPLY_SYSTEM_PROMPT = """
-你是邮件报修自动化系统的中文客服助理。你只能输出 JSON 对象。
-根据工单缺失字段和模板草稿生成更自然的追问草稿。草稿只能用于人工审核，不代表已发送。
-语气礼貌、简洁，避免承诺维修结果，不要加入输入中不存在的客户信息。
-""".strip()
 
 logger = logging.getLogger(__name__)
 _ai_log_file_lock = asyncio.Lock()
@@ -98,28 +48,15 @@ def _is_retryable_error(exc: AiProviderError) -> bool:
 
 
 def text_ai_configured() -> bool:
-    return bool(settings.AI_API_KEY)
+    return llm_task_configured(LlmTask.REPAIR_FIELD_EXTRACT)
 
 
 def multimodal_ai_configured() -> bool:
-    return (
-        settings.MULTIMODAL_PROVIDER.lower() == "qwen"
-        and bool(settings.QWEN_API_KEY)
-        and bool(settings.QWEN_VL_MODEL or settings.QWEN_MODEL)
-    )
+    return llm_task_configured(LlmTask.ATTACHMENT_VISUAL_PARSE)
 
 
 def ai_configured() -> bool:
     return text_ai_configured()
-
-
-def _text_provider() -> DeepSeekProvider:
-    return DeepSeekProvider(
-        api_key=settings.AI_API_KEY,
-        base_url=settings.AI_BASE_URL,
-        model=settings.AI_MODEL,
-        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
-    )
 
 
 def _compact_text(value: str | None, limit: int) -> str:
@@ -379,7 +316,7 @@ def _key_result(call_type: str, parsed: BaseModel | None) -> dict[str, Any] | No
     if parsed is None:
         return None
     data = parsed.model_dump()
-    if call_type in {"field_extract", "classification_and_extract"}:
+    if call_type == "field_extract":
         return {
             "intent_type": data.get("intent_type"),
             "field_keys": sorted((data.get("extracted_fields") or {}).keys()),
@@ -449,7 +386,6 @@ def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, i
 
 def _ai_call_context(call_type: str) -> tuple[str, str]:
     mapping = {
-        "classification_and_extract": ("邮件级 DeepSeek 结构化解析", "识别邮件意图并抽取业务字段"),
         "field_extract": ("邮件级 DeepSeek 结构化解析", "抽取业务字段和明细"),
         "generate_reply_draft": ("DeepSeek 回复草稿生成", "生成客户回复草稿"),
         "attachment_text_parse": ("Qwen 文本类附件解析", "解析文本、表格或文档附件"),
@@ -511,10 +447,15 @@ async def persist_ai_log(
     ticket_id: int | None = None,
     attachment_id: int | None = None,
     job_run_id: int | None = None,
+    mail_fetch_record_id: int | None = None,
     correlation_id: str | None = None,
     provider_name: str = "deepseek",
     model_name: str | None = None,
     prompt_version: str | None = None,
+    prompt_hash: str | None = None,
+    route_name: str | None = None,
+    route_attempt: int = 1,
+    fallback_used: bool = False,
     attempt_count: int = 1,
     error_message: str | None = None,
 ) -> AiCallLog:
@@ -527,12 +468,17 @@ async def persist_ai_log(
         "correlation_id": correlation_id or get_correlation_id(),
         "call_type": call_type,
         "prompt_version": prompt_version,
+        "prompt_hash": prompt_hash,
+        "route_name": route_name,
+        "route_attempt": route_attempt,
+        "fallback_used": fallback_used,
         "provider": provider_name,
         "model": model_name,
         "email_id": email_id,
         "ticket_id": ticket_id,
         "attachment_id": attachment_id,
         "job_run_id": job_run_id,
+        "mail_fetch_record_id": mail_fetch_record_id,
         "input_metadata": _payload_metadata(input_payload),
         "request_metadata": _payload_metadata(request_payload),
         "response_metadata": _payload_metadata(output_payload),
@@ -565,11 +511,16 @@ async def persist_ai_log(
         ticket_id=ticket_id,
         attachment_id=attachment_id,
         job_run_id=job_run_id,
+        mail_fetch_record_id=mail_fetch_record_id,
         correlation_id=correlation_id or get_correlation_id(),
         call_type=call_type,
         provider_name=provider_name,
         model_name=model_name,
         prompt_version=prompt_version,
+        prompt_hash=prompt_hash,
+        route_name=route_name,
+        route_attempt=route_attempt,
+        fallback_used=fallback_used,
         input_summary=input_summary[:1000],
         output_summary=(output_summary or "")[:1000] or None,
         parsed_key_result=_key_result(call_type, parsed),
@@ -773,29 +724,11 @@ async def _run_ai_json(
     if not text_ai_configured():
         return None, None
 
-    last_error: AiProviderError | None = None
-    max_retries = settings.AI_MAX_RETRIES
-
-    attempt_count = 0
-    for attempt in range(max_retries + 1):
-        attempt_count = attempt + 1
-        try:
-            completion = await _text_provider().chat_json(messages=messages, response_model=response_model)
-            last_error = None
-            break
-        except AiProviderError as exc:
-            last_error = exc
-            if attempt < max_retries and _is_retryable_error(exc):
-                delay = settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
-                logger.warning(
-                    "AI call failed (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, max_retries, delay, exc,
-                )
-                await asyncio.sleep(delay)
-            else:
-                break
-
-    if last_error is not None:
+    task = LlmTask.REPLY_DRAFT if call_type == "reply_draft" else LlmTask.REPAIR_FIELD_EXTRACT
+    prompt = PROMPTS[task.value]
+    try:
+        completion = await invoke_structured(task=task, messages=messages, response_model=response_model)
+    except AiProviderError as last_error:
         trace_id = sha256_text(f"{call_type}:{utcnow().isoformat()}")[:32]
         raw_out = getattr(last_error, "raw_output", None)
         error_code = safe_error_code(last_error, "AI_CALL_FAILED")
@@ -804,7 +737,7 @@ async def _run_ai_json(
             trace_id=trace_id,
             call_type=call_type,
             input_payload=input_payload,
-            request_payload={"model": settings.AI_MODEL, "messages": messages, "response_format": {"type": "json_object"}},
+            request_payload=getattr(last_error, "request_payload", {"messages": messages}),
             output_payload={"error": str(last_error), "raw_output": raw_out if raw_out else None},
             parsed=None,
             latency_ms=None,
@@ -812,7 +745,14 @@ async def _run_ai_json(
             output_summary=error_code,
             email_id=email_id,
             ticket_id=ticket_id,
-            attempt_count=attempt_count,
+            provider_name=str(getattr(last_error, "route_name", "unknown")),
+            model_name=str(getattr(last_error, "model_name", "unknown")),
+            prompt_version=prompt.version,
+            prompt_hash=prompt.content_hash,
+            route_name=getattr(last_error, "route_name", None),
+            route_attempt=int(getattr(last_error, "route_attempt", 1)),
+            fallback_used=int(getattr(last_error, "route_attempt", 1)) > 1,
+            attempt_count=int(getattr(last_error, "route_attempt", 1)),
             error_message=error_code,
         )
         return None, ai_log
@@ -832,7 +772,14 @@ async def _run_ai_json(
         output_summary=output_summary,
         email_id=email_id,
         ticket_id=ticket_id,
-        attempt_count=attempt_count,
+        provider_name=completion.provider_name or "unknown",
+        model_name=completion.model_name or "unknown",
+        prompt_version=prompt.version,
+        prompt_hash=prompt.content_hash,
+        route_name=completion.route_name,
+        route_attempt=completion.route_attempt,
+        fallback_used=completion.fallback_used,
+        attempt_count=completion.route_attempt,
     )
     return parsed, ai_log
 
@@ -934,6 +881,34 @@ def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) ->
 def _valid_email(value: str | None) -> bool:
     parsed = parseaddr(value or "")[1]
     return bool(parsed and "@" in parsed and "." in parsed.rsplit("@", 1)[-1])
+
+
+_PROBLEM_LINE_PATTERN = re.compile(
+    r"(?:detected\s+fail|self[ -]?check|\bfail(?:ed|ure|ing)?\b|\bfault\b|"
+    r"\berror\b|\babnormal(?:ity)?\b|\bissue\b|\bproblem\b|故障|异常|损坏|不良|失效)",
+    re.IGNORECASE,
+)
+_NEGATED_PROBLEM_PATTERN = re.compile(
+    r"\b(?:no|not|without)\s+(?:issue|problem|fault|error|failure)\b|"
+    r"(?:无|没有|未发现)(?:故障|异常|问题)",
+    re.IGNORECASE,
+)
+
+
+def _problem_description_from_latest_reply(email: Email) -> str | None:
+    """Return a short explicit failure statement when the model omitted it."""
+    latest_reply = clean_email_body(email)
+    candidates: list[str] = []
+    for raw_line in latest_reply.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip(" \t-|;，；")
+        if not line or len(line) > 500:
+            continue
+        if not _PROBLEM_LINE_PATTERN.search(line) or _NEGATED_PROBLEM_PATTERN.search(line):
+            continue
+        candidates.append(line)
+        if len(candidates) == 3:
+            break
+    return "\n".join(dict.fromkeys(candidates)) or None
 
 
 def _intent_requires_business_fields(intent_type: str | None) -> bool:
@@ -1198,6 +1173,18 @@ async def _enrich_ai_quality(
                 float(field_confidences.get("problem_description") or 0),
                 0.95,
             )
+    if _intent_requires_business_fields(parsed.intent_type) and not fields.get("problem_description"):
+        deterministic_problem = _problem_description_from_latest_reply(email)
+        if deterministic_problem:
+            fields["problem_description"] = deterministic_problem
+            field_confidences["problem_description"] = max(
+                float(field_confidences.get("problem_description") or 0),
+                0.9,
+            )
+            evidence.setdefault("derived_fields", {})["problem_description"] = {
+                "source": "explicit_failure_statement_in_latest_reply",
+                "line_count": len(deterministic_problem.splitlines()),
+            }
 
     if not fields.get("contact_email") and _valid_email(email.from_address):
         fields["contact_email"] = parseaddr(email.from_address)[1] or email.from_address
@@ -1457,7 +1444,7 @@ async def create_ai_parse_candidate(
     if multimodal_results:
         input_payload["multimodal_results"] = multimodal_results
     messages = [
-        {"role": "system", "content": AI_EXTRACT_SYSTEM_PROMPT},
+        {"role": "system", "content": REPAIR_FIELD_EXTRACT.system},
         {
             "role": "user",
             "content": (
@@ -1480,13 +1467,23 @@ async def create_ai_parse_candidate(
     )
     if not isinstance(parsed, AiExtractResponse) or ai_log is None:
         return None
+    locked_intent = normalize_intent(email.intent_type)
+    locked_decision = decision_for_intent(locked_intent, reason_code=email.classification_reason_code or "PRECLASSIFICATION_LOCKED")
+    # Field extraction is downstream of the authoritative preclassification.
+    # Quality rules (required fields and deterministic fallbacks) must use the
+    # locked ingress intent, never a legacy intent echoed by the extraction
+    # model.
+    parsed.intent_type = locked_decision.intent_type
     parsed = await _enrich_ai_quality(session, parsed=parsed, email=email, attachments=attachments)
+    parsed.handling_level = locked_decision.handling_level
+    parsed.classification_version = email.classification_version or CLASSIFICATION_VERSION
+    parsed.classification_reason_code = email.classification_reason_code or locked_decision.reason_code
 
     parse_result = ParseResult(
         email_id=email.id,
         ticket_id=ticket_id,
         parser_type="ai",
-        parser_version=settings.AI_PROMPT_VERSION,
+        parser_version=REPAIR_FIELD_EXTRACT.version,
         intent_type=parsed.intent_type,
         handling_level=parsed.handling_level,
         classification_version=parsed.classification_version,
@@ -1504,11 +1501,11 @@ async def create_ai_parse_candidate(
             "source_type": "ai",
             "trace_id": ai_log.trace_id,
             "ai_call_log_id": ai_log.id,
-            "provider": "deepseek",
-            "model": settings.AI_MODEL,
-            "multimodal_provider": settings.MULTIMODAL_PROVIDER,
-            "multimodal_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
-            "prompt_version": settings.AI_PROMPT_VERSION,
+            "provider": ai_log.provider_name,
+            "model": ai_log.model_name,
+            "route_name": ai_log.route_name,
+            "fallback_used": ai_log.fallback_used,
+            "prompt_version": REPAIR_FIELD_EXTRACT.version,
             "mode": mode,
         },
         apply_status="pending",
@@ -1556,7 +1553,7 @@ async def generate_ai_reply_draft(
         },
     }
     messages = [
-        {"role": "system", "content": AI_REPLY_SYSTEM_PROMPT},
+        {"role": "system", "content": REPLY_DRAFT.system},
         {
             "role": "user",
             "content": (
@@ -1567,7 +1564,7 @@ async def generate_ai_reply_draft(
     ]
     parsed, ai_log = await _run_ai_json(
         session,
-        call_type="generate_reply_draft",
+        call_type="reply_draft",
         messages=messages,
         response_model=AiReplyDraftResponse,
         input_payload=input_payload,

@@ -23,7 +23,8 @@ def upgrade() -> None:
         "SELECT 1 FROM workflow_transitions "
         "WHERE from_status_code='need_customer_info' AND to_status_code='parsed' "
         "AND trigger_event='customer_info_completed'"
-        ")"
+        ") AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='need_customer_info') "
+        "AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='parsed')"
     )
 
 

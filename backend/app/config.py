@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     IMAP_UNSEEN_ONLY: bool = True
     IMAP_ARCHIVE_TO_OSS: bool = True
     IMAP_MAX_RETRIES: int = 5
+    MAIL_PRECLASSIFICATION_MIN_CONFIDENCE: float = 0.7
+    MAIL_PRECLASSIFICATION_ATTACHMENT_MAX_BYTES: int = 2 * 1024 * 1024
+    MAIL_PRECLASSIFICATION_MAX_ATTACHMENTS: int = 3
+    MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS: int = 6000
+    MAIL_PRECLASSIFICATION_BODY_CHARS: int = 12000
+    MAIL_PRECLASSIFICATION_ATTACHMENT_TEXT_CHARS: int = 8000
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
@@ -50,7 +56,7 @@ class Settings(BaseSettings):
 
     AI_PROVIDER: str = "deepseek"
     AI_API_KEY: str = ""
-    AI_MODEL: str = "deepseek-v4-flash"
+    AI_MODEL: str = "deepseek-chat"
     AI_BASE_URL: str = "https://api.deepseek.com"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_RETRIES: int = 2
@@ -60,6 +66,8 @@ class Settings(BaseSettings):
     AI_FULL_LOG_ENABLED: bool = True
     AI_FULL_LOG_RETENTION_DAYS: int = 30
     AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")
+    LLM_ROUTES_FILE: str = str(BACKEND_DIR / "config" / "llm_routes.yaml")
+    SYSTEM_SENDER_ADDRESSES: list[str] = []
     MAIL_PRECHECK_IRRELEVANT_MIN_CONFIDENCE: float = 0.85
     ATTACHMENT_MAX_AUTO_PARSE_BYTES: int = 50 * 1024 * 1024
     ATTACHMENT_TEXT_MAX_CHARS: int = 20000

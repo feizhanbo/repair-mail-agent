@@ -25,9 +25,13 @@ def upgrade() -> None:
     op.execute(
         "INSERT INTO workflow_transitions "
         "(from_status_code, to_status_code, trigger_event, condition_desc, require_manual, enabled, created_at, updated_at) "
-        "VALUES "
-        "('need_customer_info', 'auto_replied', 'reply_sent', '补充信息邮件已成功发送。', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
-        "('manual_review', 'auto_replied', 'reply_sent', '人工审核后的补充信息邮件已成功发送。', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+        "SELECT 'need_customer_info', 'auto_replied', 'reply_sent', '补充信息邮件已成功发送。', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+        "WHERE EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code = 'need_customer_info') "
+        "AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code = 'auto_replied') "
+        "UNION ALL "
+        "SELECT 'manual_review', 'auto_replied', 'reply_sent', '人工审核后的补充信息邮件已成功发送。', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+        "WHERE EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code = 'manual_review') "
+        "AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code = 'auto_replied') "
         "ON DUPLICATE KEY UPDATE condition_desc = VALUES(condition_desc), enabled = 1, updated_at = CURRENT_TIMESTAMP"
     )
     op.execute(

@@ -10,6 +10,8 @@ from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
+from app.integrations.llm_gateway import public_llm_routes
+from app.ai.prompts import PROMPTS
 from app.models import AiCallLog, JobRunLog, MailFetchRecord, RepairTicket, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition
 from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SapSnSyncApprovalRequest, SnSyncConfigUpdateRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
@@ -73,6 +75,7 @@ async def approve_sap_sn_sync(
 def _config_payload() -> dict:
     runtime = read_runtime_config()
     mail_test_reasons = test_mail_configuration_reasons()
+    llm_routes = public_llm_routes()
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
         "auto_followup_enabled": runtime["auto_followup_enabled"],
@@ -93,20 +96,22 @@ def _config_payload() -> dict:
         "mail_test_static_ready": not mail_test_reasons,
         "mail_test_static_reasons": mail_test_reasons,
         "integrations": {
+            "mail_preclassification_enabled": True,
+            "llm_task_routes": llm_routes,
+            "prompt_versions": {name: {"version": prompt.version, "hash": prompt.content_hash} for name, prompt in PROMPTS.items()},
             "imap_configured": bool(settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD),
             "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD),
             "oss_configured": bool(settings.OSS_ENDPOINT and settings.OSS_BUCKET and settings.OSS_ACCESS_KEY and settings.OSS_SECRET_KEY),
             "ai_configured": text_ai_configured(),
             "text_ai_configured": text_ai_configured(),
-            "text_ai_provider": "deepseek",
-            "ai_model": settings.AI_MODEL,
-            "ai_base_url": settings.AI_BASE_URL,
-            "ai_prompt_version": settings.AI_PROMPT_VERSION,
+            "text_ai_provider": llm_routes["repair_field_extract"]["primary"]["profile"],
+            "ai_model": llm_routes["repair_field_extract"]["primary"]["model"],
+            "ai_prompt_version": PROMPTS["repair_field_extract"].version,
             "ai_timeout_seconds": settings.AI_TIMEOUT_SECONDS,
             "multimodal_ai_configured": multimodal_ai_configured(),
-            "multimodal_provider": settings.MULTIMODAL_PROVIDER,
-            "qwen_vl_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
-            "qwen_text_model": settings.QWEN_MODEL,
+            "multimodal_provider": llm_routes["attachment_visual_parse"]["primary"]["profile"],
+            "qwen_vl_model": llm_routes["attachment_visual_parse"]["primary"]["model"],
+            "qwen_text_model": llm_routes["attachment_text_parse"]["primary"]["model"],
             "email_async_enabled": settings.EMAIL_ASYNC_ENABLED,
             "smtp_async_enabled": settings.SMTP_ASYNC_ENABLED,
             "import_export_async_enabled": settings.IMPORT_EXPORT_ASYNC_ENABLED,

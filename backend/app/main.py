@@ -16,6 +16,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
 from app.core.request_context import bind_request_context, normalize_correlation_id, reset_request_context
 from app.models import JobRunLog
+from app.integrations.llm_gateway import public_llm_routes
 from app.services.ai import maintain_ai_jsonl_logs
 from app.services.jobs import claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
 from app.services.notification_task_repair import repair_notification_and_task_data
@@ -126,11 +127,12 @@ async def _scheduled_consistency_recovery():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    llm_routes = public_llm_routes()
     logger.info(
-        "Application starting: app_name=%s app_env=%s text_ai_provider=deepseek multimodal_provider=%s",
+        "Application starting: app_name=%s app_env=%s llm_routes=%s",
         settings.APP_NAME,
         settings.APP_ENV,
-        settings.MULTIMODAL_PROVIDER,
+        {task: row["primary"] for task, row in llm_routes.items()},
     )
     try:
         async with AsyncSessionLocal() as config_session:

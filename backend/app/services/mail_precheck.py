@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Email
+from app.models import Email, ReplyRecord
 from app.models.mail_fetch import MailFetchRecord
 from app.schemas.business import EmailIngestRequest
 from app.services.common import address_domain, normalize_message_id
@@ -114,9 +114,23 @@ async def precheck_email_payload(
     message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
     payload.message_id = message_id
 
+    target = parseaddr(settings.IMAP_USER or "")[1].strip().lower()
+    sender = parseaddr(payload.from_address or "")[1].strip().lower()
+    envelope_sender = parseaddr(payload.sender_address or "")[1].strip().lower()
+    system_senders = {
+        parseaddr(value or "")[1].strip().lower()
+        for value in [settings.IMAP_USER, settings.SMTP_USER, *settings.SYSTEM_SENDER_ADDRESSES]
+        if parseaddr(value or "")[1].strip()
+    }
+    if sender in system_senders or envelope_sender in system_senders:
+        return MailPrecheckResult(
+            accepted=False,
+            status="self_sent_mail_skipped",
+            reason="SELF_SENT_MAIL_SKIPPED",
+            message_id=message_id,
+        )
+
     if enforce_target_mailbox:
-        target = parseaddr(settings.IMAP_USER or "")[1].strip().lower()
-        sender = parseaddr(payload.from_address or "")[1].strip().lower()
         recipient_headers = (
             payload.to_addresses,
             payload.cc_addresses,
@@ -128,13 +142,6 @@ async def precheck_email_payload(
             for _name, address in getaddresses([value for value in recipient_headers if value])
             if address.strip()
         }
-        if target and sender == target:
-            return MailPrecheckResult(
-                accepted=False,
-                status="self_sent_mail_skipped",
-                reason="SELF_SENT_MAIL_SKIPPED",
-                message_id=message_id,
-            )
         if target and target not in recipients:
             return MailPrecheckResult(
                 accepted=False,
@@ -154,6 +161,31 @@ async def precheck_email_payload(
             reason="Message-ID already ingested.",
             message_id=message_id,
             duplicate_email_id=duplicate.id,
+        )
+    duplicate_fetch = await session.scalar(
+        select(MailFetchRecord).where(
+            MailFetchRecord.message_id == message_id,
+            MailFetchRecord.fetch_status.notin_({"failed", "retry_wait", "processing"}),
+        ).order_by(MailFetchRecord.id.desc()).limit(1)
+    )
+    if duplicate_fetch is not None:
+        return MailPrecheckResult(
+            accepted=False,
+            status="duplicate_message_skipped",
+            reason="Message-ID already classified in mail fetch ledger.",
+            message_id=message_id,
+            duplicate_email_id=duplicate_fetch.email_id,
+            duplicate_fetch_record_id=duplicate_fetch.id,
+        )
+    archived_outbound = await session.scalar(
+        select(ReplyRecord.id).where(ReplyRecord.smtp_message_id == message_id).limit(1)
+    )
+    if archived_outbound is not None:
+        return MailPrecheckResult(
+            accepted=False,
+            status="self_sent_mail_skipped",
+            reason="SELF_SENT_MAIL_SKIPPED",
+            message_id=message_id,
         )
 
     email = _payload_as_lightweight_email(payload, message_id)

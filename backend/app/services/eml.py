@@ -170,6 +170,7 @@ def payload_from_eml_bytes(
         in_reply_to=_header_text(message, "In-Reply-To"),
         references_header=_header_text(message, "References"),
         from_address=from_address,
+        sender_address=parseaddr(_header_text(message, "Sender") or "")[1] or None,
         to_addresses=_addresses(message, "To"),
         cc_addresses=_addresses(message, "Cc"),
         delivered_to_addresses=_addresses(message, "Delivered-To"),

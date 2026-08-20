@@ -23,7 +23,7 @@ from app.core.email_classification import (
     decision_for_intent,
     normalize_intent,
 )
-from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, ParseResult, RepairTicket
+from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, MailFetchRecord, ParseResult, RepairTicket, RepairTicketItem
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import attachment_type, parse_attachment
@@ -41,7 +41,6 @@ from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.tickets import (
     EMAIL_FIELDS,
     apply_parse_result,
-    create_manual_business_ticket_from_email,
     ensure_manual_review_ticket_from_parse_result,
     serialize_email,
     serialize_parse_result,
@@ -76,8 +75,92 @@ def serialize_attachment(attachment: EmailAttachment, email: Email | None = None
         ),
     )
     data["file_size_kb"] = attachment_file_size_kb(attachment.file_size)
+    data["storage_availability"] = "object" if attachment.oss_object_id is not None else "raw_eml_only"
     data["sent_at"] = to_plain((email.sent_at or email.received_at) if email else None)
     return data
+
+
+async def ingest_minimal_email(
+    session: AsyncSession,
+    *,
+    payload: EmailIngestRequest,
+    intent_type: str,
+    handling_level: str,
+    classification_confidence: float,
+    classification_reason_code: str,
+    priority: str = "normal",
+) -> dict[str, Any]:
+    """Persist SECOND/UNKNOWN without thread, ticket, attachment OSS or business workflow."""
+    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
+    duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))
+    if duplicate is not None:
+        return {"duplicate": True, "email": serialize_email(duplicate)}
+    if payload.raw_eml_oss_object_id is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="RAW_EML_ARCHIVAL_REQUIRED")
+    created_at = utcnow()
+    body = payload.text_body or html_to_text(payload.html_body)
+    email = Email(
+        persistence_tier="minimal",
+        classification_locked=False,
+        mail_direction="inbound",
+        mailbox_account=payload.mailbox_account,
+        folder_name=payload.folder_name,
+        imap_uid=payload.imap_uid,
+        fetch_job_run_id=payload.fetch_job_run_id,
+        message_id=message_id,
+        raw_eml_oss_object_id=payload.raw_eml_oss_object_id,
+        source_content_sha256=payload.raw_eml_sha256,
+        processing_trace_id=get_correlation_id() or uuid4().hex,
+        in_reply_to=payload.in_reply_to,
+        references_header=payload.references_header,
+        from_address=payload.from_address,
+        from_domain=address_domain(payload.from_address),
+        to_addresses=payload.to_addresses,
+        cc_addresses=payload.cc_addresses,
+        subject=payload.subject,
+        normalized_subject=normalize_subject(payload.subject),
+        sent_at=payload.sent_at,
+        received_at=payload.received_at or created_at,
+        text_body=payload.text_body,
+        html_body=payload.html_body,
+        clean_body=normalize_email_body(body),
+        latest_reply_segment=extract_latest_reply_segment(body),
+        parse_status="manual_review",
+        processing_stage="minimal_persisted",
+        intent_type=normalize_intent(intent_type),
+        handling_level=handling_level,
+        classification_version="rma-mail-preclassification-v1",
+        classification_confidence=classification_confidence,
+        classification_reason_code=classification_reason_code,
+        retryable=False,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    session.add(email)
+    await session.flush()
+    for item in payload.attachments:
+        session.add(EmailAttachment(
+            email_id=email.id,
+            oss_object_id=None,
+            file_name=item.get("file_name") or "attachment",
+            content_type=item.get("content_type"),
+            file_size=item.get("file_size"),
+            file_hash=item.get("file_hash"),
+            is_inline=item.get("is_inline", False),
+            content_id=item.get("content_id"),
+            parse_status="raw_eml_only",
+        ))
+    task = await create_email_manual_task_if_missing(
+        session,
+        email=email,
+        task_type="unknown_mail_classification" if handling_level == str(HandlingLevel.UNKNOWN) else "manual_rma_business",
+        trigger_reason=classification_reason_code,
+        priority=priority,
+        recovery_stage="mail_preclassification",
+        recovery_action="选择FIRST意图并晋升，或确认由外部业务处理。",
+    )
+    await session.flush()
+    return {"duplicate": False, "email": serialize_email(email), "manual_task_id": task.id}
 
 
 def _set_classification(
@@ -329,6 +412,18 @@ async def _find_thread_for_email(
                     thread.merge_confidence = 1.0000
                     thread.merge_reason = "References exactly matched an email in an active thread."
                     return thread
+            ledger = await session.scalar(
+                select(MailFetchRecord).where(
+                    MailFetchRecord.message_id == reference_id,
+                    MailFetchRecord.thread_id.is_not(None),
+                ).order_by(MailFetchRecord.id.desc())
+            )
+            if ledger and ledger.thread_id:
+                thread = await session.get(EmailThread, ledger.thread_id)
+                if thread:
+                    thread.merge_confidence = 1.0000
+                    thread.merge_reason = "References matched a classified-only mail ledger anchor."
+                    return thread
     if in_reply_to:
         parent = await session.scalar(select(Email).where(Email.message_id == in_reply_to))
         if parent:
@@ -336,6 +431,18 @@ async def _find_thread_for_email(
             if thread:
                 thread.merge_confidence = 1.0000
                 thread.merge_reason = "In-Reply-To exactly matched an email in an active thread."
+                return thread
+        ledger = await session.scalar(
+            select(MailFetchRecord).where(
+                MailFetchRecord.message_id == in_reply_to,
+                MailFetchRecord.thread_id.is_not(None),
+            ).order_by(MailFetchRecord.id.desc())
+        )
+        if ledger and ledger.thread_id:
+            thread = await session.get(EmailThread, ledger.thread_id)
+            if thread:
+                thread.merge_confidence = 1.0000
+                thread.merge_reason = "In-Reply-To matched a classified-only mail ledger anchor."
                 return thread
     create_reason = "Created a new thread because no exact RFC Message-ID relationship matched."
     thread = EmailThread(
@@ -350,6 +457,71 @@ async def _find_thread_for_email(
     session.add(thread)
     await session.flush()
     return thread
+
+
+async def find_existing_thread_anchor(
+    session: AsyncSession,
+    *,
+    in_reply_to: str | None,
+    references_header: str | None,
+) -> int | None:
+    identifiers = list(reversed(re.findall(r"<[^<>]+>", references_header or "")))
+    if in_reply_to:
+        identifiers.append(in_reply_to)
+    for identifier in identifiers:
+        parent_thread_id = await session.scalar(select(Email.thread_id).where(Email.message_id == identifier))
+        if parent_thread_id:
+            return int(parent_thread_id)
+        ledger_thread_id = await session.scalar(
+            select(MailFetchRecord.thread_id).where(
+                MailFetchRecord.message_id == identifier,
+                MailFetchRecord.thread_id.is_not(None),
+            ).order_by(MailFetchRecord.id.desc())
+        )
+        if ledger_thread_id:
+            return int(ledger_thread_id)
+    return None
+
+
+async def build_thread_classification_summary(
+    session: AsyncSession,
+    *,
+    thread_id: int | None,
+) -> dict[str, Any]:
+    """Return a bounded, non-sensitive thread/ticket context for entry classification."""
+    if thread_id is None:
+        return {}
+    thread = await session.get(EmailThread, thread_id)
+    if thread is None:
+        return {}
+    ticket_id = thread.ticket_id or thread.predecessor_ticket_id
+    ticket = await session.get(RepairTicket, ticket_id) if ticket_id else None
+    known_sns: list[str] = []
+    if ticket is not None:
+        known_sns = [
+            str(value)
+            for value in (await session.scalars(
+                select(RepairTicketItem.sn).where(
+                    RepairTicketItem.ticket_id == ticket.id,
+                    RepairTicketItem.sn.is_not(None),
+                ).order_by(RepairTicketItem.line_no.asc()).limit(20)
+            )).all()
+            if value
+        ]
+    latest = await session.get(Email, thread.latest_email_id) if thread.latest_email_id else None
+    return {
+        "thread_id": thread.id,
+        "thread_root_message_id": thread.root_message_id,
+        "latest_intent": latest.intent_type if latest else None,
+        "latest_handling_level": latest.handling_level if latest else None,
+        "ticket_id": ticket.id if ticket else None,
+        "ticket_category": ticket.ticket_category if ticket else None,
+        "ticket_status": ticket.current_status_code if ticket else None,
+        "ticket_missing_fields": ticket.missing_fields if ticket else None,
+        "known_serial_numbers": known_sns,
+        "rma_status": ticket.rma_status if ticket else None,
+        "has_rma": bool(ticket and ticket.rma_status not in {None, "not_required", "pending"}),
+    }
 
 
 async def ingest_email(
@@ -736,6 +908,7 @@ async def reparse_email(
     reason: str | None = None,
     durable_attachment_stages: bool = False,
     rule_parse_result_id: int | None = None,
+    mode: str = "field_extract",
 ) -> dict[str, Any]:
     email = await session.get(Email, email_id)
     if email is None:
@@ -750,11 +923,6 @@ async def reparse_email(
     if rule_parse is None:
         analysis = analyze_email_rules(email)
         email.latest_reply_segment = analysis.body
-        email.intent_type = analysis.intent_type
-        email.handling_level = analysis.handling_level
-        email.classification_version = analysis.classification_version
-        email.classification_confidence = analysis.classification_confidence
-        email.classification_reason_code = analysis.classification_reason_code
         parse_payload = analysis.to_parse_payload()
         rule_parse = ParseResult(
             email_id=email.id,
@@ -777,12 +945,6 @@ async def reparse_email(
         )
         session.add(rule_parse)
         await session.flush()
-    else:
-        email.intent_type = rule_parse.intent_type
-        email.handling_level = rule_parse.handling_level
-        email.classification_version = rule_parse.classification_version
-        email.classification_confidence = rule_parse.classification_confidence
-        email.classification_reason_code = rule_parse.classification_reason_code
     email.parse_status = "parsing"
     email.processing_stage = "parsing"
     email.terminal_reason_code = None
@@ -849,7 +1011,7 @@ async def reparse_email(
         session,
         email=email,
         attachments=list(attachments),
-        mode="classification_and_extract",
+        mode=mode,
         ticket_id=thread.ticket_id if thread else None,
         rule_context={
             "parse_result_id": rule_parse.id,
@@ -877,14 +1039,7 @@ async def reparse_email(
     draft_result: dict[str, Any] | None = None
 
     if isinstance(ai_parse, ParseResult):
-        resolved_intent, resolved_reason = _contextual_intent(email, ai_parse.intent_type, thread_ticket)
-        resolved_intent = _set_classification(
-            email,
-            ai_parse,
-            intent_type=resolved_intent,
-            confidence=float(ai_parse.confidence_score or 0),
-            reason_code=resolved_reason,
-        )
+        resolved_intent = normalize_intent(email.intent_type)
         if (
             resolved_intent == EmailIntent.THREAD_NEW_REPAIR
             and thread is not None
@@ -902,33 +1057,14 @@ async def reparse_email(
             await _link_lifecycle_email(session, email=email, ticket=thread_ticket, intent_type=resolved_intent)
         elif resolved_intent in MANUAL_INTENTS:
             reason_text = f"已识别为 SECOND/{resolved_intent}，当前自动 RMA 系统不执行该业务。"
-            active_first = bool(
-                thread_ticket
-                and thread_ticket.ticket_category == "standard_repair"
-                and thread_ticket.current_status_code not in {"closed", "resolved"}
+            task = await create_email_manual_task_if_missing(
+                session,
+                email=email,
+                task_type=f"second_{resolved_intent}",
+                trigger_reason=reason_text,
+                recovery_action="人工处理、重分类或记录外部处理结果；不得创建RMA工单。",
             )
-            if active_first:
-                sidecar = await create_manual_business_ticket_from_email(
-                    session, email=email, parse_result=ai_parse, reason=reason_text
-                )
-                manual_ticket = {"ticket_id": sidecar.id, "ticket_no": sidecar.ticket_no, "reason": reason_text}
-            else:
-                if thread_ticket is not None:
-                    await _link_post_close_email(
-                        session,
-                        email=email,
-                        ticket=thread_ticket,
-                        link_type="manual_business_context",
-                        reason=reason_text,
-                    )
-                task = await create_email_manual_task_if_missing(
-                    session,
-                    email=email,
-                    task_type=f"second_{resolved_intent}",
-                    trigger_reason=reason_text,
-                    recovery_action="人工处理、重分类、关联/创建工单或记录外部处理结果。",
-                )
-                manual_ticket = {"ticket_id": None, "task_id": task.id, "reason": reason_text}
+            manual_ticket = {"ticket_id": None, "task_id": task.id, "reason": reason_text}
             ai_parse.apply_status = "needs_manual_review"
             email.parse_status = "needs_manual"
             email.processing_stage = "manual_review"
@@ -1114,133 +1250,19 @@ async def reparse_email(
                                 email_id=email.id,
                                 parse_result=ai_parse,
                             )
-    elif normalize_intent(rule_parse.intent_type) in LIFECYCLE_INTENTS:
-        resolved_intent = _set_classification(
-            email,
-            rule_parse,
-            intent_type=rule_parse.intent_type,
-            confidence=float(rule_parse.confidence_score or 0),
-            reason_code="RULE_LIFECYCLE_CLASSIFIED",
-        )
-        rule_parse.apply_status = "auto_skipped"
-        email.parse_status = "skipped"
-        email.terminal_reason_code = f"LIFECYCLE_ONLY_{resolved_intent.upper()}"
-        await _link_lifecycle_email(session, email=email, ticket=thread_ticket, intent_type=resolved_intent)
-    elif normalize_intent(rule_parse.intent_type) in MANUAL_INTENTS:
-        resolved_intent, resolved_reason = _contextual_intent(email, rule_parse.intent_type, thread_ticket)
-        _set_classification(
-            email,
-            rule_parse,
-            intent_type=resolved_intent,
-            confidence=float(rule_parse.confidence_score or 0),
-            reason_code=resolved_reason,
-        )
-        reason_text = f"规则已明确识别为 SECOND/{resolved_intent}；AI 不可用，交人工业务处理。"
-        active_first = bool(
-            thread_ticket
-            and thread_ticket.ticket_category == "standard_repair"
-            and thread_ticket.current_status_code not in {"closed", "resolved"}
-        )
-        if active_first:
-            sidecar = await create_manual_business_ticket_from_email(
-                session, email=email, parse_result=rule_parse, reason=reason_text
-            )
-            manual_ticket = {"ticket_id": sidecar.id, "ticket_no": sidecar.ticket_no, "reason": reason_text}
-        else:
-            task = await create_email_manual_task_if_missing(
-                session,
-                email=email,
-                task_type=f"second_{resolved_intent}",
-                trigger_reason=reason_text,
-            )
-            manual_ticket = {"ticket_id": None, "task_id": task.id, "reason": reason_text}
-        rule_parse.apply_status = "needs_manual_review"
-        email.parse_status = "needs_manual"
-    elif normalize_intent(rule_parse.intent_type) == EmailIntent.UNKNOWN:
-        _set_classification(
-            email,
-            rule_parse,
-            intent_type=EmailIntent.UNKNOWN,
-            confidence=float(rule_parse.confidence_score or 0),
-            reason_code="RULE_UNKNOWN_AI_UNAVAILABLE",
-        )
+    else:
+        reason_text = "字段抽取模型不可用或未返回有效结果；保留入口分类并转邮件级人工复核。"
         task = await create_email_manual_task_if_missing(
             session,
             email=email,
-            task_type="unknown_email_classification",
-            trigger_reason="规则无法可靠识别邮件且 AI 不可用。",
-            priority="high",
-        )
-        rule_parse.apply_status = "needs_manual_review"
-        email.parse_status = "needs_manual"
-        manual_ticket = {"ticket_id": None, "task_id": task.id, "reason": "规则无法可靠识别邮件且 AI 不可用。"}
-    elif (
-        closed_predecessor
-        and predecessor_ticket is not None
-        and rule_parse.intent_type in POST_CLOSE_TERMINAL_INTENTS
-        and not _parse_requires_manual(rule_parse, list(attachments))
-    ):
-        terminal_reason = POST_CLOSE_TERMINAL_INTENTS[rule_parse.intent_type]
-        rule_parse.apply_status = "auto_skipped"
-        email.parse_status = "skipped"
-        email.terminal_reason_code = terminal_reason
-        await _link_post_close_email(
-            session,
-            email=email,
-            ticket=predecessor_ticket,
-            link_type="post_close_event",
-            reason=terminal_reason,
-        )
-    elif (
-        closed_predecessor
-        and predecessor_ticket is not None
-        and rule_parse.intent_type != "new_repair"
-    ):
-        closed_reason = "已关闭工单线程的新邮件无法由规则结果安全自动处理，需要人工复核分类及恢复动作。"
-        await _link_post_close_email(
-            session,
-            email=email,
-            ticket=predecessor_ticket,
-            link_type="post_close_manual",
-            reason=closed_reason,
-        )
-        await create_manual_task_if_missing(
-            session,
-            ticket=predecessor_ticket,
-            task_type="post_rma_email_review",
-            trigger_reason=closed_reason,
-            priority="high",
-            email_id=email.id,
-        )
-        rule_parse.apply_status = "needs_manual_review"
-        email.parse_status = "needs_manual"
-        manual_ticket = {
-            "ticket_id": predecessor_ticket.id,
-            "ticket_no": predecessor_ticket.ticket_no,
-            "reason": closed_reason,
-        }
-    elif thread_ticket is None and rule_parse.intent_type in ORPHAN_REVIEW_RULES:
-        orphan_review = await _create_orphan_review_ticket(session, email=email, parse_result=rule_parse)
-        if orphan_review is not None:
-            ticket, orphan_reason = orphan_review
-            manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": orphan_reason}
-    else:
-        ticket = await ensure_manual_review_ticket_from_parse_result(
-            session,
-            email=email,
-            parse_result=rule_parse,
-            reason="AI 未配置或未返回有效结果，规则解析仅作为候选，需要人工复核。",
             task_type="ai_unavailable",
+            trigger_reason=reason_text,
+            priority="high",
+            recovery_action="检查模型调用日志后重试字段抽取；不得由规则候选重分类或自动建单。",
         )
+        rule_parse.apply_status = "candidate_only"
         email.parse_status = "needs_manual"
-        manual_ticket = {"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "reason": "AI 未配置或未返回有效结果。"}
-        draft_result = await _try_create_reply_draft(
-            session,
-            ticket_id=ticket.id,
-            user_id=user_id,
-            email_id=email.id,
-            parse_result=rule_parse,
-        )
+        manual_ticket = {"ticket_id": None, "task_id": task.id, "reason": reason_text}
 
     if email.parse_status == "parsed":
         email.processing_stage = "completed"

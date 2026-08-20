@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -708,11 +708,6 @@ async def _seed_workflow_transitions(session: AsyncSession) -> int:
             session.add(WorkflowTransition(**values))
         else:
             _apply_values(transition, payload, payload.keys())
-    await session.execute(
-        update(WorkflowTransition)
-        .where(WorkflowTransition.to_status_code == "closed")
-        .values(enabled=False)
-    )
     return len(WORKFLOW_TRANSITIONS)
 
 

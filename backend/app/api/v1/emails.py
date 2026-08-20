@@ -34,6 +34,7 @@ from app.services.email_flow_trace import build_email_flow_trace
 from app.services.email_preview import build_attachment_preview, build_email_preview
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
+from app.services.mail_ingress import process_preclassified_ingress
 from app.services.common import utcnow
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services.jobs import enqueue_job, recover_stale_jobs, serialize_job
@@ -147,6 +148,20 @@ async def _archive_or_raise_http(
         await session.commit()
     except EmailArchivalError as exc:
         await session.commit()
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+        if exc.stage == "validate":
+            http_status = (
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                if "TOO_LARGE" in exc.code or exc.code == "TOO_MANY_ATTACHMENTS"
+                else status.HTTP_400_BAD_REQUEST
+            )
+        raise HTTPException(status_code=http_status, detail=exc.code) from exc
+
+
+async def _route_ingress_or_raise_http(session: AsyncSession, **kwargs) -> dict:
+    try:
+        return await process_preclassified_ingress(session, **kwargs)
+    except EmailArchivalError as exc:
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
         if exc.stage == "validate":
             http_status = (
@@ -476,23 +491,13 @@ async def ingest_email(
         await session.commit()
         return ok(result, "email skipped by precheck")
 
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=raw_eml,
-        raw_file_name="ingest.eml",
-        attachment_blobs=attachment_blobs,
-        source="manual_ingest",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        rule_analysis=precheck.rule_analysis,
+    result = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs, source="manual_ingest", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok(result, "email ingested")
+    return ok(result, "email classified and routed")
 
 
 @router.post("/ingest/jobs", deprecated=True, description="Compatibility JSON ingest job API; hidden from the current mail-center UI.")
@@ -517,37 +522,13 @@ async def ingest_email_job(
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok({"ingest": result, "job": None}, "email skipped by precheck")
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=raw_eml,
-        raw_file_name="ingest.eml",
-        attachment_blobs=attachment_blobs,
-        source="manual_ingest_job",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=False,
-        rule_analysis=precheck.rule_analysis,
-    )
-    email_id = int(result["email"]["id"])
-    job = await enqueue_job(
-        session,
-        job_type="email_parse",
-        resource_type="email",
-        resource_id=email_id,
-        idempotency_key=f"email_parse:{email_id}:initial",
-        metadata={
-            "user_id": current_user.id,
-            "reason": "initial asynchronous parse",
-            "rule_parse_result_id": result["rule_parse_result_id"],
-        },
+    routed = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs, source="manual_ingest_job", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok({"ingest": result, "job": serialize_job(job)}, "email archived and parse queued")
+    return ok(routed, "email classified and routed")
 
 
 @router.post(
@@ -585,24 +566,13 @@ async def ingest_eml(
         await session.commit()
         return ok(result, "eml skipped by precheck")
 
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=content,
-        raw_file_name=file.filename or "ingest.eml",
-        attachment_blobs=blobs,
-        source="eml_upload",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=auto_parse,
-        rule_analysis=precheck.rule_analysis,
+    result = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs, source="eml_upload", precheck=precheck,
+        user_id=current_user.id, auto_parse=auto_parse,
     )
     await session.commit()
-    return ok(result, "eml ingested")
+    return ok(result, "email classified and routed")
 
 
 @router.post(
@@ -638,37 +608,13 @@ async def ingest_eml_job(
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok({"ingest": result, "job": None}, "eml skipped by precheck")
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=content,
-        raw_file_name=file.filename or "ingest.eml",
-        attachment_blobs=blobs,
-        source="eml_upload_job",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=False,
-        rule_analysis=precheck.rule_analysis,
-    )
-    email_id = int(result["email"]["id"])
-    job = await enqueue_job(
-        session,
-        job_type="email_parse",
-        resource_type="email",
-        resource_id=email_id,
-        idempotency_key=f"email_parse:{email_id}:initial",
-        metadata={
-            "user_id": current_user.id,
-            "reason": "initial asynchronous EML parse",
-            "rule_parse_result_id": result["rule_parse_result_id"],
-        },
+    routed = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs, source="eml_upload_job", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok({"ingest": result, "job": serialize_job(job)}, "eml archived and parse queued")
+    return ok(routed, "email classified and routed")
 
 
 @router.post("/fetch-now", deprecated=True)

@@ -113,6 +113,16 @@ async def test_imap_precheck_rejects_mail_sent_by_target_account(monkeypatch) ->
 
 
 @pytest.mark.anyio
+async def test_precheck_rejects_configured_system_sender_for_manual_entry(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.mail_precheck.settings.SYSTEM_SENDER_ADDRESSES", ["rma-alias@example.com"])
+    payload = _payload(subject="RMA sent", text_body="system reply")
+    payload.from_address = "RMA Alias <rma-alias@example.com>"
+    result = await precheck_email_payload(FakeSession(), payload)
+    assert result.accepted is False
+    assert result.status == "self_sent_mail_skipped"
+
+
+@pytest.mark.anyio
 async def test_imap_precheck_rejects_mail_not_delivered_to_target_account(monkeypatch) -> None:
     monkeypatch.setattr("app.services.mail_precheck.settings.IMAP_USER", "rmatest1@accotest.com")
     payload = _payload(subject="Repair SN001", text_body="Please repair SN001")

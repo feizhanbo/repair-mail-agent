@@ -450,15 +450,15 @@ def upgrade() -> None:
         """
         INSERT INTO workflow_transitions
             (from_status_code, to_status_code, trigger_event, condition_desc, require_manual, enabled)
-        VALUES
-            ('ready_for_export', 'rma_sent', 'rma_reply_sent',
-             'SAP回填合法RMA编号且模板回复实际发送成功。', 0, 1),
-            ('rma_sent', 'closed', 'device_receipt_ack_sent',
-             '公司收货确认回复实际发送成功后闭单。', 0, 1),
-            ('rma_sent', 'manual_review', 'manual_review_required',
-             'RMA发送后的异常需要人工处理。', 1, 1),
-            ('rma_sent', 'error', 'system_error',
-             'RMA发送后的系统异常。', 1, 1)
+        SELECT candidate.* FROM (
+            SELECT 'ready_for_export' AS from_status_code, 'rma_sent' AS to_status_code,
+                   'rma_reply_sent' AS trigger_event, 'SAP回填合法RMA编号且模板回复实际发送成功。' AS condition_desc, 0 AS require_manual, 1 AS enabled
+            UNION ALL SELECT 'rma_sent', 'closed', 'device_receipt_ack_sent', '公司收货确认回复实际发送成功后闭单。', 0, 1
+            UNION ALL SELECT 'rma_sent', 'manual_review', 'manual_review_required', 'RMA发送后的异常需要人工处理。', 1, 1
+            UNION ALL SELECT 'rma_sent', 'error', 'system_error', 'RMA发送后的系统异常。', 1, 1
+        ) AS candidate
+        JOIN workflow_statuses AS source_status ON source_status.status_code = candidate.from_status_code
+        JOIN workflow_statuses AS target_status ON target_status.status_code = candidate.to_status_code
         ON DUPLICATE KEY UPDATE
             condition_desc=VALUES(condition_desc),
             require_manual=VALUES(require_manual),

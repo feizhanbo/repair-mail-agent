@@ -176,6 +176,8 @@ def upgrade() -> None:
             WHERE from_status_code='manual_review' AND to_status_code='resolved'
               AND trigger_event='manual_business_resolved'
         )
+          AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='manual_review')
+          AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='resolved')
         """
     )
     op.execute("UPDATE workflow_transitions SET enabled=0 WHERE to_status_code='closed' AND NOT (from_status_code='rma_sent' AND trigger_event='rma_issued_and_archived')")

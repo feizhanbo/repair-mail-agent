@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -14,6 +15,15 @@ from app.models import (
     TicketRma,
 )
 from app.services import jobs, replies
+
+
+def test_rma_smtp_acceptance_is_committed_before_close_finalization() -> None:
+    source = inspect.getsource(replies._send_reply_record)
+    acceptance = source.index('reply.send_status = "sent"')
+    durable_boundary = source.index("await _commit_if_available(session)", acceptance)
+    close_finalization = source.index("closed = await _finalize_rma_issue(", acceptance)
+
+    assert acceptance < durable_boundary < close_finalization
 
 
 @pytest.mark.anyio

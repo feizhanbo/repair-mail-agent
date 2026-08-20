@@ -18,7 +18,7 @@ DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "u8p3k4l5m6n7"
+REQUIRED_REVISION = "x1s6n7o8p9q0"
 
 
 def _sha256(path: Path) -> str:

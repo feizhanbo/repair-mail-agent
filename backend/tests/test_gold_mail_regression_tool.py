@@ -85,6 +85,44 @@ def test_manifest_rejects_invalid_calendar_rma(tmp_path: Path) -> None:
     assert "messages[0].fixed_rma_no_INVALID" in exc.value.details["errors"]
 
 
+def test_manifest_rejects_rma_sent_as_inbound_intent(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["messages"][0]["gold"]["expected_intent"] = "rma_sent"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool.validate_manifest(manifest)
+
+    assert "messages[0].expected_intent_INVALID" in exc.value.details["errors"]
+
+
+def test_ledger_only_third_uses_fetch_classification_without_email() -> None:
+    item = {
+        "message_id": "<third@accotest.com>",
+        "gold": {
+            "expected_intent": "invoice",
+            "expected_subtype": None,
+            "create_ticket": False,
+            "expected_outbound_count": 0,
+            "expected_fields": {},
+            "expected_items": [],
+            "missing_fields": [],
+        },
+    }
+    value = {
+        "email_detail": {"email": {}},
+        "fetch_result": {
+            "intent_type": "invoice",
+            "handling_level": "lifecycle_only",
+            "fetch_status": "classified_third",
+        },
+        "ticket_detail": None,
+    }
+
+    assert tool._assert_case(item, value, []) == []
+
+
 def test_manifest_rejects_board_fixture_from_another_case(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -208,6 +246,21 @@ def test_classification_source_hash_changes_with_business_source(tmp_path: Path)
     assert tool._classification_source_sha256(source_root) != first
 
 
+def test_classification_source_hash_changes_with_llm_routes(tmp_path: Path) -> None:
+    source_root = tmp_path / "app"
+    source_root.mkdir()
+    (source_root / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+    config_root = tmp_path / "config"
+    config_root.mkdir()
+    routes = config_root / "llm_routes.yaml"
+    routes.write_text("tasks: {mail_classification: {model: one}}\n", encoding="utf-8")
+    first = tool._classification_source_sha256(source_root)
+
+    routes.write_text("tasks: {mail_classification: {model: two}}\n", encoding="utf-8")
+
+    assert tool._classification_source_sha256(source_root) != first
+
+
 def test_classification_gate_rejects_changed_business_source(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -244,9 +297,11 @@ def test_classification_issues_rejects_wrong_business_stage(tmp_path: Path) -> N
     message_id = manifest["messages"][0]["message_id"]
     result = {
         "cases": [
-            {
-                "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
-                "intent_type": "new_repair",
+                {
+                    "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
+                    "intent_type": "new_repair",
+                    "handling_level": "auto_repair",
+                    "persistence_tier": "business",
                 "ticket": {
                     "status": "manual_review",
                     "customer_code": "CM00001",
@@ -669,6 +724,12 @@ def test_wait_for_case_approves_special_policy_then_manual_reply(monkeypatch) ->
     assert any(path == "/api/v1/replies/77/approve-send/jobs" for _, path, _ in calls)
 
 
+def test_closed_satisfies_legacy_rma_sent_gold_expectation() -> None:
+    assert tool._status_satisfies_expected("closed", "rma_sent") is True
+    assert tool._status_satisfies_expected("rma_sent", "rma_sent") is True
+    assert tool._status_satisfies_expected("ready_for_export", "rma_sent") is False
+
+
 def test_wait_for_case_fails_fast_when_followup_makes_no_progress(monkeypatch) -> None:
     class Client:
         def data(self, method, path, **kwargs):
@@ -733,7 +794,13 @@ def test_assert_case_reads_contact_values_from_versioned_pdf_snapshot() -> None:
         },
     }
     value = {
-        "email_detail": {"email": {"intent_type": "new_repair"}},
+        "email_detail": {
+            "email": {
+                "intent_type": "new_repair",
+                "handling_level": "auto_repair",
+                "persistence_tier": "business",
+            }
+        },
         "ticket_detail": {
             "ticket": {
                 "current_status_code": "rma_sent",

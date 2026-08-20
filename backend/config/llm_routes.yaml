@@ -1,0 +1,53 @@
+profiles:
+  deepseek:
+    api_key_setting: AI_API_KEY
+    base_url_setting: AI_BASE_URL
+  qwen:
+    api_key_setting: QWEN_API_KEY
+    base_url_setting: QWEN_BASE_URL
+
+tasks:
+  mail_classification:
+    primary: {profile: deepseek, model: deepseek-chat}
+    fallback: {profile: qwen, model: qwen-plus}
+    temperature: 0.0
+    timeout_seconds: 30
+    max_retries: 2
+    max_output_tokens: 4096
+    requires_json: true
+    requires_vision: false
+  repair_field_extract:
+    primary: {profile: deepseek, model: deepseek-chat}
+    fallback: {profile: qwen, model: qwen-plus}
+    temperature: 0.1
+    timeout_seconds: 30
+    max_retries: 2
+    max_output_tokens: 8192
+    requires_json: true
+    requires_vision: false
+  reply_draft:
+    primary: {profile: deepseek, model: deepseek-chat}
+    fallback: {profile: qwen, model: qwen-plus}
+    temperature: 0.1
+    timeout_seconds: 30
+    max_retries: 2
+    max_output_tokens: 4096
+    requires_json: true
+    requires_vision: false
+  attachment_text_parse:
+    primary: {profile: qwen, model: qwen-plus}
+    fallback: {profile: deepseek, model: deepseek-chat}
+    temperature: 0.0
+    timeout_seconds: 30
+    max_retries: 2
+    max_output_tokens: 8192
+    requires_json: true
+    requires_vision: false
+  attachment_visual_parse:
+    primary: {profile: qwen, model: qwen-vl-plus}
+    temperature: 0.0
+    timeout_seconds: 45
+    max_retries: 2
+    max_output_tokens: 8192
+    requires_json: true
+    requires_vision: true
