@@ -654,8 +654,19 @@ def _return_address_block(
     policy = customer_policy or {}
     if language == "en-US":
         return settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
-    company = str(policy.get("shipping_company") or "").strip()
-    address = str(policy.get("shipping_address") or "").strip()
+    route = str(policy.get("shipping_route") or policy.get("return_location") or "").strip().lower()
+    default_company = {
+        "beijing": settings.RMA_DEFAULT_BEIJING_COMPANY,
+        "tianjin": settings.RMA_DEFAULT_TIANJIN_COMPANY,
+    }.get(route, "")
+    default_address = {
+        "beijing": settings.RMA_DEFAULT_BEIJING_ADDRESS,
+        "tianjin": settings.RMA_DEFAULT_TIANJIN_ADDRESS,
+    }.get(route, "")
+    company = str(policy.get("shipping_company") or default_company).strip()
+    address = str(policy.get("shipping_address") or default_address).strip()
+    if company and address.startswith(company):
+        address = address[len(company):].lstrip(" \t\r\n　，,；;")
     contact = str(policy.get("shipping_contact") or "").strip()
     phone = str(policy.get("shipping_phone") or "").strip()
     postal_code = str(policy.get("shipping_postal_code") or "").strip()
@@ -686,7 +697,7 @@ async def _render_reply_templates(
     )
     repair_fee = str(policy.get("repair_price") or "").strip()
     currency = str(policy.get("currency") or "").strip().upper()
-    currency_unit = {"CNY": "元", "USD": "美元"}.get(currency, currency)
+    currency_unit = {"CNY": "RMB", "RMB": "RMB", "USD": "USD"}.get(currency, currency)
     return_address_block = _return_address_block(
         language=content_template.language,
         customer_policy=policy,
@@ -941,10 +952,17 @@ async def _finalize_rma_issue(
     rma_record.status = "issued"
     rma_record.issued_at = now
     ticket.rma_status = "issued"
-    # RMA issuance is complete here, but the repair business is not. Keep the
-    # main ticket at rma_sent until a separately evidenced device-intake event
-    # closes it. Archive retry callers only need to know that issuance and
-    # archival are complete, not that the ticket is terminal.
+    if ticket.current_status_code == "rma_sent":
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="closed",
+            trigger_event="rma_issued_and_archived",
+            user_id=user_id,
+            operator_type="system" if auto else "user",
+            reason="RMA回复发送成功且PDF与出站EML归档核验完成。",
+            metadata={"reply_id": reply.id, "smtp_message_id": reply.smtp_message_id},
+        )
     return True
 
 
@@ -1197,8 +1215,6 @@ async def _reply_send_guard_error(
     ticket: RepairTicket,
     reply: ReplyRecord,
 ) -> str | None:
-    if reply.reply_type == "device_received_ack":
-        return "DEVICE_RECEIPT_FEATURE_REMOVED"
     if ticket.ticket_category == "manual_business" and reply.reply_type == "rma_authorization":
         return "MANUAL_BUSINESS_RMA_FORBIDDEN"
     if is_followup_reply_type(reply.reply_type):
@@ -1661,8 +1677,6 @@ async def create_reply_draft(
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
-    if reply_kind == "device_received_ack":
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
     if ticket.ticket_category == "manual_business" and reply_kind == "rma_authorization":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_RMA_FORBIDDEN")
     language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
@@ -2217,8 +2231,8 @@ async def create_and_send_rma_authorization(
     manual_special_reasons: list[str] = []
     if str(customer_policy.get("policy_type") or "") == "special_out_of_warranty":
         manual_special_reasons.append("SPECIAL_OUT_OF_WARRANTY_PRICE")
-    if str(customer_policy.get("currency") or "CNY").upper() != "CNY":
-        manual_special_reasons.append("NON_CNY_CURRENCY")
+    if str(customer_policy.get("currency") or "RMB").upper() not in {"RMB", "CNY"}:
+        manual_special_reasons.append("NON_RMB_CURRENCY")
     if str(customer_policy.get("reply_salutation") or "").strip():
         manual_special_reasons.append("SPECIAL_REPLY_SALUTATION")
     if bool(customer_policy.get("hide_company_name")):

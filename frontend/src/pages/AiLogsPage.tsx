@@ -1,8 +1,9 @@
 import { SearchOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, DatePicker, Descriptions, Divider, Form, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Collapse, DatePicker, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import ErrorResult from '../components/ErrorResult';
 import JsonBlock from '../components/JsonBlock';
@@ -41,7 +42,35 @@ function jsonValue(value: unknown): JsonRecord | unknown[] | null {
   return { value };
 }
 
+const AI_LABELS: Record<string, string> = {
+  ticket_id: '工单', email_id: '邮件', input_tokens: '输入 Token', output_tokens: '输出 Token',
+  total_tokens: '总 Token', prompt_tokens: '输入 Token', completion_tokens: '输出 Token',
+  intent_type: '邮件意图', handling_level: '处理层级', confidence_score: '置信度',
+  extracted_fields: '提取字段', extracted_items: '维修明细', missing_fields: '缺失字段',
+  conflict_fields: '冲突字段', evidence: '判断证据', confidence_reasons: '置信度依据',
+  manual_review_direction: '人工复核建议', provider: '服务商', model: '模型', status: '状态',
+};
+
+function friendlyValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '-';
+  if (value === true) return '是';
+  if (value === false) return '否';
+  if (Array.isArray(value)) return value.length ? <Space wrap>{value.map((item, index) => <Tag key={index}>{typeof item === 'object' ? `第 ${index + 1} 项` : String(item)}</Tag>)}</Space> : '无';
+  if (typeof value === 'object') return `${Object.keys(value as object).length} 项内容`;
+  return String(value);
+}
+
+function StructuredTable({ value, title }: { value: unknown; title: string }) {
+  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : { value };
+  const rows = Object.entries(record).map(([key, item]) => ({ key, label: AI_LABELS[key] ?? `扩展字段：${key.split('_').join(' ')}`, value: item }));
+  return <div><Typography.Title level={5}>{title}</Typography.Title><Table rowKey="key" size="small" pagination={false} dataSource={rows} columns={[
+    { title: '项目', dataIndex: 'label', width: 220 },
+    { title: '结果', dataIndex: 'value', render: friendlyValue },
+  ]} /></div>;
+}
+
 export default function AiLogsPage() {
+  const navigate = useNavigate();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -173,10 +202,7 @@ export default function AiLogsPage() {
                   <Descriptions.Item label="JSONL 行号">{record.log_line_no ?? '-'}</Descriptions.Item>
                   <Descriptions.Item label="日志 Hash" span={2}>{record.log_record_hash || '-'}</Descriptions.Item>
                 </Descriptions>
-                <div>
-                  <Typography.Text strong>关键结构化结果</Typography.Text>
-                  <JsonBlock value={record.parsed_key_result} />
-                </div>
+                <StructuredTable title="关键结构化结果" value={record.parsed_key_result} />
               </div>
             ),
           }}
@@ -203,15 +229,23 @@ export default function AiLogsPage() {
                 description={detail.message}
               />
               <Descriptions bordered size="small" column={2}>
-                <Descriptions.Item label="关联资源" span={2}><JsonBlock value={detail.associations} /></Descriptions.Item>
-                <Descriptions.Item label="Token"><JsonBlock value={detail.tokens} /></Descriptions.Item>
-                <Descriptions.Item label="调用元数据"><JsonBlock value={detail.metadata} /></Descriptions.Item>
+                <Descriptions.Item label="关联工单">{detail.associations?.ticket_id ? <Button type="link" onClick={() => navigate(`/tickets?ticket_id=${detail.associations?.ticket_id}`)}>查看工单 #{String(detail.associations.ticket_id)}</Button> : '-'}</Descriptions.Item>
+                <Descriptions.Item label="关联邮件">{detail.associations?.email_id ? <Button type="link" onClick={() => navigate(`/emails?email_id=${detail.associations?.email_id}`)}>查看邮件 #{String(detail.associations.email_id)}</Button> : '-'}</Descriptions.Item>
               </Descriptions>
-              <Divider>输入</Divider><JsonBlock value={jsonValue(sections.input)} />
-              <Divider>请求</Divider><JsonBlock value={jsonValue(sections.request)} />
-              <Divider>响应</Divider><JsonBlock value={jsonValue(sections.response)} />
-              <Divider>解析结果</Divider><JsonBlock value={jsonValue(sections.parsed_result)} />
-              <Divider>诊断建议</Divider><JsonBlock value={detail.diagnostics} />
+              <StructuredTable title="Token 使用" value={detail.tokens} />
+              <StructuredTable title="调用信息" value={detail.metadata} />
+              <StructuredTable title="解析结果" value={sections.parsed_result} />
+              <StructuredTable title="诊断与处理建议" value={detail.diagnostics} />
+              <Collapse items={[{
+                key: 'raw',
+                label: '技术原文（展开后可复制排障）',
+                children: <Space direction="vertical" style={{ width: '100%' }}>
+                  <Typography.Text strong>输入</Typography.Text><JsonBlock value={jsonValue(sections.input)} />
+                  <Typography.Text strong>请求</Typography.Text><JsonBlock value={jsonValue(sections.request)} />
+                  <Typography.Text strong>响应</Typography.Text><JsonBlock value={jsonValue(sections.response)} />
+                  <Typography.Text strong>完整解析结果</Typography.Text><JsonBlock value={jsonValue(sections.parsed_result)} />
+                </Space>,
+              }]} />
             </div>
           );
         })() : null}

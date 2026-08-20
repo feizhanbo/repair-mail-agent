@@ -91,14 +91,12 @@ def _set_classification(
     intent = normalize_intent(intent_type)
     decision = decision_for_intent(intent, reason_code=reason_code)
     email.intent_type = decision.intent_type
-    email.intent_subtype = None
     email.handling_level = decision.handling_level
     email.classification_version = CLASSIFICATION_VERSION
     email.classification_confidence = confidence
     email.classification_reason_code = reason_code
     if parse_result is not None:
         parse_result.intent_type = decision.intent_type
-        parse_result.intent_subtype = None
         parse_result.handling_level = decision.handling_level
         parse_result.classification_version = CLASSIFICATION_VERSION
         parse_result.classification_confidence = confidence
@@ -167,7 +165,6 @@ async def list_emails(
     page_size: int = 20,
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -181,8 +178,6 @@ async def list_emails(
         statement = statement.where(Email.parse_status == parse_status)
     if intent_type:
         statement = statement.where(Email.intent_type == intent_type)
-    if intent_subtype:
-        statement = statement.where(Email.intent_subtype == intent_subtype)
     if handling_level:
         statement = statement.where(Email.handling_level == handling_level)
     if subject:
@@ -208,7 +203,6 @@ async def export_emails(
     *,
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -222,8 +216,6 @@ async def export_emails(
         statement = statement.where(Email.parse_status == parse_status)
     if intent_type:
         statement = statement.where(Email.intent_type == intent_type)
-    if intent_subtype:
-        statement = statement.where(Email.intent_subtype == intent_subtype)
     if handling_level:
         statement = statement.where(Email.handling_level == handling_level)
     if subject:
@@ -256,7 +248,6 @@ async def export_emails(
                 "from_address": email.from_address,
                 "to_addresses": email.to_addresses,
                 "intent_type": email.intent_type,
-                "intent_subtype": email.intent_subtype,
                 "handling_level": email.handling_level,
                 "classification_version": email.classification_version,
                 "classification_confidence": email.classification_confidence,
@@ -288,6 +279,30 @@ async def get_email_detail(session: AsyncSession, email_id: int) -> dict[str, An
         "attachments": [serialize_attachment(attachment, email) for attachment in attachments],
         "parse_results": [serialize_parse_result(parse_result) for parse_result in parse_results],
     }
+
+
+async def get_linked_tickets(session: AsyncSession, email_id: int) -> list[dict[str, Any]]:
+    if await session.get(Email, email_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+    rows = (
+        await session.execute(
+            select(EmailTicketLink, RepairTicket)
+            .join(RepairTicket, RepairTicket.id == EmailTicketLink.ticket_id)
+            .where(EmailTicketLink.email_id == email_id)
+            .order_by(RepairTicket.updated_at.desc(), RepairTicket.id.desc())
+        )
+    ).all()
+    return [
+        {
+            "ticket_id": ticket.id,
+            "ticket_no": ticket.ticket_no,
+            "current_status_code": ticket.current_status_code,
+            "link_type": link.link_type,
+            "link_reason": link.link_reason,
+            "created_at": link.created_at,
+        }
+        for link, ticket in rows
+    ]
 
 
 async def _find_thread_for_email(
@@ -411,7 +426,6 @@ async def ingest_email(
     )
     analysis = rule_analysis or analyze_email_rules(email)
     email.intent_type = analysis.intent_type
-    email.intent_subtype = analysis.intent_subtype
     email.handling_level = analysis.handling_level
     email.classification_version = analysis.classification_version
     email.classification_confidence = analysis.classification_confidence
@@ -455,7 +469,6 @@ async def ingest_email(
         parser_type="rule",
         parser_version="pre-archive-v2",
         intent_type=parse_payload["intent_type"],
-        intent_subtype=parse_payload["intent_subtype"],
         handling_level=parse_payload.get("handling_level"),
         classification_version=parse_payload.get("classification_version"),
         classification_confidence=parse_payload.get("classification_confidence"),
@@ -738,7 +751,6 @@ async def reparse_email(
         analysis = analyze_email_rules(email)
         email.latest_reply_segment = analysis.body
         email.intent_type = analysis.intent_type
-        email.intent_subtype = analysis.intent_subtype
         email.handling_level = analysis.handling_level
         email.classification_version = analysis.classification_version
         email.classification_confidence = analysis.classification_confidence
@@ -750,7 +762,6 @@ async def reparse_email(
             parser_type="rule",
             parser_version="pre-archive-v2",
             intent_type=parse_payload["intent_type"],
-            intent_subtype=parse_payload["intent_subtype"],
             handling_level=parse_payload.get("handling_level"),
             classification_version=parse_payload.get("classification_version"),
             classification_confidence=parse_payload.get("classification_confidence"),
@@ -768,7 +779,6 @@ async def reparse_email(
         await session.flush()
     else:
         email.intent_type = rule_parse.intent_type
-        email.intent_subtype = rule_parse.intent_subtype
         email.handling_level = rule_parse.handling_level
         email.classification_version = rule_parse.classification_version
         email.classification_confidence = rule_parse.classification_confidence
@@ -958,11 +968,7 @@ async def reparse_email(
         elif ai_parse.intent_type == "irrelevant" and not _parse_requires_manual(ai_parse, list(attachments)):
             ai_parse.apply_status = "auto_skipped"
             email.parse_status = "skipped"
-            email.terminal_reason_code = (
-                "OUT_OF_SCOPE_REPAIR"
-                if ai_parse.intent_subtype == "out_of_scope_repair"
-                else "IRRELEVANT_EMAIL"
-            )
+            email.terminal_reason_code = "IRRELEVANT_EMAIL"
             if closed_predecessor and predecessor_ticket is not None:
                 await _link_post_close_email(
                     session,

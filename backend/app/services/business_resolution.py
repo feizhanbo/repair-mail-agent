@@ -155,7 +155,7 @@ async def resolve_and_snapshot_ticket_policy(
     ticket.policy_snapshot = snapshot
     has_special_rma_rules = bool(
         str(snapshot.get("policy_type") or "") == "special_out_of_warranty"
-        or str(snapshot.get("currency") or "CNY").upper() != "CNY"
+        or str(snapshot.get("currency") or "RMB").upper() not in {"RMB", "CNY"}
         or str(snapshot.get("reply_salutation") or "").strip()
         or snapshot.get("hide_company_name")
         or snapshot.get("force_manual_review")

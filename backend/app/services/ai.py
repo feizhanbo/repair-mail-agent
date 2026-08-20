@@ -50,12 +50,10 @@ AI_EXTRACT_SYSTEM_PROMPT += """
 
 业务范围规则：
 - 本系统只处理客户将板卡寄回本公司维修并申请 RMA 的业务。
-- 只有邮件明确说明属于其他维修或服务业务时，才分类为
-  intent_type=irrelevant、intent_subtype=out_of_scope_repair，并在
-  evidence.scope_decision 中提供原文范围证据。
-- 广告、系统通知等普通无关邮件使用 intent_subtype=general_irrelevant。
+- 只有邮件明确说明属于其他维修或服务业务时，才分类为 intent_type=irrelevant，
+  并在 evidence.scope_decision 中提供原文范围证据和判断说明。
+- 广告、系统通知等普通无关邮件同样使用 intent_type=irrelevant，并在 evidence 中说明原因。
 - SN 未知、SN 不存在、资料缺失或描述不完整都不能作为超范围依据。
-- intent_type 不是 irrelevant 时，intent_subtype 必须为 null。
 """.strip()
 
 AI_EXTRACT_SYSTEM_PROMPT += """
@@ -1464,7 +1462,7 @@ async def create_ai_parse_candidate(
             "role": "user",
             "content": (
                 "请输出 JSON，字段为 intent_type, extracted_fields, extracted_items, missing_fields, "
-                "intent_subtype, conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
+                "conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
                 "manual_review_direction, original_evidence。\n"
                 f"{_safe_json(input_payload)}"
             ),
@@ -1490,7 +1488,6 @@ async def create_ai_parse_candidate(
         parser_type="ai",
         parser_version=settings.AI_PROMPT_VERSION,
         intent_type=parsed.intent_type,
-        intent_subtype=parsed.intent_subtype,
         handling_level=parsed.handling_level,
         classification_version=parsed.classification_version,
         classification_confidence=parsed.confidence_score,

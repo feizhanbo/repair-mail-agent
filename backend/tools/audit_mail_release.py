@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import bindparam, text
 
 CORE_TABLES = ("emails", "repair_tickets", "reply_records", "mail_fetch_records", "job_run_logs")
-REQUIRED_RECEIPT_COLUMNS = (
+DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_at",
     "device_received_source",
     "device_received_email_id",
@@ -18,7 +18,7 @@ REQUIRED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "r5m0h1c2d3e4"
+REQUIRED_REVISION = "u8p3k4l5m6n7"
 
 
 def _sha256(path: Path) -> str:
@@ -57,7 +57,7 @@ async def audit(expected_database: str, backup: Path | None) -> dict[str, Any]:
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='repair_tickets' "
             "AND COLUMN_NAME IN :columns ORDER BY COLUMN_NAME"
         ).bindparams(bindparam("columns", expanding=True))
-        receipt_columns = await _rows(session, columns_statement, columns=REQUIRED_RECEIPT_COLUMNS)
+        receipt_columns = await _rows(session, columns_statement, columns=DEPRECATED_RECEIPT_COLUMNS)
         uid_columns = await _rows(
             session,
             text(
@@ -95,7 +95,7 @@ async def audit(expected_database: str, backup: Path | None) -> dict[str, Any]:
             ),
         )
         default_counts: list[dict[str, Any]] = []
-        if {row["column_name"] for row in receipt_columns} == set(REQUIRED_RECEIPT_COLUMNS):
+        if {row["column_name"] for row in receipt_columns} == set(DEPRECATED_RECEIPT_COLUMNS):
             default_counts = await _rows(
                 session,
                 text(
@@ -138,15 +138,14 @@ async def audit(expected_database: str, backup: Path | None) -> dict[str, Any]:
         "schema": {
             "uid_validity_present": bool(uid_columns),
             "receipt_columns": receipt_columns,
-            "receipt_columns_complete": {row["column_name"] for row in receipt_columns}
-            == set(REQUIRED_RECEIPT_COLUMNS),
+            "receipt_columns_removed": not receipt_columns,
             "required_indexes": indexes,
             "uid_validity_unique_constraint_present": uid_unique_columns in mail_unique_indexes.values(),
             "device_received_foreign_key": foreign_keys,
             "receipt_status_counts": default_counts,
         },
         "close_transitions": close_transitions,
-        "no_automatic_close_route_enabled": enabled_close_routes == [],
+        "rma_closure_route_valid": enabled_close_routes == [("rma_sent", "rma_issued_and_archived")],
         "minimum_eligible_test_asset": assets[0] if assets else None,
     }
     if backup is not None:
@@ -170,13 +169,13 @@ def _audit_failures(report: dict[str, Any], *, require_backup: bool) -> list[str
         failures.append("ALEMBIC_REVISION_NOT_CURRENT")
     if not schema["uid_validity_present"]:
         failures.append("UID_VALIDITY_COLUMN_MISSING")
-    if not schema["receipt_columns_complete"]:
-        failures.append("RECEIPT_COLUMNS_INCOMPLETE")
+    if not schema["receipt_columns_removed"]:
+        failures.append("DEPRECATED_RECEIPT_COLUMNS_PRESENT")
     if not schema["uid_validity_unique_constraint_present"]:
         failures.append("UID_VALIDITY_UNIQUE_CONSTRAINT_MISSING")
-    if not schema["device_received_foreign_key"]:
-        failures.append("DEVICE_RECEIVED_FOREIGN_KEY_MISSING")
-    if not report["no_automatic_close_route_enabled"]:
+    if schema["device_received_foreign_key"]:
+        failures.append("DEPRECATED_DEVICE_RECEIVED_FOREIGN_KEY_PRESENT")
+    if not report["rma_closure_route_valid"]:
         failures.append("CLOSE_TRANSITION_GATE_INVALID")
     if require_backup and not report.get("backup", {}).get("exists"):
         failures.append("BACKUP_MISSING")

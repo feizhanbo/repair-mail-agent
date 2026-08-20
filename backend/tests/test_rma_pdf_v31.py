@@ -115,6 +115,16 @@ def test_latest_export_row_per_item_prevents_duplicate_cost_after_reexport() -> 
         RmaPdfData.model_validate(values)
 
 
+def test_three_sn_unit_prices_sum_to_rma_repair_total() -> None:
+    rows = [
+        ExportSap(id=index, ticket_item_id=100 + index, repair_fee=Decimal("1200.00"), currency="RMB")
+        for index in range(1, 4)
+    ]
+    selected = _latest_export_rows_by_item(rows)
+    assert [row.repair_fee for row in selected.values()] == [Decimal("1200.00")] * 3
+    assert sum(row.repair_fee or Decimal("0") for row in selected.values()) == Decimal("3600.00")
+
+
 def test_continuation_has_only_real_rows_and_no_hidden_details_labels() -> None:
     pdf = render_rma_pdf(_data(7))
     with fitz.open(stream=pdf, filetype="pdf") as document:

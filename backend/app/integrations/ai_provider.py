@@ -19,7 +19,6 @@ class AiProviderError(RuntimeError):
 
 class AiExtractResponse(BaseModel):
     intent_type: str = "unknown"
-    intent_subtype: str | None = None
     handling_level: str | None = None
     classification_version: str = CLASSIFICATION_VERSION
     classification_reason_code: str | None = None
@@ -66,7 +65,6 @@ def _as_string_list(value: Any) -> list[str]:
 
 _INTENT_ALIASES = {"customer_reply": "customer_supplement", "internal_forward": "repair_thread_other", "normal_reply": "repair_thread_other", "device_received": "device_intake_received"}
 _ALLOWED_INTENTS = set(INTENT_LEVEL) | {"irrelevant"}
-_ALLOWED_IRRELEVANT_SUBTYPES = {"general_irrelevant", "out_of_scope_repair"}
 
 
 def _without_optional_phone_requirement(value: dict[str, Any]) -> dict[str, Any]:
@@ -91,13 +89,6 @@ def _normalize_response_payload(payload: Any, response_model: type[BaseModel]) -
         intent = str(normalized.get("intent_type") or "unknown").strip().lower()
         mapped_intent = _INTENT_ALIASES.get(intent, intent)
         normalized["intent_type"] = mapped_intent if mapped_intent in _ALLOWED_INTENTS else "unknown"
-        subtype = str(normalized.get("intent_subtype") or "").strip().lower()
-        if normalized["intent_type"] == "irrelevant":
-            normalized["intent_subtype"] = (
-                subtype if subtype in _ALLOWED_IRRELEVANT_SUBTYPES else "general_irrelevant"
-            )
-        else:
-            normalized["intent_subtype"] = None
         if normalized["intent_type"] == "irrelevant":
             normalized["handling_level"] = None
             normalized["classification_reason_code"] = normalized.get("classification_reason_code") or "AI_MAILBOX_IRRELEVANT"

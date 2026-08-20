@@ -313,7 +313,8 @@ def _line_payload(row: ExportSap) -> dict[str, Any]:
             else None
         ),
         "mailing_address": row.mailing_address,
-        "currency": row.currency,
+        # RMB is the canonical business value. SAP's protocol still requires CNY.
+        "currency": "CNY" if str(row.currency or "").upper() == "RMB" else row.currency,
         "shipping_fee": row.shipping_fee,
         "repair_fee": str(row.repair_fee) if row.repair_fee is not None else None,
         "tax_rate": str(row.tax_rate) if row.tax_rate is not None else None,

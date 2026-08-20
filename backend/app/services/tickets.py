@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -177,7 +178,6 @@ EMAIL_FIELDS = (
     "parse_status",
     "processing_stage",
     "intent_type",
-    "intent_subtype",
     "handling_level",
     "classification_version",
     "classification_confidence",
@@ -269,7 +269,6 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "parser_type",
             "parser_version",
             "intent_type",
-            "intent_subtype",
             "handling_level",
             "classification_version",
             "classification_confidence",
@@ -534,6 +533,12 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             .order_by(ExportSap.ticket_item_id, ExportSap.created_at.desc())
         )
     ).scalars().all()
+    latest_sap_by_item: dict[int, ExportSap] = {}
+    for row in sap_exports:
+        latest_sap_by_item.setdefault(row.ticket_item_id, row)
+    latest_sap_rows = list(latest_sap_by_item.values())
+    repair_total = sum((row.repair_fee or Decimal("0")) for row in latest_sap_rows)
+    repair_currencies = {str(row.currency or "RMB").upper().replace("CNY", "RMB") for row in latest_sap_rows}
     rma_rows = (
         await session.execute(
             select(TicketRma)
@@ -711,6 +716,9 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             "failed_count": sum(
                 1 for row in sap_exports if row.status in {"failed", "timed_out", "manual_review"}
             ),
+            "unit_price_meaning": "单个SN维修单价",
+            "repair_total": str(repair_total),
+            "currency": next(iter(repair_currencies)) if len(repair_currencies) == 1 else None,
         },
         "sap_exports": [
             model_to_dict(
@@ -1658,7 +1666,6 @@ async def apply_parse_result(
     parse_result.accepted_at = now
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
-    email.intent_subtype = parse_result.intent_subtype
     email.handling_level = parse_result.handling_level
     email.classification_version = parse_result.classification_version
     email.classification_confidence = parse_result.classification_confidence or parse_result.confidence_score

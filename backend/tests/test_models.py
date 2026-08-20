@@ -2,7 +2,7 @@ from app.models import Base
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 37
+    assert len(Base.metadata.tables) == 38
 
 
 def test_phase_one_table_names() -> None:
@@ -36,6 +36,7 @@ def test_phase_one_table_names() -> None:
         "sap_sn_staging",
         "sn_validation_results",
         "system_event_logs",
+        "system_configs",
         "ticket_status_logs",
         "ticket_relay_exports",
         "ticket_rma_items",

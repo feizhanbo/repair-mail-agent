@@ -17,7 +17,6 @@ class ParseResult(CreatedAtMixin, Base):
         Index("idx_parse_results_attachment", "source_attachment_id"),
         Index("idx_parse_results_ticket", "ticket_id"),
         Index("idx_parse_results_parser", "parser_type", "parser_version"),
-        Index("idx_parse_results_intent_subtype", "intent_subtype"),
         Index("idx_parse_results_handling_intent", "handling_level", "intent_type"),
         Index("idx_parse_results_apply_status", "apply_status"),
         Index("idx_parse_results_accepted", "accepted"),
@@ -31,7 +30,6 @@ class ParseResult(CreatedAtMixin, Base):
     parser_type: Mapped[str] = mapped_column(String(30), nullable=False)
     parser_version: Mapped[str | None] = mapped_column(String(50))
     intent_type: Mapped[str | None] = mapped_column(String(50))
-    intent_subtype: Mapped[str | None] = mapped_column(String(50))
     handling_level: Mapped[str | None] = mapped_column(String(30))
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))

@@ -1,28 +1,114 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
 from app.core.response import ok, page
+from app.models import SapSnSyncBatch
 from app.schemas.business import (
     BoardCardImportRequest,
+    BoardCardUpdateRequest,
     CustomerServicePolicyCreateRequest,
     CustomerServicePolicyUpdateRequest,
     IdsRequest,
     SnAssetImportRequest,
+    SnAssetUpdateRequest,
+    SnSyncConfigUpdateRequest,
 )
+from app.services.audit import log_operation
+from app.services.external_relay import relay_configuration_status
+from app.services.runtime_config import apply_runtime_config, load_runtime_config, persist_runtime_config, read_runtime_config
+from app.services.sap_sn_sync import create_sn_sync_batch, serialize_sync_batch
 from app.services import customer_policies
 from app.services import master_data as master_data_service
 from app.services.jobs import enqueue_job, serialize_job
 from app.services.storage import StorageConfigurationError, StorageUploadError, upload_bytes_to_oss
 
 router = APIRouter()
+
+_SN_LOCAL_FIELDS = {
+    "sn", "customer_code", "customer_name", "material_code", "material_name",
+    "asset_status", "service_tracking_card_no", "parent_sn", "top_sn",
+    "parent_material_code", "top_material_code", "warranty_start_date", "warranty_end_date",
+}
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _sn_sync_config_payload() -> dict:
+    runtime = read_runtime_config()
+    return {
+        "relay_sqlserver_enabled": runtime["relay_sqlserver_enabled"],
+        "relay_sn_sync_enabled": runtime["relay_sn_sync_enabled"],
+        "sn_schema": runtime["sn_schema"],
+        "sn_table": runtime["sn_table"],
+        "sn_primary_key": runtime["sn_primary_key"],
+        "sn_updated_at_column": runtime["sn_updated_at_column"],
+        "sn_column_map": runtime["sn_column_map"],
+        "batch_size": runtime["batch_size"],
+        "snapshot_max_age_hours": runtime["snapshot_max_age_hours"],
+        "connection": relay_configuration_status(),
+    }
+
+
+@router.get("/sn-sync/config", deprecated=True, description="Compatibility alias; use /system/sn-sync/config.")
+async def get_sn_sync_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    del current_user
+    await load_runtime_config(session)
+    return ok(_sn_sync_config_payload())
+
+
+@router.patch("/sn-sync/config", deprecated=True, description="Compatibility alias; use /system/sn-sync/config.")
+async def update_sn_sync_config(
+    payload: SnSyncConfigUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    values = payload.model_dump(exclude_unset=True)
+    column_map = values.get("sn_column_map")
+    if column_map is not None:
+        if set(column_map) - _SN_LOCAL_FIELDS or any(not _IDENTIFIER.fullmatch(str(value)) for value in column_map.values()):
+            from fastapi import HTTPException, status
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SN_SYNC_COLUMN_MAP_INVALID")
+    await load_runtime_config(session)
+    before = _sn_sync_config_payload()
+    next_config = await persist_runtime_config(session, values, user_id=current_user.id)
+    apply_runtime_config(next_config)
+    after = _sn_sync_config_payload()
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_config_updated", target_type="sn_sync_config", description="用户确认更新SN同步配置", before_data=before, after_data=after)
+    await session.commit()
+    return ok(after, "SN sync config updated")
+
+
+@router.post("/sn-sync", deprecated=True, description="Compatibility alias; use /system/sn-sync.")
+async def start_sn_sync(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    result = await create_sn_sync_batch(session, user_id=current_user.id)
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="SN full snapshot requested from master-data page", after_data=result)
+    await session.commit()
+    return ok(result, "SN snapshot synchronized")
+
+
+@router.get("/sn-sync/latest", deprecated=True, description="Compatibility alias; use /system/sn-sync/latest.")
+async def latest_sn_sync(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    del current_user
+    batch = await session.scalar(select(SapSnSyncBatch).order_by(SapSnSyncBatch.id.desc()).limit(1))
+    return ok(serialize_sync_batch(batch) if batch else None)
 
 
 @router.get("/customer-policies")
@@ -53,7 +139,7 @@ async def list_customer_policies(
 async def create_customer_policy(
     payload: CustomerServicePolicyCreateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await customer_policies.create_policy(
         session,
@@ -69,16 +155,36 @@ async def update_customer_policy(
     policy_id: int,
     payload: CustomerServicePolicyUpdateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    del current_user
+    values = payload.model_dump(exclude_unset=True)
+    reason = values.pop("reason", payload.reason)
     result = await customer_policies.update_policy(
         session,
         policy_id=policy_id,
-        values=payload.model_dump(exclude_unset=True),
+        values=values,
+        user_id=current_user.id,
+        reason=reason,
     )
     await session.commit()
     return ok(result, "customer policy updated")
+
+
+@router.delete("/customer-policies/{policy_id}")
+async def delete_customer_policy(
+    policy_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    result = await customer_policies.delete_policy(session, policy_id=policy_id, user_id=current_user.id, reason="用户确认删除客户政策")
+    await session.commit()
+    return ok(result, "customer policy deleted")
+
+
+@router.get("/customer-policies/{policy_id}/delete-preview")
+async def customer_policy_delete_preview(policy_id: int, session: Annotated[AsyncSession, Depends(get_session)], current_user: Annotated[CurrentUser, Depends(require_roles("operator"))]) -> dict:
+    del current_user
+    return ok(await customer_policies.preview_policy_delete(session, policy_id))
 
 
 @router.get("/sn-assets")
@@ -105,6 +211,37 @@ async def list_sn_assets(
         asset_status=asset_status,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.patch("/sn-assets/{asset_id}")
+async def update_sn_asset(
+    asset_id: int,
+    payload: SnAssetUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    values = payload.model_dump(exclude_unset=True)
+    reason = values.pop("reason")
+    result = await master_data_service.update_sn_asset(session, asset_id=asset_id, values=values, user_id=current_user.id, reason=reason)
+    await session.commit()
+    return ok(result, "sn asset updated")
+
+
+@router.delete("/sn-assets/{asset_id}")
+async def delete_sn_asset(
+    asset_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    result = await master_data_service.delete_sn_asset(session, asset_id=asset_id, user_id=current_user.id, reason="用户确认删除SN资料")
+    await session.commit()
+    return ok(result, "sn asset deleted")
+
+
+@router.get("/sn-assets/{asset_id}/delete-preview")
+async def sn_asset_delete_preview(asset_id: int, session: Annotated[AsyncSession, Depends(get_session)], current_user: Annotated[CurrentUser, Depends(require_roles("operator"))]) -> dict:
+    del current_user
+    return ok(await master_data_service.preview_sn_asset_delete(session, asset_id))
 
 
 @router.get("/sn-assets/template")
@@ -162,7 +299,7 @@ async def export_selected_sn_assets(
 async def import_sn_assets(
     payload: SnAssetImportRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await master_data_service.import_sn_assets(
         session,
@@ -178,7 +315,7 @@ async def import_sn_assets(
 @router.post("/sn-assets/import-file")
 async def import_sn_assets_file(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
     content = await file.read()
@@ -197,7 +334,7 @@ async def import_sn_assets_file(
 @router.post("/sn-assets/import-file/jobs")
 async def import_sn_assets_file_job(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
     return await _queue_master_data_file(session, current_user, file, kind="sn_assets")
@@ -232,6 +369,37 @@ async def list_board_cards(
         status=status,
     )
     return page(items, total=total, page_no=page_no, page_size=page_size)
+
+
+@router.patch("/board-cards/{card_id}")
+async def update_board_card(
+    card_id: int,
+    payload: BoardCardUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    values = payload.model_dump(exclude_unset=True)
+    reason = values.pop("reason")
+    result = await master_data_service.update_board_card(session, card_id=card_id, values=values, user_id=current_user.id, reason=reason)
+    await session.commit()
+    return ok(result, "board card updated")
+
+
+@router.delete("/board-cards/{card_id}")
+async def delete_board_card(
+    card_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    result = await master_data_service.delete_board_card(session, card_id=card_id, user_id=current_user.id, reason="用户确认删除板卡资料")
+    await session.commit()
+    return ok(result, "board card deleted")
+
+
+@router.get("/board-cards/{card_id}/delete-preview")
+async def board_card_delete_preview(card_id: int, session: Annotated[AsyncSession, Depends(get_session)], current_user: Annotated[CurrentUser, Depends(require_roles("operator"))]) -> dict:
+    del current_user
+    return ok(await master_data_service.preview_board_card_delete(session, card_id))
 
 
 @router.get("/board-cards/template")
@@ -293,7 +461,7 @@ async def export_selected_board_cards(
 async def import_board_cards(
     payload: BoardCardImportRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await master_data_service.import_board_cards(
         session,
@@ -309,7 +477,7 @@ async def import_board_cards(
 @router.post("/board-cards/import-file")
 async def import_board_cards_file(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
     content = await file.read()
@@ -332,7 +500,7 @@ async def import_board_cards_file(
 @router.post("/board-cards/import-file/jobs")
 async def import_board_cards_file_job(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
     return await _queue_master_data_file(session, current_user, file, kind="board_cards")

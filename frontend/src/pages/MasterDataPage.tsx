@@ -1,20 +1,21 @@
-import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownloadOutlined, EditOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Upload, message } from 'antd';
+import { Button, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState, type Key } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import { waitForJob } from '../utils/jobs';
 import ErrorResult from '../components/ErrorResult';
+import { ChangePreview, DeletionImpactPreview } from '../components/FriendlyPreview';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import { useAuthStore } from '../stores/authStore';
-import type { BoardCard, CustomerServicePolicy, SnAsset } from '../types/api';
+import type { BoardCard, CustomerServicePolicy, DeletePreview, SnAsset } from '../types/api';
 import { compactFilters } from '../utils/filters';
 import { saveBlob } from '../utils/download';
-import { hasRole } from '../utils/roles';
+import { hasAnyRole } from '../utils/roles';
 
 type ImportKind = 'sn' | 'board' | 'policy';
 
@@ -36,7 +37,11 @@ type BoardFilters = {
 type PolicyFormValues = Partial<CustomerServicePolicy> & {
   repair_price?: number;
   tax_rate?: number;
+  reason?: string;
 };
+
+type SnFormValues = Partial<SnAsset> & { reason: string };
+type BoardFormValues = Partial<BoardCard> & { reason: string };
 
 export default function MasterDataPage() {
   const [activeTab, setActiveTab] = useState<ImportKind>('sn');
@@ -45,14 +50,18 @@ export default function MasterDataPage() {
   const [boardFilters, setBoardFilters] = useState<Record<string, unknown>>({});
   const [policyFilters, setPolicyFilters] = useState<Record<string, unknown>>({});
   const [editingPolicy, setEditingPolicy] = useState<CustomerServicePolicy | null | undefined>(undefined);
+  const [editingSn, setEditingSn] = useState<SnAsset | undefined>();
+  const [editingBoard, setEditingBoard] = useState<BoardCard | undefined>();
   const [selectedSnKeys, setSelectedSnKeys] = useState<Key[]>([]);
   const [selectedBoardKeys, setSelectedBoardKeys] = useState<Key[]>([]);
   const [snFilterForm] = Form.useForm<SnFilters>();
   const [boardFilterForm] = Form.useForm<BoardFilters>();
   const [policyFilterForm] = Form.useForm<Record<string, unknown>>();
   const [policyForm] = Form.useForm<PolicyFormValues>();
+  const [snForm] = Form.useForm<SnFormValues>();
+  const [boardForm] = Form.useForm<BoardFormValues>();
   const queryClient = useQueryClient();
-  const canImport = hasRole(useAuthStore((state) => state.user?.roles), 'admin');
+  const canManage = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'operator']);
 
   const snQuery = useQuery({
     queryKey: ['sn-assets', snFilters, page],
@@ -83,6 +92,43 @@ export default function MasterDataPage() {
     },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
+  const saveSnMutation = useMutation({
+    mutationFn: (values: Record<string, unknown>) => api.updateSnAsset(editingSn!.id, values),
+    onSuccess: () => { message.success('SN 资料已保存并记录审计'); setEditingSn(undefined); void queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const saveBoardMutation = useMutation({
+    mutationFn: (values: Record<string, unknown>) => api.updateBoardCard(editingBoard!.id, values),
+    onSuccess: () => { message.success('板卡资料已保存并记录审计'); setEditingBoard(undefined); void queryClient.invalidateQueries({ queryKey: ['board-cards'] }); },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const snSyncMutation = useMutation({
+    mutationFn: api.startSnSync,
+    onSuccess: () => {
+      message.success('SN 同步任务已执行');
+      void queryClient.invalidateQueries({ queryKey: ['sn-assets'] });
+      void queryClient.invalidateQueries({ queryKey: ['sn-sync-latest'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
+  });
+  const confirmChange = (title: string, before: unknown, after: unknown, onOk: () => Promise<unknown> | void) => Modal.confirm({
+    title,
+    width: 680,
+    content: <div><Typography.Paragraph type="secondary">请确认以下变更，提交后将写入审计日志。</Typography.Paragraph><ChangePreview before={(before ?? {}) as Record<string, unknown>} after={(after ?? {}) as Record<string, unknown>} /></div>,
+    okText: '确认提交',
+    cancelText: '取消',
+    onOk,
+  });
+  const confirmDelete = async (title: string, loadPreview: () => Promise<DeletePreview>, onDelete: () => Promise<unknown>) => {
+    try {
+      const preview = await loadPreview();
+      Modal.confirm({ title, width: 680, content: <DeletionImpactPreview preview={preview} />, okText: '确认删除', okButtonProps: { danger: true, disabled: !preview.deletable }, onOk: async () => { await onDelete(); message.success('数据已删除并记录审计'); } });
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
+  };
+  const openSnEditor = (row: SnAsset) => { setEditingSn(row); snForm.setFieldsValue({ ...row, reason: '' }); };
+  const openBoardEditor = (row: BoardCard) => { setEditingBoard(row); boardForm.setFieldsValue({ ...row, reason: '' }); };
 
   const templateMutation = useMutation({
     mutationFn: () => (activeTab === 'sn' ? api.snAssetsTemplate() : api.boardCardsTemplate()),
@@ -138,8 +184,9 @@ export default function MasterDataPage() {
       { title: '上级物料代码', dataIndex: 'parent_material_code', width: 150, render: (value?: string) => value || '-' },
       { title: 'Top 物料代码', dataIndex: 'top_material_code', width: 150, render: (value?: string) => value || '-' },
       { title: '状态', dataIndex: 'asset_status', width: 100, render: (value: string) => <StatusTag value={value === 'valid' ? 'pass' : 'warning'} /> },
+      { title: '操作', width: 130, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openSnEditor(row)}>编辑</Button><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDelete('确认删除该 SN 资料？', () => api.snAssetDeletePreview(row.id), async () => { await api.deleteSnAsset(row.id); await queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); })}>删除</Button></Space> : null },
     ],
-    [],
+    [canManage, queryClient],
   );
   const boardColumns: ColumnsType<BoardCard> = useMemo(
     () => [
@@ -152,8 +199,9 @@ export default function MasterDataPage() {
       { title: '维修联系人', dataIndex: 'shipping_contact', width: 120, render: (value?: string) => value || '-' },
       { title: '维修电话', dataIndex: 'shipping_phone', width: 150, render: (value?: string) => value || '-' },
       { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <StatusTag value={value} /> },
+      { title: '操作', width: 130, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openBoardEditor(row)}>编辑</Button><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDelete('确认删除该板卡规则？', () => api.boardCardDeletePreview(row.id), async () => { await api.deleteBoardCard(row.id); await queryClient.invalidateQueries({ queryKey: ['board-cards'] }); })}>删除</Button></Space> : null },
     ],
-    [],
+    [canManage, queryClient],
   );
   const selectedCount = activeTab === 'sn' ? selectedSnKeys.length : selectedBoardKeys.length;
   const openPolicyEditor = (policy: CustomerServicePolicy | null) => {
@@ -162,16 +210,18 @@ export default function MasterDataPage() {
       ...policy,
       repair_price: Number(policy.repair_price),
       tax_rate: Number(policy.tax_rate),
+      reason: '',
     } : {
       policy_type: 'special_out_of_warranty',
       charge_status: 'chargeable',
       customer_scope: 'domestic',
-      currency: 'CNY',
+      currency: 'RMB',
       tax_rate: 13,
       shipping_fee_text: 'one-way charge/单次收费',
       enabled: true,
       hide_company_name: false,
       force_manual_review: false,
+      reason: '',
     });
   };
   const policyColumns: ColumnsType<CustomerServicePolicy> = [
@@ -182,7 +232,7 @@ export default function MasterDataPage() {
     { title: '客户范围', dataIndex: 'customer_scope', width: 100, render: (v?: string) => v === 'overseas' ? '海外' : v === 'domestic' ? '国内' : '待确认' },
     { title: '生效日期', dataIndex: 'effective_from', width: 120, render: (v?: string) => v || '-' },
     { title: '失效日期', dataIndex: 'effective_until', width: 120, render: (v?: string) => v || '-' },
-    { title: '维修价', dataIndex: 'repair_price', width: 100 },
+    { title: '单个 SN 超保单价', dataIndex: 'repair_price', width: 150 },
     { title: '币种', dataIndex: 'currency', width: 75 },
     { title: '税率', dataIndex: 'tax_rate', width: 75, render: (v: number | string) => `${v}%` },
     { title: '快递费规则', dataIndex: 'shipping_fee_text', width: 180 },
@@ -190,7 +240,7 @@ export default function MasterDataPage() {
     { title: '公司名展示', dataIndex: 'hide_company_name', width: 110, render: (v: boolean) => <Tag color={v ? 'orange' : 'green'}>{v ? '隐藏' : '显示'}</Tag> },
     { title: '强制复核', dataIndex: 'force_manual_review', width: 90, render: (v: boolean) => <Tag color={v ? 'orange' : 'default'}>{v ? '是' : '否'}</Tag> },
     { title: '启用', dataIndex: 'enabled', width: 75, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag> },
-    { title: '操作', width: 80, fixed: 'right', render: (_: unknown, row) => <Button type="link" size="small" onClick={() => openPolicyEditor(row)}>编辑</Button> },
+    { title: '操作', width: 140, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" onClick={() => openPolicyEditor(row)}>编辑</Button><Button type="link" danger size="small" onClick={() => void confirmDelete('确认删除该客户政策？', () => api.customerPolicyDeletePreview(row.id), async () => { await api.deleteCustomerPolicy(row.id); await queryClient.invalidateQueries({ queryKey: ['customer-policies'] }); })}>删除</Button></Space> : null },
   ];
 
   return (
@@ -199,7 +249,22 @@ export default function MasterDataPage() {
         title="基础资料"
         extra={(
           <Space wrap>
-            {activeTab === 'policy' && canImport ? <Button type="primary" onClick={() => openPolicyEditor(null)}>新增政策</Button> : null}
+            {activeTab === 'policy' && canManage ? <Button type="primary" onClick={() => openPolicyEditor(null)}>新增政策</Button> : null}
+            {activeTab === 'sn' && canManage ? (
+              <Button
+                icon={<SyncOutlined />}
+                loading={snSyncMutation.isPending}
+                onClick={() => Modal.confirm({
+                  title: '确认立即同步 SN 数据？',
+                  content: '系统将按“系统配置”页面中已保存的同步配置读取数据，并记录本次操作。',
+                  okText: '确认同步',
+                  cancelText: '取消',
+                  onOk: () => snSyncMutation.mutateAsync(),
+                })}
+              >
+                立即同步
+              </Button>
+            ) : null}
             {activeTab !== 'policy' ? (
               <>
             <Button icon={<DownloadOutlined />} loading={templateMutation.isPending} onClick={() => templateMutation.mutate()}>
@@ -213,7 +278,7 @@ export default function MasterDataPage() {
             >
               导出已选{selectedCount ? `(${selectedCount})` : ''}
             </Button>
-            {canImport ? (
+            {canManage ? (
               <Upload {...uploadProps}>
                 <Button type="primary" icon={<UploadOutlined />} loading={importFileMutation.isPending}>
                   导入
@@ -469,9 +534,9 @@ export default function MasterDataPage() {
         footer={null}
         destroyOnClose
       >
-        <Form form={policyForm} layout="vertical" onFinish={(values) => savePolicyMutation.mutate({ ...values })}>
+        <Form form={policyForm} layout="vertical" onFinish={(values) => confirmChange('确认保存客户政策？', editingPolicy, values, () => savePolicyMutation.mutateAsync({ ...values }))}>
           <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="政策编码" name="policy_code" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item label="政策编码" name="policy_code" rules={[{ required: true }]}><Input disabled={Boolean(editingPolicy)} /></Form.Item>
             <Form.Item label="客户代码" name="customer_code" rules={[{ required: true }]}><Input disabled={Boolean(editingPolicy)} /></Form.Item>
           </Space>
           <Form.Item label="客户名称" name="customer_name"><Input /></Form.Item>
@@ -504,8 +569,8 @@ export default function MasterDataPage() {
             <Form.Item label="失效日期" name="effective_until"><Input type="date" /></Form.Item>
           </Space>
           <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="维修价格" name="repair_price" rules={[{ required: true }]}><InputNumber min={0} precision={2} /></Form.Item>
-            <Form.Item label="币种" name="currency" rules={[{ required: true }]}><Input style={{ width: 100 }} /></Form.Item>
+            <Form.Item label="单个 SN 超保单价" name="repair_price" rules={[{ required: true }]}><InputNumber min={0} precision={2} /></Form.Item>
+            <Form.Item label="币种" name="currency" rules={[{ required: true }]}><Select style={{ width: 100 }} options={[{ value: 'RMB', label: 'RMB' }, { value: 'USD', label: 'USD' }]} /></Form.Item>
             <Form.Item label="税率(%)" name="tax_rate" rules={[{ required: true }]}><InputNumber min={0} max={100} precision={4} /></Form.Item>
           </Space>
           <Form.Item label="快递费规则" name="shipping_fee_text" rules={[{ required: true }]}><Input /></Form.Item>
@@ -515,7 +580,32 @@ export default function MasterDataPage() {
             <Form.Item label="强制人工复核" name="force_manual_review" valuePropName="checked"><Switch /></Form.Item>
             <Form.Item label="启用" name="enabled" valuePropName="checked"><Switch /></Form.Item>
           </Space>
+          <Form.Item label="变更原因" name="reason" rules={editingPolicy ? [{ required: true, min: 3, max: 500 }] : undefined}><Input.TextArea rows={2} /></Form.Item>
           <Button type="primary" htmlType="submit" loading={savePolicyMutation.isPending}>保存</Button>
+        </Form>
+      </Modal>
+      <Modal title="编辑 SN 资料" open={Boolean(editingSn)} onCancel={() => setEditingSn(undefined)} footer={null} destroyOnClose>
+        <Form<SnFormValues> form={snForm} layout="vertical" onFinish={(values) => confirmChange('确认保存 SN 资料？', editingSn, values, () => saveSnMutation.mutateAsync(values as Record<string, unknown>))}>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="SN" name="sn" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="状态" name="asset_status" rules={[{ required: true }]}><Select style={{ width: 120 }} options={[{ value: 'valid', label: '有效' }, { value: 'invalid', label: '无效' }]} /></Form.Item></Space>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="客户代码" name="customer_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="客户名称" name="customer_name" rules={[{ required: true }]}><Input /></Form.Item></Space>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="物料代码" name="material_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="物料名称" name="material_name"><Input /></Form.Item></Space>
+          <Form.Item label="服务追踪卡编号" name="service_tracking_card_no"><Input /></Form.Item>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="上级 SN" name="parent_sn"><Input /></Form.Item><Form.Item label="Top SN" name="top_sn"><Input /></Form.Item></Space>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="上级物料代码" name="parent_material_code"><Input /></Form.Item><Form.Item label="Top 物料代码" name="top_material_code"><Input /></Form.Item></Space>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="质保开始" name="warranty_start_date"><Input type="date" /></Form.Item><Form.Item label="质保结束" name="warranty_end_date"><Input type="date" /></Form.Item></Space>
+          <Form.Item label="变更原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}><Input.TextArea rows={3} /></Form.Item>
+          <Button type="primary" htmlType="submit" loading={saveSnMutation.isPending}>保存</Button>
+        </Form>
+      </Modal>
+      <Modal title="编辑板卡规则" open={Boolean(editingBoard)} onCancel={() => setEditingBoard(undefined)} footer={null} destroyOnClose>
+        <Form<BoardFormValues> form={boardForm} layout="vertical" onFinish={(values) => confirmChange('确认保存板卡规则？', editingBoard, values, () => saveBoardMutation.mutateAsync(values as Record<string, unknown>))}>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="板卡型号" name="board_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="板卡名称" name="board_name"><Input /></Form.Item></Space>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}><Select style={{ width: 130 }} options={[{ value: 'domestic', label: '国内' }, { value: 'overseas', label: '海外' }]} /></Form.Item><Form.Item label="规则类型" name="route_type" rules={[{ required: true }]}><Select style={{ width: 150 }} options={[{ value: 'board_rule', label: '板卡规则' }, { value: 'scope_default', label: '范围默认' }]} /></Form.Item><Form.Item label="寄回地点" name="return_location" rules={[{ required: true }]}><Select style={{ width: 120 }} options={[{ value: 'beijing', label: '北京' }, { value: 'tianjin', label: '天津' }]} /></Form.Item></Space>
+          <Form.Item label="维修寄回地址" name="shipping_address"><Input /></Form.Item>
+          <Space style={{ display: 'flex' }} align="start"><Form.Item label="联系人" name="shipping_contact"><Input /></Form.Item><Form.Item label="电话" name="shipping_phone"><Input /></Form.Item><Form.Item label="邮编" name="postal_code"><Input /></Form.Item></Space>
+          <Form.Item label="状态" name="status" rules={[{ required: true }]}><Select options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /></Form.Item>
+          <Form.Item label="变更原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}><Input.TextArea rows={3} /></Form.Item>
+          <Button type="primary" htmlType="submit" loading={saveBoardMutation.isPending}>保存</Button>
         </Form>
       </Modal>
     </div>

@@ -1,4 +1,5 @@
 from app.models.base import Base
+from app.models.config import SystemConfig
 from app.models.identity import Role, User, UserRole
 from app.models.integrations import (
     ExportSap,
@@ -23,6 +24,7 @@ from app.models.workflow import FieldAuditLog, TicketStatusLog, WorkflowStatus, 
 
 __all__ = [
     "Base",
+    "SystemConfig",
     "User",
     "Role",
     "UserRole",

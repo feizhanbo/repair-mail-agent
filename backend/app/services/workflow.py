@@ -337,10 +337,14 @@ async def transition_ticket(
                 detail="RMA_SMTP_EVIDENCE_REQUIRED",
             )
     if to_status_code == "closed":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="DEVICE_INTAKE_CLOSURE_ENTRY_NOT_IMPLEMENTED",
-        )
+        if from_status_code != "rma_sent" or trigger_event != "rma_issued_and_archived":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_ARCHIVE_CLOSURE_REQUIRED")
+        missing_facts = await _rma_closure_missing_facts(session, ticket=ticket, metadata=metadata or {})
+        if missing_facts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "RMA_CLOSURE_EVIDENCE_INCOMPLETE", "missing_facts": missing_facts},
+            )
     if from_status_code == "manual_review" and to_status_code != "manual_review":
         blocker_query = select(ManualReviewTask.id).where(
             ManualReviewTask.ticket_id == ticket.id,

@@ -130,7 +130,7 @@ def test_all_three_switch_combinations_keep_ordinary_and_followup_independent(
     assert replies._reply_can_auto_send(followup) is followup_enabled
 
 
-def test_seed_keeps_rma_sent_non_terminal_until_device_intake_is_implemented() -> None:
+def test_seed_closes_rma_sent_only_after_issue_and_archive_evidence() -> None:
     direct_close_rules = [
         transition
         for transition in seed_data.WORKFLOW_TRANSITIONS
@@ -148,7 +148,7 @@ def test_seed_keeps_rma_sent_non_terminal_until_device_intake_is_implemented() -
     ]
     assert direct_close_rules == []
     assert [transition["trigger_event"] for transition in rma_send_rules] == ["rma_reply_sent"]
-    assert close_rules == []
+    assert [transition["trigger_event"] for transition in close_rules] == ["rma_issued_and_archived"]
 
 
 @run_async

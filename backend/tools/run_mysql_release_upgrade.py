@@ -33,7 +33,7 @@ from app.config import settings
 EXPECTED_DATABASE = "repair_system_test"
 EXPECTED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 EXPECTED_LOCAL_PORT = 13307
-EXPECTED_HEAD = "r5m0h1c2d3e4"
+EXPECTED_HEAD = "u8p3k4l5m6n7"
 CRITICAL_TABLES = (
     "emails",
     "email_attachments",

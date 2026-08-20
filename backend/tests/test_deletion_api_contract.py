@@ -31,7 +31,7 @@ def test_delete_endpoints_are_registered_with_preview_and_admin_auth() -> None:
         assert paths[path][method].get("security") == [{"OAuth2PasswordBearer": []}]
 
 
-def test_delete_mutations_require_reason_and_preview_token() -> None:
+def test_delete_mutations_require_preview_token_but_not_user_reason() -> None:
     schema = app.openapi()
     paths = schema["paths"]
     for path in (
@@ -40,8 +40,7 @@ def test_delete_mutations_require_reason_and_preview_token() -> None:
         "/api/v1/tickets/{ticket_id}",
     ):
         parameters = _parameters(paths[path]["delete"])
-        assert parameters["reason"]["required"] is True
-        assert parameters["reason"]["schema"]["minLength"] == 3
+        assert "reason" not in parameters
         assert parameters["confirmation_token"]["required"] is True
         assert parameters["confirmation_token"]["schema"]["minLength"] == 20
 

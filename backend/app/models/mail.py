@@ -85,7 +85,6 @@ class Email(TimestampMixin, Base):
         Index("idx_emails_fetch_job", "fetch_job_run_id"),
         Index("idx_emails_direction_status_time", "mail_direction", "parse_status", "received_at"),
         Index("idx_emails_intent", "intent_type"),
-        Index("idx_emails_intent_subtype", "intent_subtype"),
         Index("idx_emails_handling_intent", "handling_level", "intent_type"),
         Index("idx_emails_from_domain", "from_domain"),
         Index("idx_emails_processing_trace", "processing_trace_id"),
@@ -121,7 +120,6 @@ class Email(TimestampMixin, Base):
     parse_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     processing_stage: Mapped[str] = mapped_column(String(50), nullable=False, server_default="fetched")
     intent_type: Mapped[str | None] = mapped_column(String(50))
-    intent_subtype: Mapped[str | None] = mapped_column(String(50))
     handling_level: Mapped[str | None] = mapped_column(String(30))
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))

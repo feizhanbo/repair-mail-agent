@@ -1,5 +1,6 @@
 import {
   CheckCircleOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
   FileAddOutlined,
@@ -7,6 +8,7 @@ import {
   MailOutlined,
   RightOutlined,
   SearchOutlined,
+  SwapOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -30,12 +32,13 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo, useState, type Key } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState, type Key } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import ContentPreviewButton from '../components/ContentPreviewButton';
 import CopyableField from '../components/CopyableField';
 import ErrorResult from '../components/ErrorResult';
+import { DeletionImpactPreview } from '../components/FriendlyPreview';
 import JsonBlock from '../components/JsonBlock';
 import PageTitle from '../components/PageTitle';
 import ParseResultSelectionModal from '../components/ParseResultSelectionModal';
@@ -100,6 +103,7 @@ type ReturnRouteForm = {
 };
 
 export default function TicketsPage() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
@@ -120,7 +124,14 @@ export default function TicketsPage() {
   const [filterForm] = Form.useForm<TicketFilters>();
   const queryClient = useQueryClient();
   const canTransitionTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'operator']);
+  const canDeleteTicket = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin']);
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
+  useEffect(() => {
+    const value = Number(searchParams.get('ticket_id'));
+    setSelectedId(Number.isInteger(value) && value > 0 ? value : null);
+  }, [searchParams]);
+  const openTicket = (id: number) => navigate(`/tickets?ticket_id=${id}`);
+  const closeTicket = () => navigate('/tickets');
   const confirmAction = (title: string, onOk: () => void) => {
     Modal.confirm({
       title,
@@ -140,10 +151,31 @@ export default function TicketsPage() {
   const hasPrevTicket = currentTicketIndex > 0;
   const hasNextTicket = currentTicketIndex >= 0 && currentTicketIndex < ticketIds.length - 1;
   const goToPrevTicket = () => {
-    if (currentTicketIndex > 0) setSelectedId(ticketIds[currentTicketIndex - 1]);
+    if (currentTicketIndex > 0) openTicket(ticketIds[currentTicketIndex - 1]);
   };
   const goToNextTicket = () => {
-    if (currentTicketIndex < ticketIds.length - 1) setSelectedId(ticketIds[currentTicketIndex + 1]);
+    if (currentTicketIndex < ticketIds.length - 1) openTicket(ticketIds[currentTicketIndex + 1]);
+  };
+  const confirmDeleteTicket = async (ticketId: number) => {
+    try {
+      const preview = await api.ticketDeletePreview(ticketId);
+      Modal.confirm({
+        title: '确认删除该工单？',
+        width: 640,
+        okText: '确认删除',
+        okButtonProps: { danger: true, disabled: !preview.deletable },
+        content: <DeletionImpactPreview preview={preview} />,
+        onOk: async () => {
+          await api.deleteTicket(ticketId, preview.confirmation_token ?? '');
+          message.success('工单已删除');
+          closeTicket();
+          setSelectedTicketKeys([]);
+          await Promise.all([queryClient.invalidateQueries({ queryKey: ['tickets'] }), queryClient.invalidateQueries({ queryKey: ['emails'] })]);
+        },
+      });
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
   };
   const detailQuery = useQuery({
     queryKey: ['ticket-detail', selectedId],
@@ -397,7 +429,7 @@ export default function TicketsPage() {
     { title: '追问', dataIndex: 'followup_count', width: 80, render: (_, record) => `${record.followup_count}/${record.max_followup_count}` },
     { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
     { title: '更新时间', dataIndex: 'updated_at', width: 160, render: formatTime },
-    { title: '操作', width: 90, render: (_, record) => <Button type="link" size="small" onClick={() => setSelectedId(record.id)}>详情</Button> },
+    { title: '操作', width: 130, render: (_, record) => <Space size={0}><Button type="link" size="small" onClick={() => openTicket(record.id)}>详情</Button>{canDeleteTicket ? <Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDeleteTicket(record.id)} /> : null}</Space> },
   ];
 
   return (
@@ -405,9 +437,12 @@ export default function TicketsPage() {
       <PageTitle
         title="工单中心"
         extra={(
-          <Button icon={<DownloadOutlined />} disabled={!selectedTicketKeys.length} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
-            导出已选{selectedTicketKeys.length ? `(${selectedTicketKeys.length})` : ''}
-          </Button>
+          <Space>
+            <Button icon={<SwapOutlined />} onClick={() => navigate('/emails')}>切换到邮件中心</Button>
+            <Button icon={<DownloadOutlined />} disabled={!selectedTicketKeys.length} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
+              导出已选{selectedTicketKeys.length ? `(${selectedTicketKeys.length})` : ''}
+            </Button>
+          </Space>
         )}
       />
       <SectionPanel>
@@ -488,9 +523,10 @@ export default function TicketsPage() {
         title="工单详情工作台"
         open={Boolean(selectedId)}
         onClose={() => {
-          setSelectedId(null);
+          closeTicket();
           setEditingItem(null);
         }}
+        extra={selectedId && canDeleteTicket ? <Button danger icon={<DeleteOutlined />} onClick={() => void confirmDeleteTicket(selectedId)}>删除</Button> : null}
       >
         {detailQuery.data ? (
           <TicketDetailView
@@ -973,8 +1009,6 @@ function TicketDetailView({
                 {/* === P2-1 恢复: Thread 上下文摘要 === */}
                 {detail.thread && (
                   <Descriptions size="small" column={4} bordered style={{ marginBottom: 16 }}>
-                    <Descriptions.Item label="Thread ID">{detail.thread.id}</Descriptions.Item>
-                    <Descriptions.Item label="Thread Key">{detail.thread.thread_key || '-'}</Descriptions.Item>
                     <Descriptions.Item label="邮件数">{detail.thread.email_count ?? '-'}</Descriptions.Item>
                     <Descriptions.Item label="合并置信度">{detail.thread.merge_confidence != null ? numberText(detail.thread.merge_confidence) : '-'}</Descriptions.Item>
                   </Descriptions>
@@ -1083,6 +1117,7 @@ function TicketDetailView({
                   <Tag>明细：{detail.sap_export_summary?.line_count ?? 0}</Tag>
                   <Tag color="cyan">已受理：{detail.sap_export_summary?.accepted_count ?? 0}</Tag>
                   <Tag color="green">已回填 RMA：{detail.sap_export_summary?.rma_received_count ?? 0}</Tag>
+                  <Tag color="purple">维修总额：{detail.sap_export_summary?.repair_total ?? '0'} {detail.sap_export_summary?.currency ?? 'RMB'}</Tag>
                   {(detail.sap_export_summary?.failed_count ?? 0) > 0 ? (
                     <Tag color="red">失败：{detail.sap_export_summary?.failed_count}</Tag>
                   ) : null}
@@ -1112,8 +1147,8 @@ function TicketDetailView({
                     { title: 'SAP 物料代码', dataIndex: 'material_code', width: 140, render: (v?: string) => v || '-' },
                     { title: '收费状态', dataIndex: 'charge_status', width: 130, render: (v?: string) => v || '-' },
                     { title: '客户方邮寄地址', dataIndex: 'mailing_address', width: 220, ellipsis: true, render: (v?: string) => v || '-' },
-                    { title: '维修费', dataIndex: 'repair_fee', width: 100, render: (v?: number | string) => v ?? '-' },
-                    { title: '币种', dataIndex: 'currency', width: 80, render: (v?: string) => v || '-' },
+                    { title: 'SN 单价', dataIndex: 'repair_fee', width: 100, render: (v?: number | string) => v ?? '-' },
+                    { title: '币种', dataIndex: 'currency', width: 80, render: (v?: string) => v === 'CNY' ? 'RMB' : v || '-' },
                     { title: '税率', dataIndex: 'tax_rate', width: 80, render: (v?: number | string) => v == null ? '-' : `${v}%` },
                     { title: '快递费规则', dataIndex: 'shipping_fee', width: 170, render: (v?: string) => v || '-' },
                     { title: '尝试', dataIndex: 'attempt_count', width: 70 },
@@ -1263,6 +1298,7 @@ function TicketDetailView({
 }
 
 function EmailTimelineItem({ email }: { email: EmailItem }) {
+  const navigate = useNavigate();
   return (
     <div className="timeline-item">
       <div className="timeline-heading">
@@ -1277,6 +1313,7 @@ function EmailTimelineItem({ email }: { email: EmailItem }) {
       <Typography.Paragraph ellipsis={{ rows: 3 }} className="timeline-body">
         {email.latest_reply_segment || email.clean_body || '-'}
       </Typography.Paragraph>
+      <Button type="link" size="small" onClick={() => navigate(`/emails?email_id=${email.id}`)}>查看邮件</Button>
     </div>
   );
 }

@@ -21,6 +21,20 @@ from app.services import customer_policies, external_relay, sap_rma
 from app.integrations.sap_middleware import ExternalRmaResult
 
 
+def test_sap_protocol_translates_business_rmb_to_cny() -> None:
+    row = ExportSap(
+        source_request_id="req-rmb-1",
+        ticket_id=1,
+        ticket_item_id=2,
+        relay_export_id=3,
+        ticket_version=1,
+        payload_hash="a" * 64,
+        sn="SN-RMB",
+        currency="RMB",
+    )
+    assert sap_rma._line_payload(row)["currency"] == "CNY"
+
+
 class _ScalarRows:
     def __init__(self, rows):
         self._rows = rows

@@ -167,12 +167,28 @@ def test_domestic_out_of_warranty_template_renders_actual_price_and_city() -> No
     ticket = _ticket(language_code="zh-CN", contact_person="刘家利")
     rendered = replies._render_template(
         template["body_template"], ticket=ticket, missing_fields=None,
-        city="北京", repair_fee="1200.00", currency_unit="元",
+        city="北京", repair_fee="1200.00", currency_unit="RMB",
         return_address_block="北京维修地址",
     )
     assert "寄到北京质量部" in rendered
-    assert "维修费：1200.00元/块" in rendered
+    assert "维修费：1200.00RMB/块" in rendered
     assert "北京维修地址" in rendered
+
+
+def test_beijing_return_address_is_company_and_street_on_separate_lines() -> None:
+    block = replies._return_address_block(
+        language="zh-CN",
+        customer_policy={
+            "shipping_route": "beijing",
+            "shipping_address": "北京华峰测控技术股份有限公司\n北京市海淀区丰豪东路9号院5号楼",
+        },
+    )
+    lines = block.splitlines()
+    assert lines[:2] == [
+        "北京华峰测控技术股份有限公司",
+        "北京市海淀区丰豪东路9号院5号楼",
+    ]
+    assert block.count("北京华峰测控技术股份有限公司") == 1
 
 
 def test_overseas_out_of_warranty_and_special_rules() -> None:

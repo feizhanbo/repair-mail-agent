@@ -462,6 +462,7 @@ async def build_rma_pdf_data(
     if len(currencies) != 1:
         raise RmaPdfError("RMA_CURRENCY_CONFLICT")
     currency = next(iter(currencies))
+    display_currency = "RMB" if currency == "CNY" else currency
     total_cost = sum((row.repair_fee or Decimal("0")) for row in selected_export_rows)
     normalized_sns = [(item.sn or "").strip().casefold() for item in items]
     if len(normalized_sns) != len(set(normalized_sns)):
@@ -492,7 +493,7 @@ async def build_rma_pdf_data(
         return RmaPdfData(
             rma_no=resolved_rma_no,
             request_date=ticket.request_date,
-            currency=currency,
+            currency=display_currency,
             customer_code=ticket.customer_code,
             customer_name=ticket.customer_name,
             mailing_address=ticket.mailing_address,
@@ -502,7 +503,7 @@ async def build_rma_pdf_data(
             repair_fee_paid_by_customer=(
                 settings.RMA_PDF_DEFAULT_REPAIR_FEE
                 if total_cost == 0
-                else f"{total_cost:.2f} {currency}"
+                else f"{total_cost:.2f} {display_currency}"
             ),
             total_cost=total_cost,
             items=result_items,

@@ -17,7 +17,7 @@ from app.services import jobs, replies
 
 
 @pytest.mark.anyio
-async def test_rma_issue_archives_and_keeps_ticket_at_rma_sent(
+async def test_rma_issue_archives_and_closes_ticket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ticket = RepairTicket(
@@ -70,7 +70,13 @@ async def test_rma_issue_archives_and_keeps_ticket_at_rma_sent(
         get=get,
     )
 
-    transition = AsyncMock(side_effect=AssertionError("RMA archival must not close the ticket"))
+    async def close_ticket(_session, **kwargs):
+        assert kwargs["to_status_code"] == "closed"
+        assert kwargs["trigger_event"] == "rma_issued_and_archived"
+        ticket.current_status_code = "closed"
+        return ticket
+
+    transition = AsyncMock(side_effect=close_ticket)
     monkeypatch.setattr(replies, "transition_ticket", transition)
     monkeypatch.setattr(replies, "_ensure_reply_manual_task", AsyncMock())
 
@@ -83,7 +89,7 @@ async def test_rma_issue_archives_and_keeps_ticket_at_rma_sent(
     )
 
     assert finalized is True
-    assert ticket.current_status_code == "rma_sent"
+    assert ticket.current_status_code == "closed"
     assert ticket.rma_status == "issued"
     assert reply.archive_status == "archived"
     assert reply.archive_verified_at is not None
@@ -91,7 +97,7 @@ async def test_rma_issue_archives_and_keeps_ticket_at_rma_sent(
     assert rma.pdf_validation_status == "passed"
     assert rma.pdf_archive_status == "archived"
     assert rma.issued_at is not None
-    transition.assert_not_awaited()
+    transition.assert_awaited_once()
 
 
 @pytest.mark.anyio

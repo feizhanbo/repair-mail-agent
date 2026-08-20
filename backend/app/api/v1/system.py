@@ -10,15 +10,16 @@ from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
 from app.core.response import ok
-from app.models import AiCallLog, JobRunLog, MailFetchRecord, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition
-from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SapSnSyncApprovalRequest, SystemConfigUpdateRequest
+from app.models import AiCallLog, JobRunLog, MailFetchRecord, RepairTicket, ReplyRecord, ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition
+from app.schemas.business import ReplyTemplateCreateRequest, ReplyTemplateUpdateRequest, SapSnSyncApprovalRequest, SnSyncConfigUpdateRequest, SystemConfigUpdateRequest
 from app.services.ai import multimodal_ai_configured, text_ai_configured
+from app.services.audit import log_operation
 from app.services.common import model_to_dict
 from app.services.external_relay import relay_configuration_status
 from app.services.mail_test_preflight import MailTestPreflightError, run_mail_test_preflight
 from app.services.mail_safety import test_mail_configuration_reasons
 from app.services.rma_test_preflight import build_rma_test_preflight
-from app.services.runtime_config import read_runtime_config, write_runtime_config
+from app.services.runtime_config import apply_runtime_config, load_runtime_config, persist_runtime_config, read_runtime_config
 from app.services.sap_sn_sync import apply_sn_sync_batch, create_sn_sync_batch, serialize_sync_batch
 from app.services.storage import find_orphan_oss_objects
 
@@ -28,9 +29,10 @@ router = APIRouter()
 @router.post("/sap-sn-sync")
 async def start_sap_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     result = await create_sn_sync_batch(session, user_id=current_user.id)
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="SN full snapshot requested through compatibility endpoint", after_data=result)
     await session.commit()
     return ok(result, "SAP SN full snapshot completed")
 
@@ -39,7 +41,7 @@ async def start_sap_sn_sync(
 async def get_sap_sn_sync(
     batch_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     batch = await session.get(SapSnSyncBatch, batch_id)
@@ -53,7 +55,7 @@ async def approve_sap_sn_sync(
     batch_id: int,
     payload: SapSnSyncApprovalRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     try:
         result = await apply_sn_sync_batch(
@@ -80,6 +82,13 @@ def _config_payload() -> dict:
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
         "max_follow_up": runtime["max_follow_up"],
         "confidence_threshold": runtime["confidence_threshold"],
+        "imap_fetch_enabled": runtime["imap_fetch_enabled"],
+        "imap_poll_interval_minutes": runtime["imap_poll_interval_minutes"],
+        "imap_folder": runtime["imap_folder"],
+        "imap_fetch_limit": runtime["imap_fetch_limit"],
+        "imap_unseen_only": runtime["imap_unseen_only"],
+        "imap_max_retries": runtime["imap_max_retries"],
+        "imap_archive_to_oss": runtime["imap_archive_to_oss"],
         "environment_note": "仅允许测试邮箱发送；普通回复是主控，自动追问独立，RMA 开关只控制授权单附件。",
         "mail_test_static_ready": not mail_test_reasons,
         "mail_test_static_reasons": mail_test_reasons,
@@ -154,6 +163,7 @@ async def runtime_status(
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
+    await load_runtime_config(session)
     latest_imap = await session.scalar(
         select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
     )
@@ -165,6 +175,9 @@ async def runtime_status(
     )
     imap_retry_count = int(
         await session.scalar(select(func.count()).select_from(MailFetchRecord).where(MailFetchRecord.fetch_status == "retry_wait")) or 0
+    )
+    rma_sent_pending_closure = int(
+        await session.scalar(select(func.count()).select_from(RepairTicket).where(RepairTicket.current_status_code == "rma_sent")) or 0
     )
     orphan_objects = await find_orphan_oss_objects(session, limit=1000)
     provider_status: dict[str, dict | None] = {}
@@ -187,6 +200,7 @@ async def runtime_status(
         "failed_job_count": failed_jobs,
         "retry_job_count": retry_jobs,
         "imap_retry_count": imap_retry_count,
+        "rma_sent_pending_closure_count": rma_sent_pending_closure,
         "oss_orphan_count": len(orphan_objects),
         "oss_orphans_truncated": len(orphan_objects) >= 1000,
         "ai_provider_status": provider_status,
@@ -194,8 +208,12 @@ async def runtime_status(
 
 
 @router.get("/config")
-async def get_config(current_user: Annotated[CurrentUser, Depends(require_roles("admin"))]) -> dict:
+async def get_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> dict:
     del current_user
+    await load_runtime_config(session)
     return ok(_config_payload())
 
 
@@ -210,11 +228,11 @@ async def sqlserver_status(
 @router.patch("/config")
 async def update_config(
     payload: SystemConfigUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
-    del current_user
     values = payload.model_dump(exclude_unset=True)
-    current = read_runtime_config()
+    current = await load_runtime_config(session)
     enabling_send = any(
         values.get(key) is True and not bool(current.get(key))
         for key in ("auto_send_enabled", "auto_followup_enabled", "rma_auto_send_enabled")
@@ -227,8 +245,90 @@ async def update_config(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "MAIL_TEST_PREFLIGHT_REQUIRED", "data": {"preflight": exc.result}},
             ) from exc
-    write_runtime_config(values)
-    return ok(_config_payload(), "system config updated")
+    next_config = await persist_runtime_config(session, values, user_id=current_user.id)
+    await log_operation(
+        session,
+        user_id=current_user.id,
+        operation_type="system_config_updated",
+        target_type="system_config",
+        description="用户确认更新系统配置",
+        before_data=current,
+        after_data=next_config,
+    )
+    await session.commit()
+    apply_runtime_config(next_config)
+    result = _config_payload()
+    return ok(result, "system config updated")
+
+
+def _sn_sync_config_payload() -> dict:
+    runtime = read_runtime_config()
+    return {
+        "relay_sqlserver_enabled": runtime["relay_sqlserver_enabled"],
+        "relay_sn_sync_enabled": runtime["relay_sn_sync_enabled"],
+        "sn_schema": runtime["sn_schema"],
+        "sn_table": runtime["sn_table"],
+        "sn_primary_key": runtime["sn_primary_key"],
+        "sn_updated_at_column": runtime["sn_updated_at_column"],
+        "sn_column_map": runtime["sn_column_map"],
+        "batch_size": runtime["batch_size"],
+        "snapshot_max_age_hours": runtime["snapshot_max_age_hours"],
+        "connection": relay_configuration_status(),
+    }
+
+
+@router.get("/sn-sync/config")
+async def get_sn_sync_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    del current_user
+    await load_runtime_config(session)
+    return ok(_sn_sync_config_payload())
+
+
+@router.patch("/sn-sync/config")
+async def update_sn_sync_config(
+    payload: SnSyncConfigUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    values = payload.model_dump(exclude_unset=True)
+    current = await load_runtime_config(session)
+    next_config = await persist_runtime_config(session, values, user_id=current_user.id)
+    await log_operation(
+        session,
+        user_id=current_user.id,
+        operation_type="sn_sync_config_updated",
+        target_type="sn_sync_config",
+        description="用户确认更新SN同步配置",
+        before_data={key: current[key] for key in values},
+        after_data={key: next_config[key] for key in values},
+    )
+    await session.commit()
+    apply_runtime_config(next_config)
+    return ok(_sn_sync_config_payload(), "SN sync config updated")
+
+
+@router.post("/sn-sync")
+async def start_sn_sync(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    result = await create_sn_sync_batch(session, user_id=current_user.id)
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="用户从系统配置页面执行SN同步", after_data=result)
+    await session.commit()
+    return ok(result, "SN snapshot synchronized")
+
+
+@router.get("/sn-sync/latest")
+async def latest_sn_sync(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+) -> dict:
+    del current_user
+    batch = await session.scalar(select(SapSnSyncBatch).order_by(SapSnSyncBatch.id.desc()).limit(1))
+    return ok(serialize_sync_batch(batch) if batch else None)
 
 
 @router.post("/mail-test/preflight")
@@ -302,6 +402,8 @@ async def create_reply_template(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_ALREADY_EXISTS")
     template = ReplyTemplate(**values, created_by_user_id=current_user.id)
     session.add(template)
+    await session.flush()
+    await log_operation(session, user_id=current_user.id, operation_type="reply_template_created", target_type="reply_template", target_id=template.id, after_data=_reply_template_payload(template))
     await session.commit()
     await session.refresh(template)
     return ok(_reply_template_payload(template), "reply template created")
@@ -317,10 +419,13 @@ async def update_reply_template(
     template = await session.get(ReplyTemplate, template_id)
     if template is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_TEMPLATE_NOT_FOUND")
+    before = _reply_template_payload(template)
     values = payload.model_dump(exclude_unset=True)
     for key, value in values.items():
         setattr(template, key, value)
     template.created_by_user_id = template.created_by_user_id or current_user.id
+    await session.flush()
+    await log_operation(session, user_id=current_user.id, operation_type="reply_template_updated", target_type="reply_template", target_id=template.id, before_data=before, after_data=_reply_template_payload(template))
     await session.commit()
     await session.refresh(template)
     return ok(_reply_template_payload(template), "reply template updated")
@@ -332,7 +437,6 @@ async def delete_reply_template(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
-    del current_user
     template = await session.get(ReplyTemplate, template_id)
     if template is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_TEMPLATE_NOT_FOUND")
@@ -340,6 +444,7 @@ async def delete_reply_template(
     if references:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_TEMPLATE_IN_USE")
     payload = _reply_template_payload(template)
+    await log_operation(session, user_id=current_user.id, operation_type="reply_template_deleted", target_type="reply_template", target_id=template.id, before_data=payload)
     await session.delete(template)
     await session.commit()
     return ok({"deleted": True, "template": payload}, "reply template deleted")

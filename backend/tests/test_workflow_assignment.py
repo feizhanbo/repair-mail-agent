@@ -184,7 +184,7 @@ async def test_return_route_task_does_not_block_sap_ready_transition() -> None:
 
 @pytest.mark.anyio
 async def test_rma_sent_and_closed_cannot_bypass_evidence_gates() -> None:
-    unused_session = SimpleNamespace()
+    unused_session = SimpleNamespace(get=AsyncMock(return_value=None))
     ready = SimpleNamespace(
         id=1,
         current_status_code="ready_for_export",
@@ -211,7 +211,7 @@ async def test_rma_sent_and_closed_cannot_bypass_evidence_gates() -> None:
             trigger_event="rma_issued_and_archived",
             metadata={"closure_gates": {"smtp_sent": True}},
         )
-    assert close_error.value.detail == "DEVICE_INTAKE_CLOSURE_ENTRY_NOT_IMPLEMENTED"
+    assert close_error.value.detail == {"code": "RMA_CLOSURE_EVIDENCE_INCOMPLETE", "missing_facts": ["rma_reply_record"]}
 
 
 def test_manual_task_schema_rejects_legacy_close_action() -> None:

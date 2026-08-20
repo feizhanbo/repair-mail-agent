@@ -44,6 +44,10 @@ class FakeSession:
         self.committed = False
         self.executed = []
         self.scalar_statements = []
+        self.added = []
+
+    def add(self, value) -> None:
+        self.added.append(value)
 
     async def commit(self) -> None:
         self.committed = True
@@ -127,6 +131,9 @@ def test_expected_business_routes_are_registered() -> None:
     assert "POST /api/v1/emails/{email_id}/reparse" in routes
     assert "POST /api/v1/emails/{email_id}/reparse/jobs" in routes
     assert "GET /api/v1/emails/{email_id}/flow-trace" in routes
+    assert "GET /api/v1/emails/{email_id}/linked-tickets" in routes
+    assert "GET /api/v1/emails/{email_id}/delete-preview" in routes
+    assert "DELETE /api/v1/emails/{email_id}" in routes
     assert "POST /api/v1/emails/ingest/jobs" in routes
     assert "POST /api/v1/emails/ingest-eml/jobs" in routes
     assert "POST /api/v1/emails/fetch/jobs" in routes
@@ -136,6 +143,8 @@ def test_expected_business_routes_are_registered() -> None:
     assert "GET /api/v1/emails/attachments/{attachment_id}/download-url" in routes
     assert "PATCH /api/v1/tickets/{ticket_id}/fields" in routes
     assert "GET /api/v1/tickets/{ticket_id}/timeline" in routes
+    assert "GET /api/v1/tickets/{ticket_id}/delete-preview" in routes
+    assert "DELETE /api/v1/tickets/{ticket_id}" in routes
     assert "POST /api/v1/tickets/{ticket_id}/confirm-export" in routes
     assert "POST /api/v1/manual-review/tasks/{task_id}/reparse" in routes
     assert "POST /api/v1/replies/{ticket_id}/draft" in routes
@@ -146,6 +155,15 @@ def test_expected_business_routes_are_registered() -> None:
     assert "GET /api/v1/system/info" in routes
     assert "GET /api/v1/system/config" in routes
     assert "PATCH /api/v1/system/config" in routes
+    assert "GET /api/v1/master-data/sn-sync/config" in routes
+    assert "PATCH /api/v1/master-data/sn-sync/config" in routes
+    assert "POST /api/v1/master-data/sn-sync" in routes
+    assert "GET /api/v1/master-data/sn-sync/latest" in routes
+    assert "PATCH /api/v1/master-data/sn-assets/{asset_id}" in routes
+    assert "DELETE /api/v1/master-data/sn-assets/{asset_id}" in routes
+    assert "PATCH /api/v1/master-data/board-cards/{card_id}" in routes
+    assert "DELETE /api/v1/master-data/board-cards/{card_id}" in routes
+    assert "DELETE /api/v1/master-data/customer-policies/{policy_id}" in routes
     assert "GET /api/v1/system/reply-templates" in routes
     assert "POST /api/v1/system/reply-templates" in routes
     assert "PATCH /api/v1/system/reply-templates/{template_id}" in routes
@@ -628,7 +646,21 @@ def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "MAX_FOLLOW_UP", 2)
     async def passed_preflight() -> dict:
         return {"status": "passed", "messages_sent": 0}
+    current = {
+        **system_api.read_runtime_config(),
+        "auto_send_enabled": False,
+        "rma_auto_send_enabled": True,
+        "confidence_threshold": 0.8,
+        "max_follow_up": 2,
+    }
+    async def fake_load(_session):
+        return dict(current)
+    async def fake_persist(_session, values, *, user_id):
+        assert user_id == 7
+        return {**current, **values}
     monkeypatch.setattr(system_api, "run_mail_test_preflight", passed_preflight)
+    monkeypatch.setattr(system_api, "load_runtime_config", fake_load)
+    monkeypatch.setattr(system_api, "persist_runtime_config", fake_persist)
 
     with make_client(roles=["admin"]) as client:
         response = client.patch(

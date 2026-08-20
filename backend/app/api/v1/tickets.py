@@ -746,15 +746,6 @@ async def approve_rma_manual_policy(
     )
 
 
-@router.post("/{ticket_id}/confirm-device-received", deprecated=True)
-async def confirm_ticket_device_received(
-    ticket_id: int,
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
-) -> dict:
-    del ticket_id, current_user
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
-
-
 @router.post("/{ticket_id}/confirm-export", deprecated=True)
 async def confirm_export(
     ticket_id: int,
@@ -914,7 +905,6 @@ async def delete_ticket(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
     force_local_cleanup: bool = False,
 ) -> dict:
@@ -923,7 +913,7 @@ async def delete_ticket(
             session,
             ticket_id=ticket_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除工单",
             confirmation_token=confirmation_token,
             force_local_cleanup=force_local_cleanup,
         )

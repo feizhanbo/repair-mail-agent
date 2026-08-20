@@ -37,6 +37,7 @@ from app.services.mail_precheck import precheck_email_payload
 from app.services.common import utcnow
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services.jobs import enqueue_job, recover_stale_jobs, serialize_job
+from app.services.runtime_config import load_runtime_config
 from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,6 @@ async def list_emails(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -200,7 +200,6 @@ async def list_emails(
         page_size=page_size,
         parse_status=parse_status,
         intent_type=intent_type,
-        intent_subtype=intent_subtype,
         handling_level=handling_level,
         keyword=keyword,
         subject=subject,
@@ -212,13 +211,12 @@ async def list_emails(
     return page(items, total=total, page_no=page_no, page_size=page_size)
 
 
-@router.get("/export")
+@router.get("/export", deprecated=True, description="Compatibility API; hidden from the current mail-center UI.")
 async def export_emails(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -232,7 +230,6 @@ async def export_emails(
         session,
         parse_status=parse_status,
         intent_type=intent_type,
-        intent_subtype=intent_subtype,
         handling_level=handling_level,
         keyword=keyword,
         subject=subject,
@@ -248,7 +245,6 @@ async def export_emails(
         "from_address",
         "to_addresses",
         "intent_type",
-        "intent_subtype",
         "handling_level",
         "classification_version",
         "classification_confidence",
@@ -372,6 +368,7 @@ async def fetch_imap_status(
 ) -> dict:
     if not ({"admin", "operator"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    await load_runtime_config(session)
     latest = await session.scalar(
         select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
     )
@@ -446,7 +443,17 @@ async def get_email(
     return ok(await email_service.get_email_detail(session, email_id))
 
 
-@router.post("/ingest")
+@router.get("/{email_id}/linked-tickets")
+async def linked_tickets(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await email_service.get_linked_tickets(session, email_id))
+
+
+@router.post("/ingest", deprecated=True, description="Compatibility JSON ingest API; hidden from the current mail-center UI.")
 async def ingest_email(
     payload: EmailIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -488,7 +495,7 @@ async def ingest_email(
     return ok(result, "email ingested")
 
 
-@router.post("/ingest/jobs")
+@router.post("/ingest/jobs", deprecated=True, description="Compatibility JSON ingest job API; hidden from the current mail-center UI.")
 async def ingest_email_job(
     payload: EmailIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -543,7 +550,11 @@ async def ingest_email_job(
     return ok({"ingest": result, "job": serialize_job(job)}, "email archived and parse queued")
 
 
-@router.post("/ingest-eml")
+@router.post(
+    "/ingest-eml",
+    deprecated=True,
+    description="Compatibility EML ingest API; hidden from the current mail-center UI.",
+)
 async def ingest_eml(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -594,7 +605,11 @@ async def ingest_eml(
     return ok(result, "eml ingested")
 
 
-@router.post("/ingest-eml/jobs")
+@router.post(
+    "/ingest-eml/jobs",
+    deprecated=True,
+    description="Compatibility asynchronous EML ingest API; hidden from the current mail-center UI.",
+)
 async def ingest_eml_job(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -802,7 +817,6 @@ async def delete_attachment(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
 ) -> dict:
     try:
@@ -810,7 +824,7 @@ async def delete_attachment(
             session,
             attachment_id=attachment_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除附件",
             confirmation_token=confirmation_token,
         )
         if result["oss_status"] == "pending":
@@ -838,7 +852,6 @@ async def delete_email(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
     force_local_cleanup: bool = False,
 ) -> dict:
@@ -847,7 +860,7 @@ async def delete_email(
             session,
             email_id=email_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除邮件",
             confirmation_token=confirmation_token,
             force_local_cleanup=force_local_cleanup,
         )

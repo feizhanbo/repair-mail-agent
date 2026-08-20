@@ -13,10 +13,10 @@ from xml.etree import ElementTree
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BoardCard, JobRunLog, SnAsset
+from app.models import BoardCard, JobRunLog, RepairTicketItem, SnAsset, SnValidationResult
 from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.schemas.business import BoardCardImportItem, SnAssetImportItem
 from app.services.audit import log_operation
@@ -71,6 +71,115 @@ BOARD_CARD_FIELDS = (
 )
 
 EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+SN_ASSET_MUTABLE_FIELDS = {
+    "customer_code", "customer_name", "material_code", "material_name", "sn",
+    "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
+    "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
+}
+BOARD_CARD_MUTABLE_FIELDS = {
+    "board_code", "board_name", "return_location", "route_type", "customer_scope",
+    "material_code", "material_name", "need_ship_to_beijing", "shipping_address",
+    "shipping_contact", "shipping_phone", "postal_code", "status",
+}
+
+
+async def update_sn_asset(session: AsyncSession, *, asset_id: int, values: dict[str, Any], user_id: int, reason: str) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id, with_for_update=True)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    before = model_to_dict(asset, SN_ASSET_FIELDS)
+    payload = {key: value for key, value in values.items() if key in SN_ASSET_MUTABLE_FIELDS}
+    if "sn" in payload:
+        next_sn = str(payload["sn"] or "").strip().upper()
+        if not next_sn:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SN_REQUIRED")
+        if next_sn != asset.sn:
+            item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+            validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+            if item_refs or validation_refs:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "SN_IDENTITY_IN_USE", "references": item_refs + validation_refs})
+            duplicate = await session.scalar(select(SnAsset.id).where(SnAsset.sn == next_sn, SnAsset.id != asset.id))
+            if duplicate:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SN_ALREADY_EXISTS")
+        payload["sn"] = next_sn
+    for key in ("parent_sn", "top_sn"):
+        if key in payload and payload[key]:
+            payload[key] = str(payload[key]).strip().upper()
+    for key, value in payload.items():
+        setattr(asset, key, value)
+    await session.flush()
+    after = model_to_dict(asset, SN_ASSET_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="sn_asset_updated", target_type="sn_asset", target_id=asset.id, description=reason, before_data=before, after_data=after)
+    return after
+
+
+async def delete_sn_asset(session: AsyncSession, *, asset_id: int, user_id: int, reason: str) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id, with_for_update=True)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+    validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+    if item_refs or validation_refs:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "SN_ASSET_IN_USE", "references": {"ticket_items": item_refs, "validation_results": validation_refs}})
+    before = model_to_dict(asset, SN_ASSET_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="sn_asset_deleted", target_type="sn_asset", target_id=asset.id, description=reason, before_data=before)
+    await session.delete(asset)
+    await session.flush()
+    return {"deleted": True, "asset": before}
+
+
+async def preview_sn_asset_delete(session: AsyncSession, asset_id: int) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+    validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+    return {"resource_type": "sn_asset", "resource_id": asset.id, "affected_counts": {"ticket_items": item_refs, "validation_results": validation_refs}, "blockers": ["SN_ASSET_IN_USE"] if item_refs or validation_refs else [], "deletable": not (item_refs or validation_refs)}
+
+
+async def update_board_card(session: AsyncSession, *, card_id: int, values: dict[str, Any], user_id: int, reason: str) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id, with_for_update=True)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    before = model_to_dict(card, BOARD_CARD_FIELDS)
+    payload = {key: value for key, value in values.items() if key in BOARD_CARD_MUTABLE_FIELDS}
+    if "board_code" in payload:
+        payload["board_code"] = normalize_board_code(payload["board_code"])
+        payload["material_code"] = payload["board_code"]
+    if "board_name" in payload:
+        payload["board_name"] = normalize_board_name(payload["board_name"])
+        payload["material_name"] = payload["board_name"]
+    if "return_location" in payload:
+        payload["need_ship_to_beijing"] = payload["return_location"] == "beijing"
+    for key, value in payload.items():
+        setattr(card, key, value)
+    await session.flush()
+    after = model_to_dict(card, BOARD_CARD_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="board_card_updated", target_type="board_card", target_id=card.id, description=reason, before_data=before, after_data=after)
+    return after
+
+
+async def delete_board_card(session: AsyncSession, *, card_id: int, user_id: int, reason: str) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id, with_for_update=True)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.matched_board_card_id == card.id)) or 0)
+    if references:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "BOARD_CARD_IN_USE", "references": references})
+    before = model_to_dict(card, BOARD_CARD_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="board_card_deleted", target_type="board_card", target_id=card.id, description=reason, before_data=before)
+    await session.delete(card)
+    await session.flush()
+    return {"deleted": True, "board_card": before}
+
+
+async def preview_board_card_delete(session: AsyncSession, card_id: int) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.matched_board_card_id == card.id)) or 0)
+    return {"resource_type": "board_card", "resource_id": card.id, "affected_counts": {"ticket_items": references}, "blockers": ["BOARD_CARD_IN_USE"] if references else [], "deletable": not references}
 
 
 async def list_sn_assets(

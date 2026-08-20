@@ -26,7 +26,6 @@ class RuleAnalysisResult:
     confidence_score: float
     field_confidences: dict[str, float]
     evidence: dict[str, Any]
-    intent_subtype: str | None = None
     handling_level: str | None = None
     classification_version: str = CLASSIFICATION_VERSION
     classification_reason_code: str | None = None
@@ -34,7 +33,6 @@ class RuleAnalysisResult:
     def to_parse_payload(self) -> dict[str, Any]:
         return {
             "intent_type": self.intent_type,
-            "intent_subtype": self.intent_subtype,
             "handling_level": self.handling_level,
             "classification_version": self.classification_version,
             "classification_confidence": self.classification_confidence,
@@ -49,7 +47,6 @@ class RuleAnalysisResult:
                 **self.evidence,
                 "classification": {
                     "intent_type": self.intent_type,
-                    "intent_subtype": self.intent_subtype,
                     "confidence": self.classification_confidence,
                     "reason": self.classification_reason,
                 },
@@ -61,7 +58,6 @@ class RuleAnalysisResult:
     def summary(self) -> dict[str, Any]:
         return {
             "intent_type": self.intent_type,
-            "intent_subtype": self.intent_subtype,
             "classification_confidence": self.classification_confidence,
             "confidence_score": self.confidence_score,
             "field_keys": sorted(self.fields),
@@ -254,7 +250,6 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     decision = None if intent_type == "irrelevant" else decision_for_intent(intent_type, reason_code="RULE_CANDIDATE")
     return RuleAnalysisResult(
         intent_type=intent_type,
-        intent_subtype="general_irrelevant" if intent_type == "irrelevant" else None,
         classification_confidence=classification_confidence,
         classification_reason=classification_reason,
         body=extracted["body"],

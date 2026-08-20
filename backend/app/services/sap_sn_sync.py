@@ -102,7 +102,6 @@ async def create_sn_sync_batch(
     *,
     user_id: int | None = None,
 ) -> dict[str, Any]:
-    del user_id
     batch = SapSnSyncBatch(
         batch_no=f"SNSYNC-{utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
         status="syncing",
@@ -202,18 +201,7 @@ async def create_sn_sync_batch(
     batch.snapshot_hash = _hash(snapshot_rows)
     await session.flush()
 
-    if (
-        batch.count_change_percent is not None
-        and batch.count_change_percent > Decimal(str(settings.RELAY_SN_COUNT_CHANGE_GUARD_PERCENT))
-    ):
-        batch.status = "awaiting_approval"
-        batch.error_code = "SAP_SN_COUNT_CHANGE_REQUIRES_APPROVAL"
-        batch.finished_at = utcnow()
-        checkpoint.last_status = "awaiting_approval"
-        checkpoint.last_error_code = batch.error_code
-        return serialize_sync_batch(batch)
-
-    await apply_sn_sync_batch(session, batch_id=batch.id, user_id=None, reason=None, automatic=True)
+    await apply_sn_sync_batch(session, batch_id=batch.id, user_id=user_id, reason="SN 页面手动同步" if user_id else None, automatic=True)
     return serialize_sync_batch(batch)
 
 

@@ -8,7 +8,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CustomerServicePolicy
+from app.models import CustomerServicePolicy, RepairTicket
+from app.services.audit import log_operation
 from app.services.common import model_to_dict, utcnow
 
 
@@ -90,8 +91,11 @@ def _validate_policy_values(values: dict[str, Any]) -> None:
         )
     if Decimal(str(values.get("repair_price", 0))) < 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_REPAIR_PRICE_INVALID")
-    if not str(values.get("currency") or "").strip():
+    currency = str(values.get("currency") or "").strip().upper()
+    if not currency:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_CURRENCY_REQUIRED")
+    if currency not in {"RMB", "USD"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_CURRENCY_INVALID")
     if not str(values.get("shipping_fee_text") or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_SHIPPING_FEE_REQUIRED")
     if charge_status not in CHARGE_STATUSES:
@@ -164,7 +168,9 @@ async def create_policy(
 ) -> dict[str, Any]:
     payload = dict(values)
     payload["customer_code"] = str(payload.get("customer_code") or "").strip().upper()
-    payload["currency"] = str(payload.get("currency") or "CNY").strip().upper()
+    payload["currency"] = str(payload.get("currency") or "RMB").strip().upper()
+    if payload["currency"] == "CNY":
+        payload["currency"] = "RMB"
     payload["charge_status"] = str(
         payload.get("charge_status")
         or charge_status_for_policy_type(str(payload.get("policy_type") or ""))
@@ -186,6 +192,14 @@ async def create_policy(
     )
     session.add(policy)
     await session.flush()
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="customer_policy_created",
+        target_type="customer_service_policy",
+        target_id=policy.id,
+        after_data=serialize_policy(policy),
+    )
     return serialize_policy(policy)
 
 
@@ -194,11 +208,14 @@ async def update_policy(
     *,
     policy_id: int,
     values: dict[str, Any],
+    user_id: int,
+    reason: str,
 ) -> dict[str, Any]:
     policy = await session.get(CustomerServicePolicy, policy_id, with_for_update=True)
     if policy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POLICY_NOT_FOUND")
-    merged = serialize_policy(policy)
+    before = serialize_policy(policy)
+    merged = dict(before)
     merged.update({key: value for key, value in values.items() if key in POLICY_MUTABLE_FIELDS})
     if "policy_type" in values and "charge_status" not in values:
         merged["charge_status"] = charge_status_for_policy_type(
@@ -206,12 +223,69 @@ async def update_policy(
         )
     if "currency" in merged:
         merged["currency"] = str(merged["currency"] or "").strip().upper()
+        if merged["currency"] == "CNY":
+            merged["currency"] = "RMB"
     _validate_policy_values(merged)
     for key in POLICY_MUTABLE_FIELDS:
         if key in values:
             setattr(policy, key, merged[key])
     await session.flush()
-    return serialize_policy(policy)
+    after = serialize_policy(policy)
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="customer_policy_updated",
+        target_type="customer_service_policy",
+        target_id=policy.id,
+        description=reason,
+        before_data=before,
+        after_data=after,
+    )
+    return after
+
+
+async def delete_policy(
+    session: AsyncSession,
+    *,
+    policy_id: int,
+    user_id: int,
+    reason: str,
+) -> dict[str, Any]:
+    policy = await session.get(CustomerServicePolicy, policy_id, with_for_update=True)
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POLICY_NOT_FOUND")
+    references = int(
+        await session.scalar(
+            select(func.count()).select_from(RepairTicket).where(RepairTicket.service_policy_id == policy.id)
+        )
+        or 0
+    )
+    if references:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "CUSTOMER_POLICY_IN_USE", "references": references},
+        )
+    before = serialize_policy(policy)
+    await log_operation(
+        session,
+        user_id=user_id,
+        operation_type="customer_policy_deleted",
+        target_type="customer_service_policy",
+        target_id=policy.id,
+        description=reason,
+        before_data=before,
+    )
+    await session.delete(policy)
+    await session.flush()
+    return {"deleted": True, "policy": before}
+
+
+async def preview_policy_delete(session: AsyncSession, policy_id: int) -> dict[str, Any]:
+    policy = await session.get(CustomerServicePolicy, policy_id)
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POLICY_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(RepairTicket).where(RepairTicket.service_policy_id == policy.id)) or 0)
+    return {"resource_type": "customer_service_policy", "resource_id": policy.id, "affected_counts": {"repair_tickets": references}, "blockers": ["CUSTOMER_POLICY_IN_USE"] if references else [], "deletable": not references}
 
 
 def _policy_snapshot(policy: CustomerServicePolicy, *, source: str) -> dict[str, Any]:

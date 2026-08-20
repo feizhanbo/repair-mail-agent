@@ -247,7 +247,6 @@ def test_classification_issues_rejects_wrong_business_stage(tmp_path: Path) -> N
             {
                 "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
                 "intent_type": "new_repair",
-                "intent_subtype": None,
                 "ticket": {
                     "status": "manual_review",
                     "customer_code": "CM00001",
@@ -734,7 +733,7 @@ def test_assert_case_reads_contact_values_from_versioned_pdf_snapshot() -> None:
         },
     }
     value = {
-        "email_detail": {"email": {"intent_type": "new_repair", "intent_subtype": None}},
+        "email_detail": {"email": {"intent_type": "new_repair"}},
         "ticket_detail": {
             "ticket": {
                 "current_status_code": "rma_sent",

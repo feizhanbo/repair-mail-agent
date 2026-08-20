@@ -194,6 +194,12 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
         "trigger_event": "rma_reply_sent",
         "condition_desc": "SAP回填合法RMA编号且模板回复实际发送成功。",
     },
+    {
+        "from_status_code": "rma_sent",
+        "to_status_code": "closed",
+        "trigger_event": "rma_issued_and_archived",
+        "condition_desc": "RMA回复发送成功且PDF与出站EML归档核验完成。",
+    },
 )
 
 
@@ -526,7 +532,7 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "3. On your shipping invoice, please state \"No commercial value as sample\".\n"
             "4. Invoices and packing lists should avoid the following words: old, repaired, returned, used, and national.\n"
             "5. The recommended declared value is between USD 50 and USD 100.\n"
-            "6. If DHL is used and the value of the goods is less than CNY 5,000, please state \"NO KJ3\" in the commodity name.\n"
+            "6. If DHL is used and the value of the goods is less than RMB 5,000, please state \"NO KJ3\" in the commodity name.\n"
             "7. Please pack the boards separately. Place one or two boards in each box.\n\n"
             "Thank you for your cooperation!"
         ),
@@ -552,7 +558,7 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "3. On your shipping invoice, please state \"No commercial value as sample\".\n"
             "4. Invoices and packing lists should avoid the following words: old, repaired, returned, used, and national.\n"
             "5. The recommended declared value is between USD 50 and USD 100.\n"
-            "6. If DHL is used and the value of the goods is less than CNY 5,000, please state \"NO KJ3\" in the commodity name.\n"
+            "6. If DHL is used and the value of the goods is less than RMB 5,000, please state \"NO KJ3\" in the commodity name.\n"
             "7. Please pack the boards separately. Place one or two boards in each box.\n\n"
             "Thank you for your cooperation!"
         ),

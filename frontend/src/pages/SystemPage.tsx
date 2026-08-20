@@ -1,14 +1,17 @@
-import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
+import { ChangePreview } from '../components/FriendlyPreview';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
-import type { ReplyTemplate, SapSnSyncBatch, WorkflowStatus, WorkflowTransition } from '../types/api';
+import { useAuthStore } from '../stores/authStore';
+import type { ReplyTemplate, SnSyncConfig, WorkflowStatus, WorkflowTransition } from '../types/api';
 import { formatTime } from '../utils/format';
+import { hasAnyRole } from '../utils/roles';
 
 type ConfigForm = {
   auto_send_enabled: boolean;
@@ -18,7 +21,29 @@ type ConfigForm = {
   auto_send_min_confidence: number;
   confidence_threshold: number;
   max_follow_up: number;
+  imap_fetch_enabled: boolean;
+  imap_poll_interval_minutes: number;
+  imap_folder: string;
+  imap_fetch_limit: number;
+  imap_unseen_only: boolean;
+  imap_max_retries: number;
+  imap_archive_to_oss: boolean;
 };
+
+type SnConfigForm = Omit<SnSyncConfig, 'connection' | 'sn_column_map'>;
+type SnMappingRow = { key: string; localField: string; label: string; sourceColumn: string; required: boolean; example: string };
+
+const SN_FIELDS: Array<Omit<SnMappingRow, 'sourceColumn'>> = [
+  { key: 'sn', localField: 'sn', label: 'SN', required: true, example: 'SN00001234' },
+  { key: 'customer_code', localField: 'customer_code', label: '客户代码', required: true, example: 'C10001' },
+  { key: 'customer_name', localField: 'customer_name', label: '客户名称', required: true, example: '示例客户' },
+  { key: 'material_code', localField: 'material_code', label: 'SAP 物料代码', required: true, example: 'MAT-001' },
+  { key: 'material_name', localField: 'material_name', label: 'SAP 物料名称', required: false, example: '控制板卡' },
+  { key: 'asset_status', localField: 'asset_status', label: '资产状态', required: false, example: 'valid' },
+  { key: 'service_tracking_card_no', localField: 'service_tracking_card_no', label: '服务追踪卡号', required: false, example: 'STC-001' },
+  { key: 'parent_sn', localField: 'parent_sn', label: '上级 SN', required: false, example: 'PARENT-SN' },
+  { key: 'top_sn', localField: 'top_sn', label: 'Top SN', required: false, example: 'TOP-SN' },
+];
 
 type TemplateForm = {
   template_code: string;
@@ -33,31 +58,37 @@ type TemplateForm = {
 };
 
 export default function SystemPage() {
+  const canAdmin = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin']);
   const queryClient = useQueryClient();
   const [configForm] = Form.useForm<ConfigForm>();
   const [templateForm] = Form.useForm<TemplateForm>();
+  const [snConfigForm] = Form.useForm<SnConfigForm>();
+  const [snMappings, setSnMappings] = useState<SnMappingRow[]>(SN_FIELDS.map((field) => ({ ...field, sourceColumn: '' })));
   const [editingTemplate, setEditingTemplate] = useState<ReplyTemplate | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
-  const [snSyncResult, setSnSyncResult] = useState<SapSnSyncBatch | null>(null);
-  const [snSyncApprovalOpen, setSnSyncApprovalOpen] = useState(false);
-  const [snSyncApprovalReason, setSnSyncApprovalReason] = useState('');
   const systemQuery = useQuery({
     queryKey: ['system-info'],
     queryFn: api.systemInfo,
+    enabled: canAdmin,
   });
   const configQuery = useQuery({
     queryKey: ['system-config'],
     queryFn: api.systemConfig,
+    enabled: canAdmin,
   });
   const runtimeQuery = useQuery({
     queryKey: ['system-runtime-status'],
     queryFn: api.systemRuntimeStatus,
     refetchInterval: 10000,
+    enabled: canAdmin,
   });
   const templatesQuery = useQuery({
     queryKey: ['system-reply-templates'],
     queryFn: api.replyTemplates,
+    enabled: canAdmin,
   });
+  const snConfigQuery = useQuery({ queryKey: ['sn-sync-config'], queryFn: api.snSyncConfig });
+  const latestSnSyncQuery = useQuery({ queryKey: ['sn-sync-latest'], queryFn: api.latestSnSync, refetchInterval: 10000 });
   const configMutation = useMutation({
     mutationFn: (values: ConfigForm) => api.updateSystemConfig(values),
     onSuccess: () => {
@@ -67,28 +98,19 @@ export default function SystemPage() {
     },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
-  const mailPreflightMutation = useMutation({
-    mutationFn: api.mailTestPreflight,
-    onSuccess: (result) => message.success(`邮件预检通过，实际发送 ${result.messages_sent} 封邮件`),
+  const snConfigMutation = useMutation({
+    mutationFn: (values: Partial<SnSyncConfig>) => api.updateSnSyncConfig(values),
+    onSuccess: () => { message.success('SN 同步配置已保存'); void queryClient.invalidateQueries({ queryKey: ['sn-sync-config'] }); },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const snSyncMutation = useMutation({
-    mutationFn: api.startSapSnSync,
-    onSuccess: (result) => {
-      setSnSyncResult(result);
-      setSnSyncApprovalOpen(result.status === 'awaiting_approval');
-      message.success(result.status === 'succeeded' ? 'SAP SN 全量快照已生效' : 'SAP SN 快照已完成校验');
-    },
+    mutationFn: api.startSnSync,
+    onSuccess: () => { message.success('SN 同步任务已执行'); void queryClient.invalidateQueries({ queryKey: ['sn-sync-latest'] }); void queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); },
     onError: (error) => message.error(apiErrorMessage(error)),
   });
-  const snSyncApplyMutation = useMutation({
-    mutationFn: () => api.applySapSnSync(snSyncResult?.id as number, snSyncApprovalReason),
-    onSuccess: (result) => {
-      setSnSyncResult(result);
-      setSnSyncApprovalOpen(false);
-      setSnSyncApprovalReason('');
-      message.success('SAP SN 快照已由管理员确认生效');
-    },
+  const mailPreflightMutation = useMutation({
+    mutationFn: api.mailTestPreflight,
+    onSuccess: (result) => message.success(`邮件预检通过，实际发送 ${result.messages_sent} 封邮件`),
     onError: (error) => message.error(apiErrorMessage(error)),
   });
   const templateMutation = useMutation({
@@ -140,9 +162,21 @@ export default function SystemPage() {
         auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
         confidence_threshold: configQuery.data.confidence_threshold,
         max_follow_up: configQuery.data.max_follow_up,
+        imap_fetch_enabled: configQuery.data.imap_fetch_enabled,
+        imap_poll_interval_minutes: configQuery.data.imap_poll_interval_minutes,
+        imap_folder: configQuery.data.imap_folder,
+        imap_fetch_limit: configQuery.data.imap_fetch_limit,
+        imap_unseen_only: configQuery.data.imap_unseen_only,
+        imap_max_retries: configQuery.data.imap_max_retries,
+        imap_archive_to_oss: configQuery.data.imap_archive_to_oss,
       });
     }
   }, [configForm, configQuery.data]);
+  useEffect(() => {
+    if (!snConfigQuery.data) return;
+    snConfigForm.setFieldsValue(snConfigQuery.data);
+    setSnMappings(SN_FIELDS.map((field) => ({ ...field, sourceColumn: snConfigQuery.data.sn_column_map[field.localField] ?? '' })));
+  }, [snConfigForm, snConfigQuery.data]);
 
   const statusColumns: ColumnsType<WorkflowStatus> = [
     { title: '状态码', dataIndex: 'status_code', width: 170 },
@@ -216,6 +250,48 @@ export default function SystemPage() {
       <PageTitle title="系统配置" />
       <SectionPanel>
         <div className="section-heading">
+          <Typography.Title level={4}>SN 同步与配置</Typography.Title>
+          <Button type="primary" icon={<SyncOutlined spin={snSyncMutation.isPending} />} loading={snSyncMutation.isPending} onClick={() => Modal.confirm({
+            title: '确认执行 SN 全量同步？',
+            content: <Descriptions bordered size="small" column={1}><Descriptions.Item label="数据源">{String(snConfigQuery.data?.connection?.adapter ?? '未配置')}</Descriptions.Item><Descriptions.Item label="来源表">{snConfigQuery.data ? `${snConfigQuery.data.sn_schema}.${snConfigQuery.data.sn_table}` : '未配置'}</Descriptions.Item><Descriptions.Item label="说明">同步过程会校验重复 SN、必填字段和快照完整性，并写入审计记录。</Descriptions.Item></Descriptions>,
+            okText: '确认同步',
+            onOk: () => snSyncMutation.mutateAsync(),
+          })}>立即同步</Button>
+        </div>
+        {latestSnSyncQuery.data ? <Descriptions size="small" bordered column={4} style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="最近批次">{latestSnSyncQuery.data.batch_no}</Descriptions.Item>
+          <Descriptions.Item label="状态"><StatusTag value={latestSnSyncQuery.data.status} kind="sap" /></Descriptions.Item>
+          <Descriptions.Item label="来源 / 有效">{latestSnSyncQuery.data.source_count} / {latestSnSyncQuery.data.valid_count}</Descriptions.Item>
+          <Descriptions.Item label="重复数">{latestSnSyncQuery.data.duplicate_count}</Descriptions.Item>
+        </Descriptions> : <Alert type="info" showIcon message="暂无 SN 同步记录" style={{ marginBottom: 16 }} />}
+        <Form<SnConfigForm> form={snConfigForm} layout="vertical" onFinish={(values) => {
+          const sn_column_map = Object.fromEntries(snMappings.filter((row) => row.sourceColumn.trim()).map((row) => [row.localField, row.sourceColumn.trim()]));
+          const next = { ...values, sn_column_map };
+          Modal.confirm({ title: '确认修改 SN 同步配置？', width: 760, content: <ChangePreview before={snConfigQuery.data as unknown as Record<string, unknown>} after={{ ...values, sn_column_map: `${Object.keys(sn_column_map).length} 项字段映射` }} />, okText: '确认提交', onOk: () => snConfigMutation.mutateAsync(next) });
+        }}>
+          <Space wrap align="start">
+            <Form.Item label="启用 SQL Server 中转库" name="relay_sqlserver_enabled" valuePropName="checked"><Switch /></Form.Item>
+            <Form.Item label="启用 SN 同步" name="relay_sn_sync_enabled" valuePropName="checked"><Switch /></Form.Item>
+            <Form.Item label="来源 Schema" name="sn_schema" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item label="来源表" name="sn_table" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item label="SN 主键列" name="sn_primary_key" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item label="更新时间列" name="sn_updated_at_column"><Input /></Form.Item>
+            <Form.Item label="同步批量大小" name="batch_size" rules={[{ required: true }]}><InputNumber min={1} max={10000} /></Form.Item>
+            <Form.Item label="快照有效期（小时）" name="snapshot_max_age_hours" rules={[{ required: true }]}><InputNumber min={1} max={720} /></Form.Item>
+          </Space>
+          <Typography.Title level={5}>字段映射</Typography.Title>
+          <Table<SnMappingRow> rowKey="key" size="small" pagination={false} dataSource={snMappings} columns={[
+            { title: '本地业务字段', dataIndex: 'label', width: 180 },
+            { title: '来源数据库列', dataIndex: 'sourceColumn', render: (_, row) => <Input value={row.sourceColumn} placeholder="例如 SERIAL_NO" onChange={(event) => setSnMappings((items) => items.map((item) => item.key === row.key ? { ...item, sourceColumn: event.target.value } : item))} /> },
+            { title: '要求', dataIndex: 'required', width: 90, render: (value: boolean) => <Tag color={value ? 'red' : 'default'}>{value ? '必填' : '可选'}</Tag> },
+            { title: '示例值', dataIndex: 'example', width: 160 },
+          ]} />
+          <Button type="primary" htmlType="submit" loading={snConfigMutation.isPending} style={{ marginTop: 16 }}>保存 SN 配置</Button>
+        </Form>
+      </SectionPanel>
+      {canAdmin ? <>
+      <SectionPanel>
+        <div className="section-heading">
           <Typography.Title level={4}>运行配置</Typography.Title>
         </div>
         <Alert
@@ -237,7 +313,7 @@ export default function SystemPage() {
           form={configForm}
           layout="inline"
           className="filter-bar"
-          onFinish={(values) => configMutation.mutate(values)}
+          onFinish={(values) => Modal.confirm({ title: '确认修改系统配置？', width: 760, content: <ChangePreview before={configQuery.data as unknown as Record<string, unknown>} after={values as unknown as Record<string, unknown>} />, okText: '确认提交', onOk: () => configMutation.mutateAsync(values) })}
         >
           <Form.Item label="普通回复自动发送" name="auto_send_enabled" valuePropName="checked">
             <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_send_enabled} />
@@ -260,6 +336,13 @@ export default function SystemPage() {
           <Form.Item label="追问上限" name="max_follow_up" rules={[{ required: true }]}>
             <InputNumber min={0} max={20} precision={0} />
           </Form.Item>
+          <Form.Item label="自动收取邮件" name="imap_fetch_enabled" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item label="轮询周期（分钟）" name="imap_poll_interval_minutes" rules={[{ required: true }]}><InputNumber min={1} max={1440} /></Form.Item>
+          <Form.Item label="收件文件夹" name="imap_folder" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="单次收取上限" name="imap_fetch_limit" rules={[{ required: true }]}><InputNumber min={1} max={1000} /></Form.Item>
+          <Form.Item label="仅收取未读邮件" name="imap_unseen_only" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item label="失败重试次数" name="imap_max_retries" rules={[{ required: true }]}><InputNumber min={0} max={20} /></Form.Item>
+          <Form.Item label="归档原始邮件" name="imap_archive_to_oss" valuePropName="checked"><Switch /></Form.Item>
           <Button type="primary" htmlType="submit" loading={configMutation.isPending || configQuery.isFetching}>
             保存
           </Button>
@@ -285,6 +368,7 @@ export default function SystemPage() {
           <Descriptions.Item label="失败任务">{runtimeQuery.data?.failed_job_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="等待重试任务">{runtimeQuery.data?.retry_job_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="IMAP 待重试">{runtimeQuery.data?.imap_retry_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="待补齐归档证据工单">{runtimeQuery.data?.rma_sent_pending_closure_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="OSS 孤立对象">{runtimeQuery.data?.oss_orphan_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="最近 IMAP 状态">{runtimeQuery.data?.latest_imap_job?.status ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="最近 IMAP 失败数">{runtimeQuery.data?.latest_imap_job?.failed_count ?? '-'}</Descriptions.Item>
@@ -347,35 +431,6 @@ export default function SystemPage() {
       </SectionPanel>
       <SectionPanel>
         <div className="section-heading">
-          <Typography.Title level={4}>SAP SN 全量快照</Typography.Title>
-          <Button
-            type="primary"
-            loading={snSyncMutation.isPending}
-            onClick={() => snSyncMutation.mutate()}
-          >
-            手动读取并校验
-          </Button>
-        </div>
-        <Alert
-          type="info"
-          showIcon
-          message="定时同步默认关闭；取得 SAP 每日刷新完成时间后再配置 Cron。快照超过 36 小时会阻止自动导出。"
-          style={{ marginBottom: 12 }}
-        />
-        {snSyncResult ? (
-          <Descriptions column={3} size="small" bordered>
-            <Descriptions.Item label="批次">{snSyncResult.batch_no}</Descriptions.Item>
-            <Descriptions.Item label="状态"><StatusTag value={snSyncResult.status} kind="sap" /></Descriptions.Item>
-            <Descriptions.Item label="来源总数">{snSyncResult.source_count}</Descriptions.Item>
-            <Descriptions.Item label="有效数">{snSyncResult.valid_count}</Descriptions.Item>
-            <Descriptions.Item label="重复数">{snSyncResult.duplicate_count}</Descriptions.Item>
-            <Descriptions.Item label="数量变化">{snSyncResult.count_change_percent ? `${snSyncResult.count_change_percent}%` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="错误" span={3}>{snSyncResult.error_code || '-'}</Descriptions.Item>
-          </Descriptions>
-        ) : null}
-      </SectionPanel>
-      <SectionPanel>
-        <div className="section-heading">
           <Typography.Title level={4}>状态定义</Typography.Title>
         </div>
         <Table<WorkflowStatus>
@@ -401,28 +456,6 @@ export default function SystemPage() {
         />
       </SectionPanel>
       <Modal
-        title="确认应用数量变化超过 5% 的 SN 快照"
-        open={snSyncApprovalOpen}
-        onCancel={() => setSnSyncApprovalOpen(false)}
-        onOk={() => snSyncApplyMutation.mutate()}
-        confirmLoading={snSyncApplyMutation.isPending}
-        okButtonProps={{ disabled: snSyncApprovalReason.trim().length < 3 }}
-      >
-        <Alert
-          type="warning"
-          showIcon
-          message={`上一批 ${snSyncResult?.previous_count ?? '-'} 条，本批 ${snSyncResult?.source_count ?? '-'} 条，变化 ${snSyncResult?.count_change_percent ?? '-'}%。`}
-          style={{ marginBottom: 12 }}
-        />
-        <Input.TextArea
-          rows={4}
-          value={snSyncApprovalReason}
-          onChange={(event) => setSnSyncApprovalReason(event.target.value)}
-          placeholder="填写管理员确认依据（至少 3 个字符）"
-          maxLength={500}
-        />
-      </Modal>
-      <Modal
         title={editingTemplate ? '编辑回复话术' : '新增回复话术'}
         open={templateModalOpen}
         onCancel={() => {
@@ -437,8 +470,15 @@ export default function SystemPage() {
             form={templateForm}
             layout="vertical"
             onFinish={(values) => {
-              if (editingTemplate) templateMutation.mutate({ id: editingTemplate.id, values });
-              else templateCreateMutation.mutate(values);
+              Modal.confirm({
+                title: editingTemplate ? '确认修改回复话术？' : '确认新增回复话术？',
+                width: 680,
+                content: <ChangePreview before={(editingTemplate ?? {}) as unknown as Record<string, unknown>} after={values as unknown as Record<string, unknown>} />,
+                okText: '确认提交',
+                onOk: () => editingTemplate
+                  ? templateMutation.mutateAsync({ id: editingTemplate.id, values })
+                  : templateCreateMutation.mutateAsync(values),
+              });
             }}
           >
             <Form.Item label="编码" name="template_code" rules={[{ required: true }]}>
@@ -480,6 +520,7 @@ export default function SystemPage() {
           </Form>
         ) : null}
       </Modal>
+      </> : null}
     </div>
   );
 }

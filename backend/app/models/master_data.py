@@ -110,7 +110,7 @@ class CustomerServicePolicy(TimestampMixin, Base):
     effective_from: Mapped[date | None] = mapped_column(mysql.DATE)
     effective_until: Mapped[date | None] = mapped_column(mysql.DATE)
     repair_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default="0")
-    currency: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNY")
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, server_default="RMB")
     tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, server_default="13")
     shipping_fee_text: Mapped[str] = mapped_column(
         String(100),

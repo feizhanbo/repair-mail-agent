@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
@@ -19,7 +20,7 @@ from app.services.ai import maintain_ai_jsonl_logs
 from app.services.jobs import claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
 from app.services.notification_task_repair import repair_notification_and_task_data
 from app.services.rma_pdf import validate_rma_runtime_health
-from app.services.runtime_config import read_runtime_config
+from app.services.runtime_config import load_runtime_config, read_runtime_config
 from app.services.common import utcnow
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,15 @@ def setup_logging():
 
 
 async def _scheduled_imap_fetch():
-    if not settings.IMAP_FETCH_ENABLED:
-        logger.info("Scheduled IMAP fetch skipped: IMAP_FETCH_ENABLED=false")
-        return
     try:
         async with AsyncSessionLocal() as session:
+            await load_runtime_config(session)
+            if not settings.IMAP_FETCH_ENABLED:
+                logger.info("Scheduled IMAP fetch skipped: IMAP_FETCH_ENABLED=false")
+                return
+            if not settings.IMAP_ARCHIVE_TO_OSS:
+                logger.error("Scheduled IMAP fetch skipped: IMAP_ARCHIVE_TO_OSS must be true")
+                return
             interval = max(1, settings.IMAP_POLL_INTERVAL_MINUTES)
             now = utcnow()
             bucket = now.replace(minute=(now.minute // interval) * interval, second=0, microsecond=0)
@@ -127,7 +132,16 @@ async def lifespan(app: FastAPI):
         settings.APP_ENV,
         settings.MULTIMODAL_PROVIDER,
     )
-    read_runtime_config()
+    try:
+        async with AsyncSessionLocal() as config_session:
+            await load_runtime_config(config_session)
+            await config_session.commit()
+    except SQLAlchemyError:
+        # Health/error routes and isolated API contract tests must still start
+        # when the database is temporarily unavailable. Business endpoints will
+        # continue to report the database error; settings use safe env defaults.
+        logger.exception("Database-backed runtime config unavailable at startup; using safe defaults")
+        read_runtime_config()
     rma_health = validate_rma_runtime_health()
     logger.info(
         "RMA PDF runtime healthy: template_version=%s template_sha256=%s cjk_font=%s",
@@ -136,18 +150,18 @@ async def lifespan(app: FastAPI):
         rma_health["cjk_font"],
     )
     scheduler = AsyncIOScheduler()
-    if settings.IMAP_FETCH_ENABLED and settings.IMAP_ARCHIVE_TO_OSS:
-        scheduler.add_job(
-            _scheduled_imap_fetch,
-            "interval",
-            minutes=settings.IMAP_POLL_INTERVAL_MINUTES,
-            id="imap_poll",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-    elif settings.IMAP_FETCH_ENABLED:
-        logger.error("IMAP scheduler disabled: IMAP_ARCHIVE_TO_OSS must be true")
+    # Run the lightweight gate every minute so database-backed enable/interval
+    # changes become effective without restarting the process. The idempotency
+    # bucket inside _scheduled_imap_fetch enforces the configured interval.
+    scheduler.add_job(
+        _scheduled_imap_fetch,
+        "interval",
+        minutes=1,
+        id="imap_poll",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     scheduler.add_job(
         _scheduled_job_worker,
         "interval",

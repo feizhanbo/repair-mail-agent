@@ -169,7 +169,6 @@ export type EmailItem = {
   parse_status: string;
   processing_stage?: string;
   intent_type?: string | null;
-  intent_subtype?: string | null;
   handling_level?: string | null;
   classification_version?: string | null;
   classification_confidence?: number | null;
@@ -214,7 +213,6 @@ export type ParseResult = {
   parser_type: string;
   parser_version?: string | null;
   intent_type?: string | null;
-  intent_subtype?: string | null;
   handling_level?: string | null;
   classification_version?: string | null;
   classification_confidence?: number | null;
@@ -240,6 +238,28 @@ export type EmailDetail = {
   email: EmailItem;
   attachments: Attachment[];
   parse_results: ParseResult[];
+};
+
+export type LinkedTicket = {
+  ticket_id: number;
+  ticket_no: string;
+  current_status_code: string;
+  link_type: string;
+  link_reason?: string | null;
+  created_at?: string;
+};
+
+export type DeletePreview = {
+  resource_type: string;
+  resource_id: number;
+  resource_version?: number | null;
+  affected_counts: Record<string, number>;
+  blockers: Array<string | { code?: string; message?: string }>;
+  oss_objects?: unknown[];
+  deletable: boolean;
+  confirmation_token?: string | null;
+  irreversible_effects?: unknown[];
+  force_local_cleanup_available?: boolean;
 };
 
 export type EmailIngestResult = {
@@ -520,6 +540,9 @@ export type SapExportSummary = {
   accepted_count: number;
   rma_received_count: number;
   failed_count: number;
+  unit_price_meaning?: string;
+  repair_total?: number | string;
+  currency?: string | null;
 };
 
 export type SapExportLine = {
@@ -755,6 +778,19 @@ export type BoardCard = {
   status: string;
 };
 
+export type SnSyncConfig = {
+  relay_sqlserver_enabled: boolean;
+  relay_sn_sync_enabled: boolean;
+  sn_schema: string;
+  sn_table: string;
+  sn_primary_key: string;
+  sn_updated_at_column: string;
+  sn_column_map: Record<string, string>;
+  batch_size: number;
+  snapshot_max_age_hours: number;
+  connection: JsonRecord;
+};
+
 export type AiLog = {
   id: number;
   trace_id: string;
@@ -897,6 +933,13 @@ export type SystemConfig = {
   auto_send_min_confidence: number;
   max_follow_up: number;
   confidence_threshold: number;
+  imap_fetch_enabled: boolean;
+  imap_poll_interval_minutes: number;
+  imap_folder: string;
+  imap_fetch_limit: number;
+  imap_unseen_only: boolean;
+  imap_max_retries: number;
+  imap_archive_to_oss: boolean;
   environment_note?: string;
   mail_test_static_ready?: boolean;
   mail_test_static_reasons?: string[];
@@ -953,6 +996,7 @@ export type SystemRuntimeStatus = {
   failed_job_count: number;
   retry_job_count: number;
   imap_retry_count: number;
+  rma_sent_pending_closure_count?: number;
   oss_orphan_count: number;
   oss_orphans_truncated: boolean;
   ai_provider_status: Record<string, { status: string; model: string; error_code?: string | null; latency_ms?: number | null; created_at?: string | null } | null>;
