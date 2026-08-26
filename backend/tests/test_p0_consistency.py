@@ -122,12 +122,16 @@ def test_log_payload_redacts_secrets_content_and_signed_query() -> None:
     payload = sanitize_log_payload(
         {
             "api_key": "secret-value",
+            "input_tokens": 321,
             "body": "customer mail body",
+            "reason_code": "INVALID_CREDENTIALS",
             "url": "https://oss.example/file?OSSAccessKeyId=abc&Signature=def",
         }
     )
     assert payload["api_key"] == "[REDACTED]"
+    assert payload["input_tokens"] == 321
     assert payload["body"]["redacted"] is True
+    assert payload["reason_code"] == "INVALID_CREDENTIALS"
     serialized = str(payload)
     assert "customer mail body" not in serialized
     assert "secret-value" not in serialized

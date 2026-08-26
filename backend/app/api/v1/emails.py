@@ -240,7 +240,6 @@ async def export_emails(
     received_start: date | None = None,
     received_end: date | None = None,
 ) -> Response:
-    del current_user
     rows = await email_service.export_emails(
         session,
         parse_status=parse_status,
@@ -272,6 +271,16 @@ async def export_emails(
         "latest_missing_fields",
         "latest_conflict_fields",
     ]
+    await log_operation(
+        session, user_id=current_user.id, operation_type="emails_exported",
+        target_type="email_export", description="用户导出邮件业务数据。",
+        after_data={"row_count": len(rows), "filter_keys": sorted(key for key, value in {
+            "parse_status": parse_status, "intent_type": intent_type, "handling_level": handling_level,
+            "keyword": keyword, "subject": subject, "from_address": from_address,
+            "message_id": message_id, "received_start": received_start, "received_end": received_end,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=await asyncio.to_thread(xlsx_bytes, rows, fieldnames),
         media_type=EXCEL_MEDIA_TYPE,
@@ -283,7 +292,6 @@ async def export_emails(
 async def get_classification_catalog(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    del current_user
     return ok(classification_catalog())
 
 
@@ -304,7 +312,6 @@ async def raw_eml_download_url(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     expires_seconds: int = Query(3600, ge=60, le=86400),
 ) -> dict:
-    del current_user
     email = await session.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
@@ -316,6 +323,12 @@ async def raw_eml_download_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
     except StorageUploadError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
+    await log_operation(
+        session, user_id=current_user.id, operation_type="raw_email_download_url_created",
+        target_type="email", target_id=email.id, email_id=email.id,
+        after_data={"oss_object_id": email.raw_eml_oss_object_id, "expires_seconds": expires_seconds},
+    )
+    await session.commit()
     return ok(
         {
             "object_id": email.raw_eml_oss_object_id,
@@ -333,7 +346,6 @@ async def attachment_download_url(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     expires_seconds: int = Query(3600, ge=60, le=86400),
 ) -> dict:
-    del current_user
     attachment = await session.get(EmailAttachment, attachment_id)
     if attachment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ATTACHMENT_NOT_FOUND")
@@ -345,6 +357,12 @@ async def attachment_download_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
     except StorageUploadError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
+    await log_operation(
+        session, user_id=current_user.id, operation_type="attachment_download_url_created",
+        target_type="email_attachment", target_id=attachment.id, email_id=attachment.email_id,
+        after_data={"oss_object_id": attachment.oss_object_id, "expires_seconds": expires_seconds},
+    )
+    await session.commit()
     return ok(
         {
             "attachment_id": attachment.id,

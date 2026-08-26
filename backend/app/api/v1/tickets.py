@@ -119,7 +119,6 @@ async def export_tickets(
     request_date_start: date | None = None,
     request_date_end: date | None = None,
 ) -> Response:
-    del current_user
     rows = await ticket_service.export_tickets(
         session,
         status_code=status_code,
@@ -153,6 +152,17 @@ async def export_tickets(
         "updated_at",
     ]
     content = await asyncio.to_thread(xlsx_bytes, rows, fieldnames)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="tickets_exported",
+        target_type="ticket_export", description="用户导出工单业务数据。",
+        after_data={"row_count": len(rows), "filter_keys": sorted(key for key, value in {
+            "status_code": status_code, "keyword": keyword, "ticket_no": ticket_no,
+            "customer": customer, "contact": contact, "sn": sn,
+            "assigned_user_id": assigned_user_id, "request_date_start": request_date_start,
+            "request_date_end": request_date_end,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -166,8 +176,13 @@ async def export_selected_tickets(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> Response:
-    del current_user
     content = await ticket_service.export_tickets_selected(session, ids=payload.ids)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="tickets_exported",
+        target_type="ticket_export", description="用户导出选中的工单业务数据。",
+        after_data={"selected_count": len(payload.ids), "selected_ids": payload.ids},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,

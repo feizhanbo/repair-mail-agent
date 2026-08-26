@@ -6,6 +6,7 @@ import html
 import logging
 import re
 import smtplib
+import time
 from datetime import date, timedelta
 from email.message import EmailMessage
 from email.utils import getaddresses, make_msgid, parseaddr
@@ -613,6 +614,7 @@ def _send_reply_via_smtp(
         )
     elif str(message.get("Message-ID") or "") != message_id:
         return False, None, "SMTP_MESSAGE_ID_MISMATCH"
+    started = time.monotonic()
     try:
         with _smtp_client() as smtp:
             if settings.SMTP_PORT == 587:
@@ -624,7 +626,19 @@ def _send_reply_via_smtp(
             if not _smtp_sender_is_exact_login() or not _rma_envelope_valid(reply):
                 return False, None, "SMTP_ENVELOPE_RECHECK_FAILED"
             smtp.send_message(message)
-    except Exception:
+    except Exception as exc:
+        logger.exception(
+            "SMTP transport failed after send was attempted",
+            extra={
+                "event": "smtp_send_failed", "ticket_id": reply.ticket_id,
+                "reply_record_id": reply.id, "smtp_host": settings.SMTP_HOST,
+                "smtp_port": settings.SMTP_PORT,
+                "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
+                "smtp_status": "uncertain", "smtp_response_code": getattr(exc, "smtp_code", None),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": "SMTP_SEND_FAILED_UNCERTAIN",
+            },
+        )
         return False, None, "SMTP_SEND_FAILED_UNCERTAIN"
     return True, message_id, None
 
@@ -1526,11 +1540,38 @@ async def _send_reply_record(
     else:
         reply.send_status = "auto_sending" if auto else "sending"
         await _commit_if_available(session)
+        smtp_started = time.monotonic()
+        logger.info(
+            "SMTP send started",
+            extra={
+                "event": "smtp_send_started", "ticket_id": ticket.id, "reply_record_id": reply.id,
+                "smtp_host": settings.SMTP_HOST, "smtp_port": settings.SMTP_PORT,
+                "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
+                "attachment_count": 1 if attachment_content else 0,
+                "attempt": int(reply.send_attempt_count or 0) + 1,
+            },
+        )
         async with _smtp_semaphore:
             ok, sent_message_id, error = await asyncio.to_thread(
                 _send_reply_via_smtp,
                 reply,
                 message=outbound_message,
+            )
+        smtp_duration_ms = int((time.monotonic() - smtp_started) * 1000)
+        # Transport exceptions are logged with traceback inside the sync SMTP
+        # boundary. Other failures are deterministic policy/configuration
+        # outcomes and are recorded here without a duplicate traceback event.
+        if error != "SMTP_SEND_FAILED_UNCERTAIN":
+            (logger.info if ok else logger.error)(
+                "SMTP send completed" if ok else "SMTP send failed",
+                extra={
+                    "event": "smtp_send_completed" if ok else "smtp_send_failed",
+                    "ticket_id": ticket.id, "reply_record_id": reply.id,
+                    "smtp_host": settings.SMTP_HOST, "smtp_port": settings.SMTP_PORT,
+                    "duration_ms": smtp_duration_ms, "message_id": sent_message_id,
+                    "smtp_status": "accepted" if ok else "rejected",
+                    "smtp_response_code": None, "error_code": error,
+                },
             )
     if ok and sent_message_id:
         was_counted = reply.send_status == "sent"

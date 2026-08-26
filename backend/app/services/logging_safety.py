@@ -33,6 +33,7 @@ _SIGNED_QUERY = re.compile(
     r"([?&](?:OSSAccessKeyId|Signature|Expires|x-oss-[^=]+)=[^&\s]+)",
     flags=re.IGNORECASE,
 )
+_SAFE_TOKEN_METRIC_KEYS = {"input_tokens", "output_tokens", "total_tokens", "token_count"}
 
 
 def text_fingerprint(value: str) -> dict[str, Any]:
@@ -72,10 +73,14 @@ def safe_error_code(error: Exception | str | None, default: str = "INTERNAL_ERRO
 
 def sanitize_log_payload(value: Any, *, key: str = "") -> Any:
     lowered = key.lower()
+    if lowered in _SAFE_TOKEN_METRIC_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
     if any(part in lowered for part in _SECRET_KEY_PARTS):
         return "[REDACTED]"
 
     if isinstance(value, str):
+        if lowered.endswith("_code") and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{1,99}", value):
+            return value
         if any(part in lowered for part in _CONTENT_KEY_PARTS):
             return text_fingerprint(value)
         return _SIGNED_QUERY.sub("[REDACTED_QUERY]", value)[:2000]

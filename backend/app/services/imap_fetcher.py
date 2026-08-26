@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import imaplib
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
@@ -38,6 +39,7 @@ class ImapFetchError(RuntimeError):
 _mail_io_semaphore = asyncio.Semaphore(max(1, settings.MAIL_IO_CONCURRENCY))
 _RETRY_MINUTES = (5, 15, 60, 180, 720)
 _IMAP_LOCK_NAME = "repair_mail_agent_imap_fetch"
+logger = logging.getLogger(__name__)
 
 
 async def _mail_io(func, *args, **kwargs):
@@ -332,6 +334,13 @@ async def fetch_imap_emails(
         )
         session.add(job)
         await session.flush()
+    logger.info(
+        "IMAP fetch started",
+        extra={
+            "event": "imap_fetch_started", "job_run_id": job.id, "mailbox": settings.IMAP_USER,
+            "folder": folder_name, "fetch_limit": limit, "unseen_only": unseen_only,
+        },
+    )
     job.metadata_json = {
         **dict(job.metadata_json or {}),
         "folder_name": folder_name,
@@ -462,6 +471,13 @@ async def fetch_imap_emails(
                 job.success_count += 1
                 await _commit(session)
             except Exception as exc:
+                logger.exception(
+                    "IMAP message processing failed",
+                    extra={
+                        "event": "imap_message_failed", "job_run_id": job_id, "imap_uid": uid,
+                        "folder": folder_name, "error_type": exc.__class__.__name__,
+                    },
+                )
                 await _rollback(session)
                 job = await session.get(JobRunLog, job_id, with_for_update=True)
                 if job is None:
@@ -508,6 +524,10 @@ async def fetch_imap_emails(
         job.error_code = safe_error_code(exc, "IMAP_FETCH_FAILED")
         job.error_message = exc.__class__.__name__
         await _commit(session)
+        logger.exception(
+            "IMAP fetch failed",
+            extra={"event": "imap_fetch_failed", "job_run_id": job.id, "folder": folder_name, "error_code": job.error_code},
+        )
         raise
     finally:
         job.finished_at = utcnow()
@@ -526,6 +546,16 @@ async def fetch_imap_emails(
                 await _mail_io(client.logout)
             except Exception:
                 pass
+
+    (logger.info if not failures else logger.warning)(
+        "IMAP fetch completed",
+        extra={
+            "event": "imap_fetch_completed", "job_run_id": job.id, "folder": folder_name,
+            "processed_count": job.processed_count, "success_count": job.success_count,
+            "failed_count": job.failed_count, "skipped_count": skipped_count,
+            "duration_ms": job.duration_ms, "status": job.status,
+        },
+    )
 
     return {
         "job_id": job.id,

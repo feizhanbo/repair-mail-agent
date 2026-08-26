@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import time
 from datetime import date, datetime
 from typing import Any, Sequence
 from uuid import UUID
@@ -22,6 +24,45 @@ from app.integrations.sap_middleware.contracts import (
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
+logger = logging.getLogger(__name__)
+
+
+def _sqlserver_error_code(exc: BaseException) -> str:
+    current: BaseException | None = exc
+    text = ""
+    for _ in range(4):
+        if current is None:
+            break
+        text += " " + " ".join(str(item) for item in getattr(current, "args", ()))
+        current = current.__cause__
+    value = text.upper()
+    if any(token in value for token in ("NAME OR SERVICE NOT KNOWN", "HOST NOT FOUND", "DNS")):
+        return "SQLSERVER_DNS_FAILED"
+    if any(code in value for code in ("28000", "18456", "LOGIN FAILED")):
+        return "SQLSERVER_LOGIN_FAILED"
+    if "TLS" in value or "CERTIFICATE" in value or "SSL PROVIDER" in value:
+        return "SQLSERVER_TLS_FAILED"
+    if any(code in value for code in ("LOGIN TIMEOUT", "CONNECTION TIMEOUT", "CONNECT TIMEOUT")):
+        return "SQLSERVER_CONNECTION_TIMEOUT"
+    if any(code in value for code in ("HYT00", "HYT01", "TIMEOUT")):
+        return "SQLSERVER_QUERY_TIMEOUT"
+    if any(code in value for code in ("08S01", "08001", "TCP", "CONNECTION REFUSED", "CONNECTION RESET")):
+        return "SQLSERVER_CONNECTION_FAILED"
+    if any(code in value for code in ("40001", "1205", "DEADLOCK")):
+        return "SQLSERVER_DEADLOCK"
+    if any(code in value for code in ("2627", "2601", "DUPLICATE")):
+        return "SQLSERVER_DUPLICATE"
+    if "23000" in value or "CONSTRAINT" in value:
+        return "SQLSERVER_CONSTRAINT_VIOLATION"
+    if any(token in value for token in ("NO DATA FOUND", "DATA NOT FOUND", "NO ROW", "NOT FOUND")):
+        return "SQLSERVER_DATA_NOT_FOUND"
+    if isinstance(exc, SapSchemaMismatchError):
+        return "SQLSERVER_SCHEMA_MISMATCH"
+    if isinstance(exc, SapUnknownCommitStateError):
+        return "SQLSERVER_COMMIT_UNKNOWN"
+    if isinstance(exc, SapTransactionError):
+        return "SQLSERVER_TRANSACTION_ROLLBACK"
+    return "SQLSERVER_OPERATION_FAILED"
 _SN_LOCAL_FIELDS = {
     "sn",
     "customer_code",
@@ -175,7 +216,18 @@ class SqlServerSapMiddlewareAdapter:
         return ConnectionHealth(True, "configured", details={"adapter": "sqlserver"})
 
     async def check_connection(self) -> ConnectionHealth:
-        return await asyncio.to_thread(self._check_sync)
+        started = time.monotonic()
+        logger.info("SAP SQL Server preflight started", extra={"event": "sap_preflight_started"})
+        result = await asyncio.to_thread(self._check_sync)
+        (logger.info if result.configured else logger.error)(
+            "SAP SQL Server preflight completed",
+            extra={
+                "event": "sap_preflight_completed" if result.configured else "sap_preflight_failed",
+                "status": result.status, "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": None if result.configured else "SQLSERVER_UNAVAILABLE",
+            },
+        )
+        return result
 
     def _sn_mapping(self) -> tuple[dict[str, str], list[str]]:
         mapping = dict(settings.RELAY_SQLSERVER_SN_COLUMN_MAP or {})
@@ -223,7 +275,21 @@ class SqlServerSapMiddlewareAdapter:
         return records
 
     async def fetch_all_sn_records(self) -> Sequence[ExternalSnRecord]:
-        return await asyncio.to_thread(self._fetch_all_sn_sync)
+        started = time.monotonic()
+        logger.info("SAP SN sync started", extra={"event": "sap_sn_sync_started"})
+        try:
+            rows = await asyncio.to_thread(self._fetch_all_sn_sync)
+        except Exception as exc:
+            logger.exception(
+                "SAP SN sync failed",
+                extra={"event": "sap_sn_sync_failed", "error_code": _sqlserver_error_code(exc), "duration_ms": int((time.monotonic() - started) * 1000)},
+            )
+            raise
+        logger.info(
+            "SAP SN sync completed",
+            extra={"event": "sap_sn_sync_completed", "total": len(rows), "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
+        return rows
 
     def _submit_sync(self, items: Sequence[ExternalRmaSubmissionItem]) -> None:
         if not items:
@@ -263,12 +329,22 @@ class SqlServerSapMiddlewareAdapter:
             connection.close()
 
     async def submit_rma_batch(self, items: Sequence[ExternalRmaSubmissionItem]) -> None:
-        health = await self.check_connection()
-        if not health.configured:
-            raise SapSchemaMismatchError(
-                "SAP_MIDDLEWARE_PREFLIGHT_FAILED:" + str(health.details.get("error") or health.status)
+        started = time.monotonic()
+        logger.info("SAP submit started", extra={"event": "sap_submit_started", "batch_size": len(items)})
+        try:
+            health = await self.check_connection()
+            if not health.configured:
+                raise SapSchemaMismatchError(
+                    "SAP_MIDDLEWARE_PREFLIGHT_FAILED:" + str(health.details.get("error") or health.status)
+                )
+            await asyncio.to_thread(self._submit_sync, items)
+        except Exception as exc:
+            logger.exception(
+                "SAP submit failed",
+                extra={"event": "sap_submit_failed", "batch_size": len(items), "error_code": _sqlserver_error_code(exc), "duration_ms": int((time.monotonic() - started) * 1000)},
             )
-        await asyncio.to_thread(self._submit_sync, items)
+            raise
+        logger.info("SAP submit completed", extra={"event": "sap_submit_completed", "batch_size": len(items), "duration_ms": int((time.monotonic() - started) * 1000)})
 
     def _find_sync(self, source_request_ids: Sequence[UUID]) -> list[ExternalRmaResult]:
         if not source_request_ids:
@@ -307,4 +383,18 @@ class SqlServerSapMiddlewareAdapter:
     async def find_records_by_source_request_ids(
         self, source_request_ids: Sequence[UUID]
     ) -> Sequence[ExternalRmaResult]:
-        return await asyncio.to_thread(self._find_sync, source_request_ids)
+        started = time.monotonic()
+        logger.info("SAP poll started", extra={"event": "sap_poll_started", "request_count": len(source_request_ids)})
+        try:
+            rows = await asyncio.to_thread(self._find_sync, source_request_ids)
+        except Exception as exc:
+            logger.exception(
+                "SAP poll failed",
+                extra={"event": "sap_poll_failed", "request_count": len(source_request_ids), "error_code": _sqlserver_error_code(exc), "duration_ms": int((time.monotonic() - started) * 1000)},
+            )
+            raise
+        logger.info(
+            "SAP poll completed" if rows else "SAP poll pending",
+            extra={"event": "sap_poll_completed" if rows else "sap_poll_pending", "request_count": len(source_request_ids), "result_count": len(rows), "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
+        return rows

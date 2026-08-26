@@ -12,6 +12,7 @@ from app.core.database import get_session
 from app.core.response import ok, page
 from app.models import JobRunLog
 from app.services.jobs import enqueue_job, serialize_job
+from app.services.audit import log_operation
 from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 
@@ -71,6 +72,12 @@ async def create_export_job(
         resource_id=None,
         idempotency_key=f"export:{get_correlation_id() or 'job'}",
         metadata={"kind": payload.kind, "filters": payload.filters, "ids": payload.ids, "user_id": current_user.id},
+    )
+    await log_operation(
+        session, user_id=current_user.id, operation_type="export_job_created",
+        target_type="job_run", target_id=job.id,
+        description="用户创建异步数据导出任务。",
+        after_data={"kind": payload.kind, "filter_keys": sorted(payload.filters), "selected_count": len(payload.ids)},
     )
     await session.commit()
     return ok(serialize_job(job), "export queued")
@@ -135,6 +142,12 @@ async def job_download_url(
         )
     except StorageUploadError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="JOB_OUTPUT_NOT_READY") from exc
+    await log_operation(
+        session, user_id=current_user.id, operation_type="job_output_download_url_created",
+        target_type="job_run", target_id=job.id,
+        after_data={"oss_object_id": job.output_oss_object_id, "expires_seconds": expires_seconds},
+    )
+    await session.commit()
     return ok({
         "job_id": job.id,
         "object_id": job.output_oss_object_id,

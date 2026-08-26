@@ -200,6 +200,8 @@ def test_ticket_detail_success_contract(monkeypatch) -> None:
     assert payload["data"]["ticket"]["id"] == 42
     assert payload["message"] == "ok"
     assert payload["request_id"].startswith("req_")
+    assert response.headers["X-Request-ID"] == payload["request_id"]
+    assert response.headers["X-Correlation-ID"]
 
 
 def test_ticket_list_page_contract(monkeypatch) -> None:
@@ -326,6 +328,7 @@ def test_http_exception_uses_unified_error_contract(monkeypatch) -> None:
     assert payload["success"] is False
     assert payload["message"] == "TICKET_NOT_FOUND"
     assert payload["request_id"].startswith("req_")
+    assert response.headers["X-Request-ID"] == payload["request_id"]
 
 
 def test_validation_error_uses_unified_error_contract() -> None:

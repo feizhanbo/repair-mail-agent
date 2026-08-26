@@ -342,6 +342,16 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
 async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLog:
     started = utcnow()
     job_id = job.id
+    worker_instance = job.locked_by
+    logger.info(
+        "Background job started",
+        extra={
+            "event": "job_started", "job_run_id": job.id, "job_type": job.job_type,
+            "resource_type": job.resource_type, "resource_id": job.resource_id,
+            "attempt": job.attempt_count, "max_attempt": job.max_attempts,
+            "worker_instance": worker_instance,
+        },
+    )
     try:
         result = await _execute_job_command(session, job)
         # IMAP processes each message durably and may roll back one failed
@@ -394,6 +404,11 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             job.job_type,
             job.resource_type,
             job.resource_id,
+            extra={
+                "event": "job_failed", "job_run_id": job_id, "job_type": job.job_type,
+                "attempt": job.attempt_count, "max_attempt": job.max_attempts,
+                "worker_instance": worker_instance,
+            },
         )
         class_error_codes = {
             "TypeError": "JOB_TYPE_ERROR",
@@ -447,5 +462,31 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             severity="info" if job.status == "success" else "error",
             message="Background job execution completed",
             details={"job_type": job.job_type, "attempt_count": job.attempt_count},
+        )
+        if job.status == "success":
+            log = logger.info
+            runtime_event = "job_completed"
+        elif job.status == "retry_wait":
+            log = logger.warning
+            runtime_event = "job_retrying"
+        else:
+            log = logger.error
+            runtime_event = "job_failed"
+        log(
+            "Background job execution completed",
+            extra={
+                "event": runtime_event,
+                "job_run_id": job.id,
+                "job_type": job.job_type,
+                "resource_type": job.resource_type,
+                "resource_id": job.resource_id,
+                "attempt": job.attempt_count,
+                "max_attempt": job.max_attempts,
+                "next_retry_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                "worker_instance": worker_instance,
+                "status": job.status,
+                "duration_ms": job.duration_ms,
+                "error_code": job.error_code,
+            },
         )
     return job

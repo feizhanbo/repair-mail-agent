@@ -16,11 +16,19 @@ def anyio_backend() -> str:
 class FakeSession:
     def __init__(self, instance) -> None:
         self.instance = instance
+        self.added = []
+        self.committed = False
 
     async def get(self, model, _id: int):
         if isinstance(self.instance, model):
             return self.instance
         return None
+
+    def add(self, value) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
 
 
 @pytest.mark.anyio
@@ -40,7 +48,7 @@ async def test_raw_eml_download_url_returns_presigned_payload(monkeypatch: pytes
 
     monkeypatch.setattr(email_api, "generate_presigned_url_for_object", fake_generate)
 
-    response = await email_api.raw_eml_download_url(5, FakeSession(email), SimpleNamespace(), expires_seconds=120)
+    response = await email_api.raw_eml_download_url(5, FakeSession(email), SimpleNamespace(id=7), expires_seconds=120)
 
     assert response["success"] is True
     assert response["data"] == {
@@ -63,7 +71,7 @@ async def test_attachment_download_url_returns_presigned_payload(monkeypatch: py
 
     monkeypatch.setattr(email_api, "generate_presigned_url_for_object", fake_generate)
 
-    response = await email_api.attachment_download_url(9, FakeSession(attachment), SimpleNamespace(), expires_seconds=300)
+    response = await email_api.attachment_download_url(9, FakeSession(attachment), SimpleNamespace(id=7), expires_seconds=300)
 
     assert response["success"] is True
     assert response["data"] == {

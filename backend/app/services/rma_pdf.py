@@ -4,7 +4,9 @@ import hashlib
 import io
 import json
 import math
+import logging
 import re
+import time
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -21,6 +23,7 @@ from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 TEMPLATE_VERSION = "rma_authorization_v3_2_reference"
+logger = logging.getLogger(__name__)
 TEMPLATE_SHA256 = "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0"
 LEGACY_TEMPLATE_VERSIONS = {"v1", "rma_authorization_v1", "rma_authorization_zh_v1"}
 CODE39_PATTERN = re.compile(r"^[0-9A-Z\-. $/+%]+$")
@@ -674,6 +677,11 @@ def render_rma_pdf(
     layout_path: str | Path | None = None,
     test_only: bool = False,
 ) -> bytes:
+    started = time.monotonic()
+    logger.info(
+        "RMA PDF render started",
+        extra={"event": "rma_pdf_started", "rma_no": data.rma_no, "item_count": len(data.items), "template_version": TEMPLATE_VERSION},
+    )
     rma_pdf_page_count(len(data.items))
     validate_rma_template_integrity(template_path, layout_path=layout_path)
     layout = _load_layout(layout_path)
@@ -745,10 +753,26 @@ def render_rma_pdf(
         result = document.tobytes(garbage=4, deflate=True, clean=True)
         if len(result) > settings.RMA_PDF_MAX_BYTES:
             raise RmaPdfError("RMA_PDF_TOO_LARGE")
+        logger.info(
+            "RMA PDF render completed",
+            extra={
+                "event": "rma_pdf_completed", "rma_no": data.rma_no, "item_count": len(data.items),
+                "template_version": TEMPLATE_VERSION, "file_size": len(result),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         return result
-    except RmaPdfError:
+    except RmaPdfError as exc:
+        logger.exception(
+            "RMA PDF render failed",
+            extra={"event": "rma_pdf_failed", "rma_no": data.rma_no, "error_code": str(exc), "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
         raise
     except Exception as exc:
+        logger.exception(
+            "RMA PDF render failed",
+            extra={"event": "rma_pdf_failed", "rma_no": data.rma_no, "error_code": "RMA_PDF_RENDER_FAILED", "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
         raise RmaPdfError("RMA_PDF_RENDER_FAILED") from exc
     finally:
         document.close()

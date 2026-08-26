@@ -5,7 +5,9 @@ import base64
 import csv
 import io
 import json
+import logging
 import re
+import time
 import zipfile
 from html import unescape
 from pathlib import PurePath
@@ -37,6 +39,7 @@ from app.services.storage import (
 
 SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "prc", "html", "image", "pdf"}
 _file_parse_semaphore = asyncio.Semaphore(max(1, settings.FILE_PARSE_CONCURRENCY))
+logger = logging.getLogger(__name__)
 
 
 class AttachmentParseJson(BaseModel):
@@ -348,6 +351,14 @@ async def _invoke_qwen(
     max_attempts = 1
     last_error: AiProviderError | None = None
     for attempt in range(1, max_attempts + 1):
+        logger.info(
+            "Attachment AI call started",
+            extra={
+                "event": "ai_call_started", "call_type": call_type,
+                "attachment_id": attachment.id, "email_id": attachment.email_id,
+                "attempt": attempt,
+            },
+        )
         try:
             completion = await invoke()
             if hasattr(session, "add"):
@@ -536,7 +547,7 @@ def _mark_attachment(
     return attachment.extracted_json
 
 
-async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
+async def _parse_attachment_impl(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
     archive_format, warnings = detect_archive_format(
         file_name=attachment.file_name,
         content_type=attachment.content_type,
@@ -678,6 +689,14 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         parsed = await _qwen_text_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, text=text, warnings=warnings, truncated=truncated)
         return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text or text)
     except AiProviderError as exc:
+        logger.exception(
+            "Attachment AI parse failed; applying fallback",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type,
+                "error_code": safe_error_code(exc, "ATTACHMENT_AI_FAILED"),
+            },
+        )
         parsed = _fallback_json(file_type, text, warnings=[*warnings, str(exc)], truncated=truncated)
         if file_type in {"txt", "prc"} and text.strip():
             parsed.warnings.append("QWEN_FAILED_LOCAL_TEXT_FALLBACK")
@@ -685,6 +704,13 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         return _mark_attachment(attachment, status="needs_manual_review", parsed=parsed, text=text or None, error=str(exc))
     except (StorageConfigurationError, StorageUploadError) as exc:
         error_code = safe_error_code(exc, "ATTACHMENT_STORAGE_UNAVAILABLE")
+        logger.exception(
+            "Attachment storage unavailable; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
         parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
         return _mark_attachment(
             attachment, status="needs_manual_review", parsed=parsed, text=text or None,
@@ -692,6 +718,13 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         )
     except ValueError as exc:
         error_code = safe_error_code(exc, "ATTACHMENT_FILE_PARSE_FAILED")
+        logger.exception(
+            "Attachment content parse failed; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
         parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
         return _mark_attachment(
             attachment, status="needs_manual_review", parsed=parsed, text=text or None,
@@ -699,8 +732,50 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         )
     except Exception as exc:
         error_code = safe_error_code(exc, "ATTACHMENT_INFRASTRUCTURE_ERROR")
+        logger.exception(
+            "Attachment infrastructure failure; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
         parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
         return _mark_attachment(
             attachment, status="needs_manual_review", parsed=parsed, text=text or None,
             error=f"INFRASTRUCTURE:{error_code}",
         )
+
+
+async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
+    started = time.monotonic()
+    logger.info(
+        "Attachment parse started",
+        extra={
+            "event": "attachment_parse_started", "attachment_id": attachment.id,
+            "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+            "object_size": attachment.file_size,
+        },
+    )
+    try:
+        result = await _parse_attachment_impl(session, attachment)
+    except Exception as exc:
+        logger.exception(
+            "Attachment parse failed",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": safe_error_code(exc, "ATTACHMENT_PARSE_FAILED"),
+            },
+        )
+        raise
+    logger.info(
+        "Attachment parse completed",
+        extra={
+            "event": "attachment_parse_completed", "attachment_id": attachment.id,
+            "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+            "status": attachment.parse_status,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+    return result

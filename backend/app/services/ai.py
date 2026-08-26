@@ -539,6 +539,29 @@ async def persist_ai_log(
     )
     session.add(ai_log)
     await session.flush()
+    log_method = logger.info if ai_log.status in {"success", "low_confidence"} else logger.error
+    log_method(
+        "AI call persisted",
+        extra={
+            "event": "ai_call_completed" if ai_log.status != "failed" else "ai_call_failed",
+            "trace_id": trace_id,
+            "call_type": call_type,
+            "provider": provider_name,
+            "model": model_name,
+            "prompt_version": prompt_version,
+            "route_name": route_name,
+            "fallback": fallback_used,
+            "attempt": attempt_count,
+            "duration_ms": latency_ms,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "status": ai_log.status,
+            "error_code": error_code,
+            "email_id": email_id,
+            "ticket_id": ticket_id,
+            "attachment_id": attachment_id,
+        },
+    )
     return ai_log
 
 
@@ -726,6 +749,13 @@ async def _run_ai_json(
 
     task = LlmTask.REPLY_DRAFT if call_type == "reply_draft" else LlmTask.REPAIR_FIELD_EXTRACT
     prompt = PROMPTS[task.value]
+    logger.info(
+        "AI call started",
+        extra={
+            "event": "ai_call_started", "call_type": call_type, "prompt_version": prompt.version,
+            "email_id": email_id, "ticket_id": ticket_id,
+        },
+    )
     try:
         completion = await invoke_structured(task=task, messages=messages, response_model=response_model)
     except AiProviderError as last_error:

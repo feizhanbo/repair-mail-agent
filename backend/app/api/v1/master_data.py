@@ -264,7 +264,6 @@ async def export_sn_assets(
     material: str | None = None,
     asset_status: str | None = None,
 ) -> Response:
-    del current_user
     content = await master_data_service.export_sn_assets(
         session,
         keyword=keyword,
@@ -273,6 +272,15 @@ async def export_sn_assets(
         material=material,
         asset_status=asset_status,
     )
+    await log_operation(
+        session, user_id=current_user.id, operation_type="sn_assets_exported",
+        target_type="sn_asset_export", description="用户导出 SN 主数据。",
+        after_data={"filter_keys": sorted(key for key, value in {
+            "keyword": keyword, "sn": sn, "customer": customer,
+            "material": material, "asset_status": asset_status,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
@@ -286,8 +294,13 @@ async def export_selected_sn_assets(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> Response:
-    del current_user
     content = await master_data_service.export_sn_assets_selected(session, ids=payload.ids)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="sn_assets_exported",
+        target_type="sn_asset_export", description="用户导出选中的 SN 主数据。",
+        after_data={"selected_count": len(payload.ids), "selected_ids": payload.ids},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
@@ -425,7 +438,6 @@ async def export_board_cards(
     material_name: str | None = None,
     status: str | None = None,
 ) -> Response:
-    del current_user
     content = await master_data_service.export_board_cards(
         session,
         keyword=keyword,
@@ -435,6 +447,16 @@ async def export_board_cards(
         return_location=return_location,
         status=status,
     )
+    await log_operation(
+        session, user_id=current_user.id, operation_type="board_cards_exported",
+        target_type="board_card_export", description="用户导出板卡主数据。",
+        after_data={"filter_keys": sorted(key for key, value in {
+            "keyword": keyword, "board_code": board_code or material_code,
+            "board_name": board_name or material_name, "customer_scope": customer_scope,
+            "return_location": return_location, "status": status,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
@@ -448,8 +470,13 @@ async def export_selected_board_cards(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> Response:
-    del current_user
     content = await master_data_service.export_board_cards_selected(session, ids=payload.ids)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="board_cards_exported",
+        target_type="board_card_export", description="用户导出选中的板卡主数据。",
+        after_data={"selected_count": len(payload.ids), "selected_ids": payload.ids},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=master_data_service.EXCEL_MEDIA_TYPE,
