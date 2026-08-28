@@ -15,7 +15,6 @@ from sshtunnel import SSHTunnelForwarder
 
 
 TARGET_DATABASE = "AIRMA_test"
-SOURCE_DATABASE = "repair_system_test"
 MASTER_TABLES = ("sn_assets", "board_cards", "customer_service_policies")
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = BACKEND_DIR.parent
@@ -33,7 +32,6 @@ def _target_url(*, username: str, password: str, port: int) -> str:
 def _run(command: list[str], *, database_url: str, smoke: bool = False) -> None:
     environment = dict(os.environ)
     environment["DATABASE_URL"] = database_url
-    environment["DB_NAME"] = TARGET_DATABASE
     environment["IMAP_FETCH_ENABLED"] = "false"
     environment["AUTO_SEND_ENABLED"] = "false"
     environment["RMA_AUTO_SEND_ENABLED"] = "false"
@@ -56,6 +54,9 @@ def main() -> int:
     args = parser.parse_args()
     values = _settings()
     source_url = make_url(values["DATABASE_URL"])
+    source_database = str(source_url.database or "")
+    if not source_database:
+        raise RuntimeError("DATABASE_URL_DATABASE_REQUIRED")
     username = source_url.username or "root"
     password = source_url.password or values.get("MYSQL_ROOT_PASSWORD", "")
     # sshtunnel 0.4 still references the removed Paramiko DSSKey attribute.
@@ -203,7 +204,7 @@ def main() -> int:
                     quoted = ", ".join(f"`{column}`" for column in columns)
                     statement = (
                         f"INSERT INTO `{TARGET_DATABASE}`.`{table}` ({quoted}) "
-                        f"SELECT {quoted} FROM `{SOURCE_DATABASE}`.`{table}`"
+                        f"SELECT {quoted} FROM `{source_database}`.`{table}`"
                     )
                     if table == "customer_service_policies":
                         updates = ", ".join(
@@ -211,7 +212,7 @@ def main() -> int:
                         )
                         statement += f" ON DUPLICATE KEY UPDATE {updates}"
                     cursor.execute(statement)
-                    cursor.execute(f"SELECT COUNT(*) FROM `{SOURCE_DATABASE}`.`{table}`")
+                    cursor.execute(f"SELECT COUNT(*) FROM `{source_database}`.`{table}`")
                     source_count = int(cursor.fetchone()[0])
                     cursor.execute(f"SELECT COUNT(*) FROM `{TARGET_DATABASE}`.`{table}`")
                     target_count = int(cursor.fetchone()[0])
@@ -219,7 +220,7 @@ def main() -> int:
                         raise RuntimeError(f"SEED_COUNT_MISMATCH:{table}:{source_count}:{target_count}")
                     if table == "customer_service_policies":
                         cursor.execute(
-                            f"SELECT COUNT(*) FROM `{SOURCE_DATABASE}`.`{table}` AS source "
+                            f"SELECT COUNT(*) FROM `{source_database}`.`{table}` AS source "
                             f"LEFT JOIN `{TARGET_DATABASE}`.`{table}` AS target ON target.policy_code=source.policy_code "
                             "WHERE target.id IS NULL"
                         )

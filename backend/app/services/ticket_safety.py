@@ -220,6 +220,7 @@ async def build_sn_validation_report(
                 check.update(
                     {
                         "asset_id": asset.id,
+                        "asset_ins_id": asset.ins_id,
                         "asset_status": asset.asset_status,
                         "asset_customer_code": asset.customer_code,
                         "asset_customer_name": asset.customer_name,
@@ -232,6 +233,10 @@ async def build_sn_validation_report(
                 )
                 if asset.asset_status != "valid":
                     errors[f"{prefix}.sn"] = "sn_not_valid"
+                if asset.ins_id is None:
+                    errors[f"{prefix}.ins_id"] = "required_from_sn_master"
+                elif not isinstance(asset.ins_id, int):
+                    errors[f"{prefix}.ins_id"] = "invalid_type"
                 if ticket.customer_code and asset.customer_code != ticket.customer_code:
                     errors[f"{prefix}.customer"] = "sn_customer_mismatch"
                 if item.material_code and asset.material_code != item.material_code:

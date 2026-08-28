@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -31,10 +32,10 @@ class Settings(BaseSettings):
     TRUSTED_HOSTS: list[str] = ["localhost", "127.0.0.1", "testserver"]
     API_DOCS_ENABLED: bool = False
 
-    DB_NAME: str = "repair_system_test"
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
     DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
     DB_SMOKE_DATABASE_URL: str = ""
+    DESTRUCTIVE_TEST_DATABASE_ALLOWLIST: list[str] = ["repair_system_test", "AIRMA_test"]
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -137,41 +138,30 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_ENCRYPT: bool = True
     RELAY_SQLSERVER_TRUST_SERVER_CERTIFICATE: bool = False
     RELAY_SQLSERVER_SN_SCHEMA: str = "dbo"
-    RELAY_SQLSERVER_SN_TABLE: str = ""
+    RELAY_SQLSERVER_SN_TABLE: str = "oins_rma"
     RELAY_SQLSERVER_SN_PRIMARY_KEY: str = ""
     RELAY_SQLSERVER_SN_UPDATED_AT_COLUMN: str = ""
     RELAY_SQLSERVER_SN_COLUMN_MAP: dict[str, str] = {
-        "sn": "sn",
-        "customer_code": "customer_code",
-        "customer_name": "customer_name",
-        "material_code": "material_code",
-        "material_name": "material_name",
-        "asset_status": "asset_status",
-    }
-    RELAY_SQLSERVER_RESULT_MODE: str = "table"
-    RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
-    RELAY_SQLSERVER_RESULT_TARGET: str = ""
-    RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN: str = "SourceRequestID"
-    # Legacy audit-only configuration. New submissions and result queries never use CallID.
-    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
-    RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
-    RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {
+        "ins_id": "insID",
         "sn": "internalSN",
         "customer_code": "customer",
         "customer_name": "custmrName",
-        "material_code": "itemCode",
-        "material_name": "itemName",
-        "email_subject": "subject",
-        "contact_person": "BPContact",
-        "contact_phone": "Telephone",
-        "problem_description": "U_FailurePhenomena",
-        "repair_requested_at": "U_BXDate",
-        "mailing_address": "BPShipAddr",
-        "currency": "U_cur",
-        "shipping_fee": "U_DeliveryPaid",
-        "repair_fee": "U_WSPrice",
-        "charge_status": "U_RepairPaid",
+        "material_code": "ITEMCODE",
+        "material_name": "ITEMNAME",
+        "parent_material_code": "U_FatherItem",
+        "parent_sn": "U_FatherSerialNum",
+        "top_material_code": "U_topitemcode",
+        "top_sn": "U_TOPSN",
+        "warranty_end_date": "ExpDate",
     }
+    RELAY_SQLSERVER_REQUEST_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_REQUEST_TABLE: str = "oscl_rma"
+    RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_RESULT_TABLE: str = "oscl_print"
+    RELAY_SQLSERVER_REQUEST_ID_COLUMN: str = "RequestID"
+    # Legacy audit-only configuration. New submissions and result queries never use CallID.
+    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
+    RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
     RELAY_SQLSERVER_BATCH_SIZE: int = 500
     RELAY_SQLSERVER_SYNC_INTERVAL_MINUTES: int = 5
     RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
@@ -266,6 +256,11 @@ class Settings(BaseSettings):
         if insecure:
             raise ValueError(f"insecure production settings: {', '.join(insecure)}")
         return self
+
+    @property
+    def database_name(self) -> str:
+        """Canonical database name; DATABASE_URL is the only runtime source."""
+        return str(make_url(self.DATABASE_URL).database or "")
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 

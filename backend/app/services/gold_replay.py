@@ -47,7 +47,6 @@ from app.services.mail_safety import TEST_MAIL_SENDER, test_envelope_allowed
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_wait"}
 UNCERTAIN_EXTERNAL_STATUSES = {"planned", "running", "uncertain", "failed_retryable"}
-TEST_DATABASE_NAMES = {"repair_system_test", "AIRMA_test"}
 TEST_DATABASE_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -84,7 +83,8 @@ async def assert_gold_replay_environment(session: AsyncSession) -> dict[str, Any
     reasons: list[str] = []
     if settings.APP_ENV.strip().lower() not in {"dev", "test"}:
         reasons.append("APP_ENV_MUST_BE_DEV_OR_TEST")
-    if database_name not in TEST_DATABASE_NAMES or url.database != database_name:
+    allowed_databases = {name.strip() for name in settings.DESTRUCTIVE_TEST_DATABASE_ALLOWLIST if name.strip()}
+    if database_name not in allowed_databases or url.database != database_name:
         reasons.append("DATABASE_MUST_BE_APPROVED_GOLD_TEST_DATABASE")
     if (url.host or "").lower() not in TEST_DATABASE_HOSTS or int(url.port or 3306) != 13307:
         reasons.append("DATABASE_MUST_USE_LOOPBACK_13307")

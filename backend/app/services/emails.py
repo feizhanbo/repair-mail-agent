@@ -869,7 +869,11 @@ async def _try_create_reply_draft(
     elif effective_missing_fields:
         if ticket.current_status_code != "need_customer_info":
             return {"created": False, "error_code": "FOLLOWUP_TICKET_NOT_WAITING_CUSTOMER_INFO"}
-        reply_type = "missing_fields"
+        reply_type = (
+            "sn_invalid"
+            if any("sn" in str(key).lower() for key in effective_missing_fields)
+            else "missing_fields"
+        )
     else:
         reply_type = "receipt"
     try:

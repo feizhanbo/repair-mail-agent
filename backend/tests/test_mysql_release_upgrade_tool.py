@@ -110,7 +110,7 @@ def test_upgrade_step_timeout_is_reported_and_process_is_killed(
 def test_schema_audit_constants_match_release_head_and_models() -> None:
     from app.models import Base
 
-    assert check_sap_schema.EXPECTED_REVISION == "x1s6n7o8p9q0"
+    assert check_sap_schema.EXPECTED_REVISION == "y2t7u8v9w0x1"
     assert check_sap_schema.EXPECTED_BUSINESS_TABLE_COUNT == len(Base.metadata.tables)
     assert audit_mail_release.REQUIRED_REVISION == check_sap_schema.EXPECTED_REVISION
 

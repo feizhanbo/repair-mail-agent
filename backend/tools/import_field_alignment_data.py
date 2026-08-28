@@ -28,8 +28,7 @@ from app.schemas.business import BoardCardImportItem
 from app.services.master_data import import_board_cards, parse_board_cards_file
 
 
-EXPECTED_DATABASE = "repair_system_test"
-EXPECTED_REVISION = "x1s6n7o8p9q0"
+EXPECTED_REVISION = "y2t7u8v9w0x1"
 OVERSEAS_DEFAULT_CODE = "*"
 OVERSEAS_DEFAULT_NAME = "OVERSEAS_DEFAULT_BEIJING"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +36,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class ImportError(RuntimeError):
     pass
+
+
+def _expected_database() -> str:
+    return settings.database_name
 
 
 def _plain(value: Any) -> Any:
@@ -60,15 +63,15 @@ def _row_snapshot(row: BoardCard) -> dict[str, Any]:
 
 def _validate_target() -> None:
     url = make_url(settings.DATABASE_URL)
+    allowed_databases = {name.strip() for name in settings.DESTRUCTIVE_TEST_DATABASE_ALLOWLIST if name.strip()}
     if (
         url.get_backend_name() != "mysql"
         or (url.host or "") not in {"127.0.0.1", "localhost", "::1"}
         or int(url.port or 3306) != 13307
-        or url.database != EXPECTED_DATABASE
+        or not url.database
+        or url.database not in allowed_databases
     ):
-        raise ImportError(
-            "IMPORT_TARGET_MUST_BE_LOCAL_TUNNEL_REPAIR_SYSTEM_TEST"
-        )
+        raise ImportError("IMPORT_TARGET_MUST_MATCH_DATABASE_URL_ON_LOCAL_TUNNEL")
 
 
 def _config_value(name: str, default: str | None = None) -> str | None:
@@ -223,7 +226,7 @@ async def _execute(args: argparse.Namespace) -> dict[str, Any]:
         before_rows = await _load_rows(session, keys)
         before = {str(row.id): _row_snapshot(row) for row in before_rows}
         preview = {
-            "database": EXPECTED_DATABASE,
+            "database": _expected_database(),
             "revision": revision,
             "source_file": str(source_path),
             "source_sha256": source_hash,
@@ -303,7 +306,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Preview or apply the board return-route data alignment to the "
-            "guarded repair_system_test database."
+            "guarded DATABASE_URL database."
         )
     )
     parser.add_argument("--source", required=True)

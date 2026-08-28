@@ -552,7 +552,7 @@ export type SapExportLine = {
   id: number;
   ticket_item_id: number;
   relay_export_id: number;
-  source_request_id: string;
+  request_id: string;
   status: string;
   attempt_count: number;
   /** Legacy audit-only CallID; new submissions never populate it. */

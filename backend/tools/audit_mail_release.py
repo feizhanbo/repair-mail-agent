@@ -18,7 +18,7 @@ DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "x1s6n7o8p9q0"
+REQUIRED_REVISION = "y2t7u8v9w0x1"
 
 
 def _sha256(path: Path) -> str:
@@ -184,7 +184,7 @@ def _audit_failures(report: dict[str, Any], *, require_backup: bool) -> list[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only release audit for the repair mail database.")
-    parser.add_argument("--expected-database", default="repair_system_test")
+    parser.add_argument("--expected-database", default=settings.database_name)
     parser.add_argument("--backup", type=Path)
     args = parser.parse_args()
     async def run_audit() -> dict[str, Any]:

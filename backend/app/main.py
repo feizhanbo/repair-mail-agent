@@ -129,6 +129,48 @@ async def _scheduled_consistency_recovery():
         logger.exception("Consistency recovery deferred because the database is unavailable")
 
 
+async def _scheduled_sap_sn_sync():
+    if not settings.RELAY_SN_SYNC_ENABLED or settings.RELAY_ADAPTER.strip().lower() != "sqlserver":
+        return
+    try:
+        from app.services.sap_sn_sync import create_sn_sync_batch
+
+        async with AsyncSessionLocal() as session:
+            result = await create_sn_sync_batch(session)
+            await session.commit()
+        logger.info(
+            "Scheduled SAP SN snapshot completed",
+            extra={"event": "sap_sn_sync_scheduled", "status": result.get("status"), "source_count": result.get("source_count")},
+        )
+    except Exception:
+        logger.exception("Scheduled SAP SN snapshot failed", extra={"event": "sap_sn_sync_scheduled_failed"})
+
+
+async def _scheduled_sap_rma_poll():
+    if not settings.RELAY_SQLSERVER_ENABLED:
+        return
+    try:
+        from app.services.sap_rma import poll_waiting_rma_results
+
+        async with AsyncSessionLocal() as session:
+            result = await poll_waiting_rma_results(session)
+            await session.commit()
+        logger.info(
+            "Scheduled SAP RMA2 polling completed",
+            extra={
+                "event": "sap_rma2_poll_scheduled",
+                "status": result.get("status"),
+                "request_count": result.get("request_count", 0),
+                "result_count": result.get("result_count", 0),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Scheduled SAP RMA2 polling failed",
+            extra={"event": "sap_rma2_poll_scheduled_failed"},
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -208,6 +250,27 @@ async def lifespan(app: FastAPI):
         minutes=5,
         next_run_time=utcnow() + timedelta(seconds=5),
         id="consistency_recovery",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduled_sap_sn_sync,
+        "cron",
+        hour=max(0, min(23, settings.RELAY_SQLSERVER_FULL_SYNC_HOUR)),
+        minute=0,
+        timezone="Asia/Shanghai",
+        id="sap_sn_daily_full_snapshot",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduled_sap_rma_poll,
+        "interval",
+        seconds=max(1, settings.RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS),
+        next_run_time=utcnow() + timedelta(seconds=10),
+        id="sap_rma2_batch_poll",
         replace_existing=True,
         coalesce=True,
         max_instances=1,

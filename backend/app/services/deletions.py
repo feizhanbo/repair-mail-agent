@@ -510,7 +510,12 @@ async def _ensure_force_allowed(session: AsyncSession, preview: dict[str, Any], 
     if not force_local_cleanup:
         raise DeletionError("DELETE_BLOCKED", status_code=409, data={"blockers": sorted(blockers)})
     database_name = str(await session.scalar(select(func.database())) or "")
-    if settings.APP_ENV.strip().lower() not in {"dev", "test"} or database_name != "repair_system_test":
+    allowed_databases = {name.strip() for name in settings.DESTRUCTIVE_TEST_DATABASE_ALLOWLIST if name.strip()}
+    if (
+        settings.APP_ENV.strip().lower() not in {"dev", "test"}
+        or database_name != settings.database_name
+        or database_name not in allowed_databases
+    ):
         raise DeletionError("LOCAL_FORCE_DELETE_NOT_ALLOWED", status_code=403)
     non_overridable = blockers - {"TICKET_EXTERNAL_EFFECT_ALREADY_EXECUTED", "EMAIL_REPLY_ALREADY_SENT"}
     if non_overridable:

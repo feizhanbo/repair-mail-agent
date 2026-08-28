@@ -42,13 +42,12 @@ def relay_configuration_status() -> dict[str, Any]:
             "RELAY_SQLSERVER_PASSWORD": settings.RELAY_SQLSERVER_PASSWORD,
             "RELAY_SQLSERVER_DRIVER": settings.RELAY_SQLSERVER_DRIVER,
             "RELAY_SQLSERVER_SN_TABLE": settings.RELAY_SQLSERVER_SN_TABLE,
-            "RELAY_SQLSERVER_RESULT_TARGET": settings.RELAY_SQLSERVER_RESULT_TARGET,
-            "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN": settings.RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN,
+            "RELAY_SQLSERVER_REQUEST_TABLE": settings.RELAY_SQLSERVER_REQUEST_TABLE,
+            "RELAY_SQLSERVER_RESULT_TABLE": settings.RELAY_SQLSERVER_RESULT_TABLE,
+            "RELAY_SQLSERVER_REQUEST_ID_COLUMN": settings.RELAY_SQLSERVER_REQUEST_ID_COLUMN,
             "RELAY_SQLSERVER_RMA_COLUMN": settings.RELAY_SQLSERVER_RMA_COLUMN,
         }
         missing = [name for name, value in required.items() if not value]
-        if settings.RELAY_SQLSERVER_RESULT_MODE != "table":
-            missing.append("RELAY_SQLSERVER_RESULT_MODE_MUST_BE_TABLE")
     else:
         missing = ["RELAY_ADAPTER_INVALID"]
     return {
@@ -86,5 +85,5 @@ async def push_ai_parse_result_to_relay(
     return {
         "status": "deprecated",
         "parse_result_id": parse_result_id,
-        "message": "Use validated SourceRequestID ticket batch export",
+        "message": "Use validated RequestID ticket batch export",
     }

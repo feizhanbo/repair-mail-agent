@@ -13,7 +13,6 @@ from app.core.database import AsyncSessionLocal
 from app.schemas.business import BoardCardImportItem, SnAssetImportItem
 from app.services.master_data import import_board_cards, import_sn_assets
 
-DB_NAME = "repair_system_test"
 SN_XLSX_PATH = r"D:\refile\SNdata.xlsx"
 BOARD_CARD_XLS_PATH = r"D:\refile\寄北京板卡.xls"
 
@@ -243,11 +242,13 @@ async def _import_board_cards_from_xls() -> dict:
 
 async def _main() -> None:
     scheme, user, password, host, port, db_name = _parse_url(settings.DATABASE_URL)
+    if not db_name:
+        raise SystemExit("DATABASE_URL must include a database name")
     nodb_url = _build_url(scheme, user, password, host, port)
-    test_db_url = _build_url(scheme, user, password, host, port, DB_NAME)
+    test_db_url = settings.DATABASE_URL
 
     try:
-        db_exists = await _check_database_exists(nodb_url, DB_NAME)
+        db_exists = await _check_database_exists(nodb_url, db_name)
     except Exception as exc:
         print(f"Database connection failed: {exc}")
         print("Please verify SSH tunnel / MySQL credentials and try again.")
@@ -257,9 +258,9 @@ async def _main() -> None:
     env["DATABASE_URL"] = test_db_url
 
     if not db_exists:
-        print(f"Database '{DB_NAME}' does not exist, creating...")
+        print(f"Database '{db_name}' does not exist, creating...")
         try:
-            await _create_database(nodb_url, DB_NAME)
+            await _create_database(nodb_url, db_name)
         except Exception as exc:
             print(f"  Failed to create database: {exc}")
             raise SystemExit(1) from exc
@@ -271,7 +272,7 @@ async def _main() -> None:
         print("Running seed data...")
         await _run_subprocess("python -m app.seed", str(BACKEND_DIR), env)
     else:
-        print(f"Database '{DB_NAME}' already exists, checking seed data...")
+        print(f"Database '{db_name}' already exists, checking seed data...")
         has_seed = await _check_seed_data(test_db_url)
         if not has_seed:
             print("Seed data not found, running migration and seed...")

@@ -123,7 +123,7 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
 
     async with AsyncSessionLocal() as session:
         database_name = str(await session.scalar(select(func.database())) or "")
-        assert database_name == "repair_system_test"
+        assert database_name == settings.database_name
         await _cleanup_stale_test_residue(session)
         user_id = await session.scalar(select(User.id).order_by(User.id).limit(1))
         assert user_id is not None, "integration database requires one existing user for audit ownership"
@@ -681,7 +681,7 @@ async def test_temporary_delete_aggregates_and_preserves_ticket_source_email(
                 ticket_item_id=irreversible_item.id,
                 relay_export_id=irreversible_relay.id,
                 ticket_version=1,
-                source_request_id=f"{batch}-submission",
+                request_id=f"{batch}-submission",
                 payload_hash="b" * 64,
                 status="accepted",
                 remote_call_id=f"{batch}-call",

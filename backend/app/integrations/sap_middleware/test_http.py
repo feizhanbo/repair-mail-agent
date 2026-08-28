@@ -61,7 +61,13 @@ class TestHttpSapMiddlewareAdapter:
         if not health.configured:
             raise SapMiddlewareConfigurationError("TEST_RELAY_NOT_CONFIGURED:" + ",".join(health.missing))
         payload = [
-            {**item.payload, "source_request_id": str(item.source_request_id), "sn": item.sn}
+            {
+                **item.payload,
+                "RequestID": str(item.request_id),
+                "sn": item.sn,
+                "ticket_id": item.ticket_id,
+                "ticket_item_id": item.ticket_item_id,
+            }
             for item in items
         ]
         try:
@@ -75,28 +81,32 @@ class TestHttpSapMiddlewareAdapter:
         except Exception as exc:
             raise SapTransactionError("TEST_RELAY_BATCH_SUBMIT_FAILED") from exc
 
-    async def find_records_by_source_request_ids(
-        self, source_request_ids: Sequence[UUID]
-    ) -> Sequence[ExternalRmaResult]:
-        if not source_request_ids:
+    async def _query(self, request_ids: Sequence[UUID]) -> list[dict]:
+        if not request_ids:
             return []
         try:
             async with httpx.AsyncClient(timeout=settings.RELAY_TIMEOUT_SECONDS) as client:
                 response = await client.post(
                     f"{settings.TEST_RELAY_BASE_URL.rstrip('/')}/records/query",
-                    json={"source_request_ids": [str(value) for value in source_request_ids]},
+                    json={"RequestIDs": [str(value) for value in request_ids]},
                     headers=self._headers(),
                 )
                 response.raise_for_status()
                 rows = response.json().get("items", [])
         except Exception as exc:
             raise SapTransactionError("TEST_RELAY_RESULT_QUERY_FAILED") from exc
+        return list(rows)
+
+    async def find_submitted_request_ids(self, request_ids: Sequence[UUID]) -> Sequence[UUID]:
+        return [UUID(str(row["RequestID"])) for row in await self._query(request_ids)]
+
+    async def query_rma_results(self, request_ids: Sequence[UUID]) -> Sequence[ExternalRmaResult]:
         return [
             ExternalRmaResult(
-                source_request_id=UUID(str(row["source_request_id"])),
+                request_id=UUID(str(row["RequestID"])),
                 sn=row.get("sn"),
                 rma_no=str(row["rma_no"]).strip() if row.get("rma_no") else None,
                 raw_data=row,
             )
-            for row in rows
+            for row in await self._query(request_ids)
         ]

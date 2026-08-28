@@ -118,7 +118,7 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "ticket_id",
         "ticket_item_id",
         "relay_export_id",
-            "source_request_id",
+            "RequestID",
         "payload_hash",
         "remote_call_id",
         "rma_no",

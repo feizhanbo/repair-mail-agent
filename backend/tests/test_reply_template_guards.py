@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from app.models import Email, EmailAttachment, RepairTicket, RepairTicketItem, ReplyRecord, ReplyTemplate
 from app.seed import REPLY_TEMPLATES
-from app.services import replies
+from app.services import emails, replies
 from app.services.mail_reply_renderer import ReplyHistory
 
 
@@ -330,6 +330,34 @@ async def test_followup_send_guard_blocks_when_missing_field_snapshot_changed() 
     )
 
     assert await replies._reply_send_guard_error(session, ticket=ticket, reply=reply) == "FOLLOWUP_MISSING_FIELDS_CHANGED_REGENERATE_REQUIRED"
+
+
+@pytest.mark.anyio
+async def test_missing_sn_uses_sn_invalid_draft_without_auto_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="RMA-1",
+        current_status_code="need_customer_info",
+        sn_validation_status="pending",
+        missing_fields={"sn": "缺少设备 SN"},
+    )
+
+    class Session:
+        async def get(self, model, identity):
+            assert model is RepairTicket and identity == 1
+            return ticket
+
+    create_draft = AsyncMock(return_value={"created": True, "reply_type": "sn_invalid"})
+    monkeypatch.setattr(emails, "create_reply_draft", create_draft)
+
+    result = await emails._try_create_reply_draft(
+        Session(), ticket_id=1, user_id=None, email_id=8, parse_result=None
+    )
+
+    assert result == {"created": True, "reply_type": "sn_invalid"}
+    assert create_draft.await_args.kwargs["reply_type"] == "sn_invalid"
+    reply = ReplyRecord(reply_type="sn_invalid", to_addresses="customer@example.com")
+    assert replies._reply_can_auto_send(reply, confidence_score=1.0, risk_level="low") is False
 
 
 @pytest.mark.anyio

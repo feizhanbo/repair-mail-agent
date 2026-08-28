@@ -154,11 +154,11 @@ def test_doctor_returns_stable_blocked_result_without_database_traceback(monkeyp
 def test_relay_default_fixed_rma_is_idempotent_for_multiple_sn(tmp_path: Path) -> None:
     store = TestRelayStore(tmp_path / "fixed-rma.sqlite3")
     store.configure(RelayControl(scenario="normal", rma_no="2026081201"))
-    first = RelayRecord(source_request_id="request-fixed-0001", ticket_id=9, ticket_item_id=1, sn="SN-1")
-    second = RelayRecord(source_request_id="request-fixed-0002", ticket_id=9, ticket_item_id=2, sn="SN-2")
+    first = RelayRecord(request_id="55555555-5555-4555-8555-555555555555", ticket_id=9, ticket_item_id=1, sn="SN-1")
+    second = RelayRecord(request_id="66666666-6666-4666-8666-666666666666", ticket_id=9, ticket_item_id=2, sn="SN-2")
     first_result = store.create(first)
     store.create(second)
-    rows = store.query(["request-fixed-0001", "request-fixed-0002"])
+    rows = store.query([first.request_id, second.request_id])
     assert {row["rma_no"] for row in rows} == {"2026081201"}
     assert store.create(first)["remote_record_key"] == first_result["remote_record_key"]
     assert store.create(first)["idempotent_reuse"] is True

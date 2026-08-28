@@ -26,7 +26,7 @@ class SapTransactionError(SapMiddlewareError):
 
 
 class SapUnknownCommitStateError(SapMiddlewareError):
-    """The caller must reconcile by SourceRequestID before retrying."""
+    """The caller must reconcile RMA1 by RequestID before retrying."""
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,7 @@ class ExternalSnRecord:
     customer_code: str
     customer_name: str
     material_code: str
+    ins_id: int | None = None
     material_name: str | None = None
     values: dict[str, Any] = field(default_factory=dict)
     raw_data: dict[str, Any] = field(default_factory=dict)
@@ -50,14 +51,16 @@ class ExternalSnRecord:
 
 @dataclass(frozen=True)
 class ExternalRmaSubmissionItem:
-    source_request_id: UUID
+    request_id: UUID
     sn: str
     payload: dict[str, Any]
+    ticket_id: int | None = None
+    ticket_item_id: int | None = None
 
 
 @dataclass(frozen=True)
 class ExternalRmaResult:
-    source_request_id: UUID
+    request_id: UUID
     sn: str | None
     rma_no: str | None
     raw_data: dict[str, Any] = field(default_factory=dict)
@@ -70,6 +73,10 @@ class SapMiddlewareAdapter(Protocol):
 
     async def submit_rma_batch(self, items: Sequence[ExternalRmaSubmissionItem]) -> None: ...
 
-    async def find_records_by_source_request_ids(
-        self, source_request_ids: Sequence[UUID]
+    async def find_submitted_request_ids(
+        self, request_ids: Sequence[UUID]
+    ) -> Sequence[UUID]: ...
+
+    async def query_rma_results(
+        self, request_ids: Sequence[UUID]
     ) -> Sequence[ExternalRmaResult]: ...

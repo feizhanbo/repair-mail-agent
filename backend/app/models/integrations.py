@@ -76,7 +76,7 @@ class SapSnStaging(TimestampMixin, Base):
     )
     sn: Mapped[str] = mapped_column(String(100), nullable=False)
     customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
     material_code: Mapped[str] = mapped_column(String(100), nullable=False)
     material_name: Mapped[str | None] = mapped_column(String(255))
     asset_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="valid")
@@ -125,7 +125,7 @@ class TicketRelayExport(TimestampMixin, Base):
 class ExportSap(TimestampMixin, Base):
     __tablename__ = "export_sap"
     __table_args__ = (
-        UniqueConstraint("source_request_id", name="uk_export_sap_source_request_id"),
+        UniqueConstraint("RequestID", name="uk_export_sap_request_id"),
         UniqueConstraint("remote_call_id", name="uk_export_sap_remote_call_id"),
         UniqueConstraint(
             "ticket_item_id",
@@ -159,7 +159,7 @@ class ExportSap(TimestampMixin, Base):
         nullable=False,
     )
     ticket_version: Mapped[int] = mapped_column(nullable=False)
-    source_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[str] = mapped_column("RequestID", mysql.CHAR(36), nullable=False)
     payload_hash: Mapped[str] = mapped_column(mysql.CHAR(64), nullable=False)
     policy_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")

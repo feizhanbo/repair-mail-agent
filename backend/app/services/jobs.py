@@ -373,7 +373,15 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             job.error_code = "TASK_SNAPSHOT_SUPERSEDED"
             job.error_message = None
             job.finished_at = utcnow()
-        elif business_status in {"failed", "send_failed", "manual_review", "send_uncertain", "misconfigured", "archive_failed"}:
+        elif business_status in {
+            "failed",
+            "submit_failed",
+            "send_failed",
+            "manual_review",
+            "send_uncertain",
+            "misconfigured",
+            "archive_failed",
+        }:
             error_code = str(result.get("error_code") or business_status).upper()
             retryable = (
                 job.job_type in {"relay_ticket_export", "smtp_send", "rma_archive", "oss_delete"}

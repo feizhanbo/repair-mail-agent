@@ -30,10 +30,9 @@ from sshtunnel import SSHTunnelForwarder
 from app.config import settings
 
 
-EXPECTED_DATABASE = "repair_system_test"
 EXPECTED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 EXPECTED_LOCAL_PORT = 13307
-EXPECTED_HEAD = "x1s6n7o8p9q0"
+EXPECTED_HEAD = "y2t7u8v9w0x1"
 CRITICAL_TABLES = (
     "emails",
     "email_attachments",
@@ -53,6 +52,10 @@ class ReleaseUpgradeError(RuntimeError):
     pass
 
 
+def _expected_database() -> str:
+    return settings.database_name
+
+
 def _config_value(name: str, default: str | None = None) -> str | None:
     explicit = os.environ.get(name)
     if explicit is not None:
@@ -63,19 +66,18 @@ def _config_value(name: str, default: str | None = None) -> str | None:
 
 def _validated_target() -> Any:
     url = make_url(settings.DATABASE_URL)
+    allowed_databases = {name.strip() for name in settings.DESTRUCTIVE_TEST_DATABASE_ALLOWLIST if name.strip()}
     if (
         url.get_backend_name() != "mysql"
         or url.drivername not in {"mysql+asyncmy", "mysql+aiomysql"}
         or (url.host or "") not in EXPECTED_HOSTS
         or int(url.port or 3306) != EXPECTED_LOCAL_PORT
-        or url.database != EXPECTED_DATABASE
+        or not url.database
+        or url.database not in allowed_databases
         or not url.username
         or url.password is None
     ):
-        raise ReleaseUpgradeError(
-            "RELEASE_DATABASE_TARGET_MUST_BE_"
-            "mysql+asyncmy://<user>:<password>@127.0.0.1:13307/repair_system_test"
-        )
+        raise ReleaseUpgradeError("RELEASE_DATABASE_TARGET_MUST_MATCH_DATABASE_URL_ON_LOCAL_TUNNEL")
     return url.set(drivername="mysql+asyncmy")
 
 
@@ -131,7 +133,8 @@ def _backup_command(container: str, database: str) -> str:
 def _create_remote_backup(ssh: dict[str, Any], backup_dir: Path) -> dict[str, Any]:
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = backup_dir / f"{EXPECTED_DATABASE}_{timestamp}_before_{EXPECTED_HEAD}.sql"
+    database_name = _expected_database()
+    path = backup_dir / f"{database_name}_{timestamp}_before_{EXPECTED_HEAD}.sql"
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -146,7 +149,7 @@ def _create_remote_backup(ssh: dict[str, Any], backup_dir: Path) -> dict[str, An
             banner_timeout=10,
         )
         _, stdout, stderr = client.exec_command(
-            _backup_command(ssh["container"], EXPECTED_DATABASE),
+            _backup_command(ssh["container"], database_name),
             timeout=30,
         )
         dump = stdout.read()
@@ -270,7 +273,7 @@ async def _execute(args: argparse.Namespace) -> dict[str, Any]:
         server.start()
         print("RELEASE_TUNNEL_READY:127.0.0.1:13307", flush=True)
         before = await _database_snapshot(target)
-        if before["database"] != EXPECTED_DATABASE:
+        if before["database"] != _expected_database():
             raise ReleaseUpgradeError("RELEASE_DATABASE_NAME_MISMATCH")
         if before["active_jobs"] != 0:
             raise ReleaseUpgradeError(
@@ -323,7 +326,7 @@ async def _execute(args: argparse.Namespace) -> dict[str, Any]:
                     "-m",
                     "tools.audit_mail_release",
                     "--expected-database",
-                    EXPECTED_DATABASE,
+                    _expected_database(),
                     "--backup",
                     backup["path"],
                 ],
@@ -354,7 +357,7 @@ async def _execute(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Back up and upgrade only repair_system_test through the controlled "
+            "Back up and upgrade the DATABASE_URL database through the controlled "
             "127.0.0.1:13307 SSH tunnel."
         )
     )

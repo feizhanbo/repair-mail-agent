@@ -368,6 +368,7 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
         ticket_id=1,
         line_no=1,
         sn="SN0001",
+        sn_asset_id=10,
         material_code="MAT1",
         material_name="Material",
         return_location="tianjin",
@@ -385,7 +386,17 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
         payload_hash="a" * 64,
         payload_snapshot={},
     )
-    session = QueueSession(execute_rows=[[], [item]])
+    asset = SnAsset(
+        id=10,
+        ins_id=1001,
+        sn="SN0001",
+        customer_code="CM001",
+        customer_name="Acme",
+        material_code="MAT1",
+        material_name="Material",
+        asset_status="valid",
+    )
+    session = QueueSession(execute_rows=[[], [item]], get_values={(SnAsset, 10): asset})
 
     rows = await sap_rma.ensure_export_lines(
         session,

@@ -13,26 +13,29 @@ from app.models import (
     CustomerServicePolicy,
     ExportSap,
     RepairTicket,
+    RepairTicketItem,
+    SnAsset,
     TicketRelayExport,
     TicketRma,
     TicketRmaItem,
 )
 from app.services import customer_policies, external_relay, sap_rma
 from app.integrations.sap_middleware import ExternalRmaResult
+from app.services.sap_rma_mapping import build_rma_submission
 
 
 def test_sap_protocol_translates_business_rmb_to_cny() -> None:
-    row = ExportSap(
-        source_request_id="req-rmb-1",
-        ticket_id=1,
-        ticket_item_id=2,
-        relay_export_id=3,
-        ticket_version=1,
-        payload_hash="a" * 64,
-        sn="SN-RMB",
-        currency="RMB",
+    ticket = RepairTicket(id=1, ticket_no="T1", mailing_address="Address", contact_phone="13800000000")
+    item = RepairTicketItem(id=2, ticket_id=1, line_no=1, sn="SN-RMB", sn_asset_id=3)
+    asset = SnAsset(id=3, ins_id=9, sn="SN-RMB", customer_code="C1", customer_name="Customer", material_code="M1")
+    dto = build_rma_submission(
+        request_id="11111111-1111-4111-8111-111111111111",
+        ticket=ticket,
+        item=item,
+        asset=asset,
+        policy={"currency": "RMB"},
     )
-    assert sap_rma._line_payload(row)["currency"] == "CNY"
+    assert dto.sql_parameters["U_cur"] == "CNY"
 
 
 class _ScalarRows:
@@ -117,7 +120,7 @@ def _batch_fixture(rma_status: str = "waiting_sap"):
             ticket_item_id=41,
             relay_export_id=10,
             ticket_version=3,
-            source_request_id="11111111-1111-4111-8111-111111111111",
+            request_id="11111111-1111-4111-8111-111111111111",
             payload_hash="1" * 64,
             status="waiting_sap_result",
             sn="SN0001",
@@ -137,7 +140,7 @@ def _batch_fixture(rma_status: str = "waiting_sap"):
             ticket_item_id=42,
             relay_export_id=10,
             ticket_version=3,
-            source_request_id="22222222-2222-4222-8222-222222222222",
+            request_id="22222222-2222-4222-8222-222222222222",
             payload_hash="2" * 64,
             status="waiting_sap_result",
             sn="SN0002",
@@ -159,16 +162,19 @@ class _ResultAdapter:
     def __init__(self, mapping: dict[str, str | None]):
         self.mapping = mapping
 
-    async def find_records_by_source_request_ids(self, source_request_ids):
+    async def query_rma_results(self, request_ids):
         return [
             ExternalRmaResult(
-                source_request_id=value,
+                request_id=value,
                 sn=None,
                 rma_no=self.mapping.get(str(value)),
             )
-            for value in source_request_ids
+            for value in request_ids
             if str(value) in self.mapping
         ]
+
+    async def find_submitted_request_ids(self, request_ids):
+        return [value for value in request_ids if str(value) in self.mapping]
 
 
 @pytest.mark.parametrize(
@@ -197,7 +203,7 @@ def test_two_sn_with_same_rma_create_one_ticket_rma(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: "2026072801" for line in lines}),
+        lambda: _ResultAdapter({line.request_id: "2026072801" for line in lines}),
     )
     monkeypatch.setattr(sap_rma, "enqueue_job", enqueue)
     monkeypatch.setattr(sap_rma, "notify_ticket_once", AsyncMock())
@@ -232,7 +238,7 @@ def test_unsent_existing_rma_uses_latest_export_policy_snapshot(
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: "2026072801" for line in lines}),
+        lambda: _ResultAdapter({line.request_id: "2026072801" for line in lines}),
     )
     monkeypatch.setattr(
         sap_rma,
@@ -262,7 +268,7 @@ def test_two_sn_with_different_rma_require_manual_review(monkeypatch: pytest.Mon
         sap_rma,
         "create_sap_middleware_adapter",
         lambda: _ResultAdapter(
-            {lines[0].source_request_id: "2026072801", lines[1].source_request_id: "2026072802"}
+            {lines[0].request_id: "2026072801", lines[1].request_id: "2026072802"}
         ),
     )
     monkeypatch.setattr(sap_rma, "transition_ticket", transition)
@@ -289,7 +295,7 @@ def test_partial_rma_backfill_stays_recoverable(monkeypatch: pytest.MonkeyPatch)
         sap_rma,
         "create_sap_middleware_adapter",
         lambda: _ResultAdapter(
-            {lines[0].source_request_id: "2026072801", lines[1].source_request_id: None}
+            {lines[0].request_id: "2026072801", lines[1].request_id: None}
         ),
     )
 
@@ -312,7 +318,7 @@ def test_invalid_rma_backfill_moves_ticket_to_manual(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: "2026130101" for line in lines}),
+        lambda: _ResultAdapter({line.request_id: "2026130101" for line in lines}),
     )
     monkeypatch.setattr(sap_rma, "transition_ticket", transition)
 
@@ -347,7 +353,7 @@ def test_rma_already_used_by_another_ticket_requires_manual_review(
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: "2026072801" for line in lines}),
+        lambda: _ResultAdapter({line.request_id: "2026072801" for line in lines}),
     )
     monkeypatch.setattr(sap_rma, "transition_ticket", transition)
     monkeypatch.setattr(sap_rma, "enqueue_job", enqueue)
@@ -382,7 +388,7 @@ def test_same_customer_and_business_date_can_reuse_rma_across_tickets(
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: "2026072801" for line in lines}),
+        lambda: _ResultAdapter({line.request_id: "2026072801" for line in lines}),
     )
     monkeypatch.setattr(
         sap_rma,
@@ -412,7 +418,7 @@ def test_unknown_submit_all_source_ids_found_resumes_polling(
     monkeypatch.setattr(
         sap_rma,
         "create_sap_middleware_adapter",
-        lambda: _ResultAdapter({line.source_request_id: None for line in lines}),
+        lambda: _ResultAdapter({line.request_id: None for line in lines}),
     )
     enqueue = AsyncMock(return_value=SimpleNamespace(id=88))
     monkeypatch.setattr(sap_rma, "enqueue_job", enqueue)
@@ -429,7 +435,7 @@ def test_unknown_submit_all_source_ids_found_resumes_polling(
     assert result["status"] == "waiting_sap_result"
     assert export.status == "waiting_sap_result"
     assert all(line.status == "waiting_sap_result" for line in lines)
-    enqueue.assert_awaited_once()
+    enqueue.assert_not_awaited()
 
 
 def test_unknown_submit_no_source_ids_after_second_check_retries_same_ids(
@@ -438,7 +444,7 @@ def test_unknown_submit_no_source_ids_after_second_check_retries_same_ids(
     export, ticket, lines = _batch_fixture()
     export.status = "submit_unknown"
     export.next_retry_at = sap_rma.utcnow() - timedelta(seconds=1)
-    original_ids = [line.source_request_id for line in lines]
+    original_ids = [line.request_id for line in lines]
     for line in lines:
         line.status = "submit_unknown"
     session = _PollSession(export, ticket, lines)
@@ -460,7 +466,7 @@ def test_unknown_submit_no_source_ids_after_second_check_retries_same_ids(
     )
 
     assert result["status"] == "pending"
-    assert [line.source_request_id for line in lines] == original_ids
+    assert [line.request_id for line in lines] == original_ids
     assert all(line.status == "pending" for line in lines)
     enqueue.assert_awaited_once()
 
@@ -529,7 +535,7 @@ def test_free_and_special_price_overlap_requires_manual_review() -> None:
     assert result["error_code"] == "CUSTOMER_POLICY_CONFLICT"
 
 
-def test_sqlserver_table_mode_requires_source_request_id_but_not_call_id(
+def test_sqlserver_three_table_contract_requires_request_id_but_not_call_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_ENABLED", True)
@@ -538,19 +544,14 @@ def test_sqlserver_table_mode_requires_source_request_id_but_not_call_id(
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_USER", "user")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_PASSWORD", "secret")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_DRIVER", "ODBC Driver 18")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_SN_TABLE", "sn")
+    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_SN_TABLE", "oins_rma")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_SN_PRIMARY_KEY", "id")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_SN_UPDATED_AT_COLUMN", "updatedAt")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_MODE", "table")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN", "SourceRequestID")
+    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_REQUEST_TABLE", "oscl_rma")
+    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_TABLE", "oscl_print")
+    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_REQUEST_ID_COLUMN", "RequestID")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RMA_COLUMN", "U_CustomerNum")
-    monkeypatch.setattr(
-        external_relay.settings,
-        "RELAY_SQLSERVER_RESULT_COLUMN_MAP",
-        {"sn": "internalSN"},
-    )
 
     result = external_relay.relay_configuration_status()
 

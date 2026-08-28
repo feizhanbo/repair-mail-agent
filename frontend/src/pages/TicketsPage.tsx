@@ -707,14 +707,14 @@ export default function TicketsPage() {
         </Form>
       </Modal>
       <Modal
-        title="SAP SourceRequestID 整批对账"
+        title="SAP RequestID 整批对账"
         open={sapReconcileLineId !== null}
         onCancel={() => setSapReconcileLineId(null)}
         footer={null}
         destroyOnClose
       >
         <Typography.Paragraph type="warning">
-          系统将按本批全部 SourceRequestID 重新查询。全部存在则继续等待 RMA；全部不存在才允许整批重试；部分存在会转人工处理。
+          系统将按本批全部 RequestID 重新查询。全部存在则继续等待 RMA；全部不存在才允许整批重试；部分存在会转人工处理。
         </Typography.Paragraph>
         <Form<SapReconcileForm>
           layout="vertical"
@@ -724,7 +724,7 @@ export default function TicketsPage() {
             <Input.TextArea rows={4} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={reconcileSapMutation.isPending}>
-            按 SourceRequestID 重新核对
+            按 RequestID 重新核对
           </Button>
         </Form>
       </Modal>
@@ -1140,7 +1140,7 @@ function TicketDetailView({
                   columns={[
                     { title: 'SN', dataIndex: 'sn', width: 150, fixed: 'left', render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '状态', dataIndex: 'status', width: 120, render: (v: string) => <StatusTag value={v} kind="sap" /> },
-                    { title: 'SourceRequestID', dataIndex: 'source_request_id', width: 260, render: (v?: string) => <CopyableField value={v || '-'} /> },
+                    { title: 'RequestID', dataIndex: 'request_id', width: 260, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '历史 CallID', dataIndex: 'remote_call_id', width: 150, render: (v?: string) => v ? <CopyableField value={v} /> : '-' },
                     { title: 'RMA', dataIndex: 'rma_no', width: 130, render: (v?: string) => <CopyableField value={v || '-'} /> },
                     { title: '客户代码', dataIndex: 'customer_code', width: 120, render: (v?: string) => v || '-' },

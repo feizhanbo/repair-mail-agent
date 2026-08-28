@@ -72,6 +72,7 @@ async def test_sn_validation_uses_local_mirror_and_never_calls_sql_when_disabled
     item = _item()
     asset = SnAsset(
         id=21,
+        ins_id=9001,
         sn=item.sn,
         customer_code=ticket.customer_code,
         customer_name=ticket.customer_name,
@@ -106,6 +107,7 @@ async def test_persisted_sn_hash_uses_asset_enriched_material_state(monkeypatch)
     item.material_name = None
     asset = SnAsset(
         id=21,
+        ins_id=9001,
         sn=item.sn,
         customer_code="C001",
         customer_name=ticket.customer_name,
@@ -175,6 +177,35 @@ async def test_duplicate_sn_fails_core_validation_before_asset_lookup(monkeypatc
         "items.1.sn": "duplicate_sn",
         "items.2.sn": "duplicate_sn",
     }
+
+
+@pytest.mark.anyio
+async def test_missing_ins_id_fails_during_sn_validation(monkeypatch) -> None:
+    ticket = _ticket()
+    item = _item()
+    asset = SnAsset(
+        id=21,
+        ins_id=None,
+        sn=item.sn,
+        customer_code=ticket.customer_code,
+        customer_name=ticket.customer_name,
+        material_code=item.material_code,
+        material_name=item.material_name,
+        asset_status="valid",
+        source_system="sqlserver:oins_rma",
+    )
+
+    async def fake_ticket_and_items(_session, _ticket_id):
+        return ticket, [item]
+
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", False)
+    monkeypatch.setattr(ticket_safety, "_ticket_and_items", fake_ticket_and_items)
+
+    report = await ticket_safety.build_sn_validation_report(ScalarSession(asset), ticket_id=1)
+
+    assert report["passed"] is False
+    assert report["errors"]["items.1.ins_id"] == "required_from_sn_master"
+    assert report["snapshot"]["checks"][0]["asset_ins_id"] is None
 
 
 @pytest.mark.anyio

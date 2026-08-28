@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.config import settings
 
 
-EXPECTED_ALEMBIC_HEAD = "x1s6n7o8p9q0"
+EXPECTED_ALEMBIC_HEAD = "y2t7u8v9w0x1"
 EXPECTED_BUSINESS_TABLE_COUNT = 38
 REQUIRED_INDEXES = {
     "uk_emails_message_id",
