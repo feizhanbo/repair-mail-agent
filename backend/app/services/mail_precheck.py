@@ -110,9 +110,18 @@ async def precheck_email_payload(
     payload: EmailIngestRequest,
     *,
     enforce_target_mailbox: bool = False,
+    current_fetch_record_id: int | None = None,
 ) -> MailPrecheckResult:
-    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
+    message_id = normalize_message_id(payload.message_id)
     payload.message_id = message_id
+
+    if message_id is None:
+        return MailPrecheckResult(
+            accepted=False,
+            status="missing_message_id",
+            reason="MISSING_MESSAGE_ID",
+            message_id=None,
+        )
 
     target = parseaddr(settings.IMAP_USER or "")[1].strip().lower()
     sender = parseaddr(payload.from_address or "")[1].strip().lower()
@@ -162,11 +171,16 @@ async def precheck_email_payload(
             message_id=message_id,
             duplicate_email_id=duplicate.id,
         )
-    duplicate_fetch = await session.scalar(
-        select(MailFetchRecord).where(
+    duplicate_fetch_statement = select(MailFetchRecord).where(
             MailFetchRecord.message_id == message_id,
             MailFetchRecord.fetch_status.notin_({"failed", "retry_wait", "processing"}),
-        ).order_by(MailFetchRecord.id.desc()).limit(1)
+        )
+    if current_fetch_record_id is not None:
+        duplicate_fetch_statement = duplicate_fetch_statement.where(
+            MailFetchRecord.id != current_fetch_record_id
+        )
+    duplicate_fetch = await session.scalar(
+        duplicate_fetch_statement.order_by(MailFetchRecord.id.desc()).limit(1)
     )
     if duplicate_fetch is not None:
         return MailPrecheckResult(

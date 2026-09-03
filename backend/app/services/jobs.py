@@ -21,16 +21,26 @@ logger = logging.getLogger(__name__)
 
 
 JOB_TYPES = {
-    "email_parse", "email_reparse", "imap_fetch", "smtp_send", "auto_followup",
+    "email_parse", "email_reparse", "imap_fetch", "mail_ingress_process", "smtp_send", "auto_followup",
     "master_data_import", "export_generate", "relay_ticket_export", "sap_rma_poll",
     "rma_authorization", "rma_archive",
     "oss_delete",
+}
+MAIL_JOB_TYPES = {
+    "imap_fetch",
+    "mail_ingress_process",
+    "email_parse",
+    "email_reparse",
+    "smtp_send",
+    "auto_followup",
+    "rma_authorization",
+    "rma_archive",
 }
 TERMINAL_STATUSES = {"success", "needs_manual_review", "failed", "cancelled"}
 NON_RETRYABLE_ERROR_PARTS = {
     "NOT_FOUND", "NOT_SUPPORTED", "REQUIRED", "INVALID", "FORBIDDEN",
     "RECIPIENT_NOT_ALLOWED", "SELECTION", "FOLLOWUP_LIMIT", "TOO_LARGE",
-    "TOO_MANY", "ENCRYPTED", "CORRUPT", "UNCERTAIN",
+    "TOO_MANY", "ENCRYPTED", "CORRUPT", "UNCERTAIN", "TERMINAL",
 }
 JOB_FIELDS = (
     "id", "job_name", "job_type", "status", "resource_type", "resource_id",
@@ -47,6 +57,14 @@ def serialize_job(job: JobRunLog) -> dict[str, Any]:
 
 def _job_error_is_retryable(error_code: str) -> bool:
     return not any(part in error_code for part in NON_RETRYABLE_ERROR_PARTS)
+
+
+def _job_retry_delay(job_type: str, attempt_count: int) -> timedelta:
+    if job_type == "smtp_send":
+        backoff = settings.SMTP_RETRY_BACKOFF_SECONDS or [30, 120, 300]
+        return timedelta(seconds=max(1, int(backoff[min(max(0, attempt_count - 1), len(backoff) - 1)])))
+    delay_minutes = (5, 15, 60)[min(max(0, attempt_count - 1), 2)]
+    return timedelta(minutes=delay_minutes)
 
 
 async def enqueue_job(
@@ -143,7 +161,13 @@ async def recover_stale_jobs(session: AsyncSession) -> int:
     return len(stale_jobs)
 
 
-async def claim_next_job(session: AsyncSession, *, worker_id: str | None = None) -> JobRunLog | None:
+async def claim_next_job(
+    session: AsyncSession,
+    *,
+    worker_id: str | None = None,
+    job_types: set[str] | None = None,
+    excluded_job_types: set[str] | None = None,
+) -> JobRunLog | None:
     now = utcnow()
     await recover_stale_jobs(session)
     statement = (
@@ -156,6 +180,10 @@ async def claim_next_job(session: AsyncSession, *, worker_id: str | None = None)
         .with_for_update(skip_locked=True)
         .limit(1)
     )
+    if job_types:
+        statement = statement.where(JobRunLog.job_type.in_(job_types))
+    if excluded_job_types:
+        statement = statement.where(JobRunLog.job_type.notin_(excluded_job_types))
     job = await session.scalar(statement)
     if job is None:
         return None
@@ -203,12 +231,23 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
             archive_to_oss=True,
             user_id=user_id,
         )
+    if job.job_type == "mail_ingress_process":
+        from app.services.mail_processing import process_spooled_mail
+
+        if job.resource_id is None:
+            raise ValueError("JOB_RESOURCE_REQUIRED")
+        return await process_spooled_mail(
+            session,
+            fetch_record_id=job.resource_id,
+            user_id=user_id,
+            auto_parse=bool(metadata.get("auto_parse", True)),
+        )
     if job.job_type == "smtp_send":
-        from app.services.replies import approve_reply
+        from app.services.replies import execute_approved_reply_send
 
         if job.resource_id is None or user_id is None:
             raise ValueError("JOB_RESOURCE_REQUIRED")
-        return await approve_reply(session, reply_id=job.resource_id, user_id=user_id)
+        return await execute_approved_reply_send(session, reply_id=job.resource_id, user_id=user_id)
     if job.job_type == "relay_ticket_export":
         from app.services.relay_jobs import execute_ticket_relay_export
 
@@ -393,8 +432,7 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             job.failed_count += 1
             if retryable and job.attempt_count < job.max_attempts:
                 job.status = "retry_wait"
-                delay_minutes = (5, 15, 60)[min(job.attempt_count - 1, 2)]
-                job.next_run_at = utcnow() + timedelta(minutes=delay_minutes)
+                job.next_run_at = utcnow() + _job_retry_delay(job.job_type, job.attempt_count)
             else:
                 job.status = "needs_manual_review" if business_status in {"manual_review", "send_uncertain", "misconfigured", "archive_failed"} else "failed"
                 job.finished_at = utcnow()
@@ -441,8 +479,7 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
         retryable = _job_error_is_retryable(error_code)
         if retryable and job.attempt_count < job.max_attempts:
             job.status = "retry_wait"
-            delay_minutes = (5, 15, 60)[min(job.attempt_count - 1, 2)]
-            job.next_run_at = utcnow() + timedelta(minutes=delay_minutes)
+            job.next_run_at = utcnow() + _job_retry_delay(job.job_type, job.attempt_count)
         else:
             job.status = "needs_manual_review" if error_code.startswith("SMTP_") else "failed"
             job.finished_at = utcnow()

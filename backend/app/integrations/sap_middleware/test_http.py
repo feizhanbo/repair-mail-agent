@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Sequence
+from datetime import date, datetime, time
+from decimal import Decimal
+from typing import Any, Sequence
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -16,6 +18,19 @@ from app.integrations.sap_middleware.contracts import (
     SapTransactionError,
 )
 from app.services.mail_safety import test_mail_configuration_reasons as _test_mail_configuration_reasons
+
+
+def _json_payload_value(value: Any) -> Any:
+    """Mirror SQL-bound scalar semantics with lossless JSON-safe values."""
+    if isinstance(value, dict):
+        return {str(key): _json_payload_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_payload_value(item) for item in value]
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    return value
 
 
 class TestHttpSapMiddlewareAdapter:
@@ -61,13 +76,15 @@ class TestHttpSapMiddlewareAdapter:
         if not health.configured:
             raise SapMiddlewareConfigurationError("TEST_RELAY_NOT_CONFIGURED:" + ",".join(health.missing))
         payload = [
-            {
-                **item.payload,
-                "RequestID": str(item.request_id),
-                "sn": item.sn,
-                "ticket_id": item.ticket_id,
-                "ticket_item_id": item.ticket_item_id,
-            }
+            _json_payload_value(
+                {
+                    **item.payload,
+                    "RequestID": str(item.request_id),
+                    "sn": item.sn,
+                    "ticket_id": item.ticket_id,
+                    "ticket_item_id": item.ticket_item_id,
+                }
+            )
             for item in items
         ]
         try:

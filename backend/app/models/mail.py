@@ -200,6 +200,13 @@ class EmailAttachment(CreatedAtMixin, Base):
     oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_email_attachments_oss"))
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str | None] = mapped_column(String(255))
+    original_content_type: Mapped[str | None] = mapped_column(String(255))
+    detected_content_type: Mapped[str | None] = mapped_column(String(255))
+    content_disposition: Mapped[str | None] = mapped_column(String(30))
+    resource_role: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="regular_attachment"
+    )
+    file_extension: Mapped[str | None] = mapped_column(String(30))
     file_size: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True))
     file_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     is_inline: Mapped[bool] = bool_column(False)

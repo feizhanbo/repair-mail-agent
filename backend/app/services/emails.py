@@ -63,6 +63,11 @@ def serialize_attachment(attachment: EmailAttachment, email: Email | None = None
             "oss_object_id",
             "file_name",
             "content_type",
+            "original_content_type",
+            "detected_content_type",
+            "content_disposition",
+            "resource_role",
+            "file_extension",
             "file_size",
             "file_hash",
             "is_inline",
@@ -91,7 +96,9 @@ async def ingest_minimal_email(
     priority: str = "normal",
 ) -> dict[str, Any]:
     """Persist SECOND/UNKNOWN without thread, ticket, attachment OSS or business workflow."""
-    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
+    message_id = normalize_message_id(payload.message_id)
+    if message_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="MISSING_MESSAGE_ID")
     duplicate = await session.scalar(select(Email).where(Email.message_id == message_id))
     if duplicate is not None:
         return {"duplicate": True, "email": serialize_email(duplicate)}
@@ -144,6 +151,11 @@ async def ingest_minimal_email(
             oss_object_id=None,
             file_name=item.get("file_name") or "attachment",
             content_type=item.get("content_type"),
+            original_content_type=item.get("original_content_type"),
+            detected_content_type=item.get("detected_content_type"),
+            content_disposition=item.get("content_disposition"),
+            resource_role=item.get("resource_role", "regular_attachment"),
+            file_extension=item.get("file_extension"),
             file_size=item.get("file_size"),
             file_hash=item.get("file_hash"),
             is_inline=item.get("is_inline", False),
@@ -532,7 +544,9 @@ async def ingest_email(
     auto_parse: bool = True,
     rule_analysis: RuleAnalysisResult | None = None,
 ) -> dict[str, Any]:
-    message_id = normalize_message_id(payload.message_id, fallback_hash=payload.raw_eml_sha256)
+    message_id = normalize_message_id(payload.message_id)
+    if message_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="MISSING_MESSAGE_ID")
     duplicate_predicates = [Email.message_id == message_id]
     if payload.raw_eml_sha256:
         duplicate_predicates.append(Email.source_content_sha256 == payload.raw_eml_sha256)
@@ -624,6 +638,11 @@ async def ingest_email(
                 oss_object_id=attachment_payload.get("oss_object_id"),
                 file_name=attachment_payload.get("file_name") or "attachment",
                 content_type=attachment_payload.get("content_type"),
+                original_content_type=attachment_payload.get("original_content_type"),
+                detected_content_type=attachment_payload.get("detected_content_type"),
+                content_disposition=attachment_payload.get("content_disposition"),
+                resource_role=attachment_payload.get("resource_role", "regular_attachment"),
+                file_extension=attachment_payload.get("file_extension"),
                 file_size=attachment_payload.get("file_size"),
                 file_hash=attachment_payload.get("file_hash"),
                 is_inline=attachment_payload.get("is_inline", False),

@@ -34,7 +34,7 @@ from app.services.email_flow_trace import build_email_flow_trace
 from app.services.email_preview import build_attachment_preview, build_email_preview
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
-from app.services.mail_ingress import process_preclassified_ingress
+from app.services.mail_ingress import persist_missing_message_id_anomaly, process_preclassified_ingress
 from app.services.common import utcnow
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services.jobs import enqueue_job, recover_stale_jobs, serialize_job
@@ -501,6 +501,11 @@ async def ingest_email(
     payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+                source="manual_ingest", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
@@ -533,6 +538,11 @@ async def ingest_email_job(
     payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+                source="manual_ingest_job", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest_job", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)
@@ -576,6 +586,11 @@ async def ingest_eml(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+                source="eml_upload", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
@@ -619,6 +634,11 @@ async def ingest_eml_job(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+                source="eml_upload_job", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload_job", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)

@@ -171,6 +171,214 @@ def test_cleanup_apply_requires_preview_plan_hash(tmp_path: Path) -> None:
     assert args.plan_hash is None
 
 
+def test_cleanup_reports_partial_success_when_relay_reset_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    root = tmp_path / payload["suite_id"]
+    root.mkdir()
+    responses = iter(
+        [
+            {"plan_hash": "mail-plan", "blockers": []},
+            {"blockers": []},
+            {"status": "applied"},
+        ]
+    )
+
+    def run_async(coroutine):
+        coroutine.close()
+        return next(responses)
+
+    monkeypatch.setattr(tool, "suite_root", lambda _suite_id: root)
+    monkeypatch.setattr(tool, "run_database_async", run_async)
+    monkeypatch.setattr(
+        tool,
+        "_relay_reset",
+        lambda: (_ for _ in ()).throw(PermissionError("secret relay response")),
+    )
+    combined = {
+        "mail_plan_hash": "mail-plan",
+        "temporary_master_plan": {"blockers": []},
+    }
+    plan_hash = hashlib.sha256(
+        json.dumps(
+            combined, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool.cleanup(manifest, apply=True, expected_hash=plan_hash)
+
+    assert exc.value.code == "CLEANUP_RELAY_RESET_FAILED"
+    assert exc.value.details == {
+        "database_cleanup_applied": True,
+        "temporary_master_cleanup_count": 0,
+        "relay_reset": False,
+        "cause": "PermissionError",
+    }
+
+
+def test_stale_classification_master_state_is_cleaned_before_reuse(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manifest = tmp_path / "case-manifest.json"
+    state = tmp_path / "temporary-master-state.json"
+    manifest.write_text("{}", encoding="utf-8")
+    state.write_text("{}", encoding="utf-8")
+    calls = []
+
+    async def cleanup(manifest_path, *, state_path, skip_manifest_validation):
+        calls.append((manifest_path, state_path, skip_manifest_validation))
+        return {"status": "cleaned"}
+
+    monkeypatch.setattr(tool, "cleanup_temporary_master_data", cleanup)
+
+    result = asyncio.run(tool._cleanup_stale_temporary_master_state(manifest, state))
+
+    assert result == {"status": "cleaned"}
+    assert calls == [(manifest, state, True)]
+
+
+def test_missing_classification_master_state_needs_no_cleanup(tmp_path: Path) -> None:
+    result = asyncio.run(
+        tool._cleanup_stale_temporary_master_state(
+            tmp_path / "case-manifest.json",
+            tmp_path / "missing-state.json",
+        )
+    )
+
+    assert result is None
+
+
+def test_post_case_reset_waits_only_for_transient_active_jobs(monkeypatch) -> None:
+    responses = iter(
+        [
+            {
+                "plan_hash": "busy",
+                "blockers": ["GOLD_REPLAY_ACTIVE_JOBS"],
+                "active_job_ids": [91],
+            },
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"status": "applied"},
+        ]
+    )
+
+    def run_async(coroutine):
+        coroutine.close()
+        return next(responses)
+
+    monkeypatch.setattr(tool, "run_database_async", run_async)
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+
+    result = tool._reset_after_active_jobs_idle(
+        ["<gold@example.com>"],
+        suite_id="suite",
+        run_id="post",
+        timeout_seconds=5,
+    )
+
+    assert result == {"status": "applied"}
+
+
+def test_post_case_reset_retries_apply_race_until_downstream_job_is_visible(
+    monkeypatch,
+) -> None:
+    responses = iter(
+        [
+            {"plan_hash": "premature", "blockers": [], "active_job_ids": []},
+            {"plan_hash": "premature", "blockers": [], "active_job_ids": []},
+            tool.GoldCliError("CLEANUP_PLAN_HASH_MISMATCH"),
+            {
+                "plan_hash": "busy",
+                "blockers": ["GOLD_REPLAY_ACTIVE_JOBS"],
+                "active_job_ids": [92],
+            },
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"status": "applied"},
+        ]
+    )
+
+    def run_async(coroutine):
+        coroutine.close()
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(tool, "run_database_async", run_async)
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+
+    result = tool._reset_after_active_jobs_idle(
+        ["<gold@example.com>"],
+        suite_id="suite",
+        run_id="post",
+        timeout_seconds=5,
+    )
+
+    assert result == {"status": "applied"}
+
+
+def test_post_case_reset_does_not_wait_for_uncertain_external_state(
+    monkeypatch,
+) -> None:
+    def run_async(coroutine):
+        coroutine.close()
+        return {
+            "plan_hash": "blocked",
+            "blockers": ["GOLD_REPLAY_UNCERTAIN_EXTERNAL_OPERATIONS"],
+        }
+
+    monkeypatch.setattr(tool, "run_database_async", run_async)
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool._reset_after_active_jobs_idle(
+            ["<gold@example.com>"],
+            suite_id="suite",
+            run_id="post",
+        )
+
+    assert exc.value.code == "CLEANUP_BLOCKED"
+
+
+def test_post_case_reset_waits_while_active_job_owns_uncertain_operation(
+    monkeypatch,
+) -> None:
+    responses = iter(
+        [
+            {
+                "plan_hash": "busy",
+                "blockers": [
+                    "GOLD_REPLAY_ACTIVE_JOBS",
+                    "GOLD_REPLAY_UNCERTAIN_EXTERNAL_OPERATION",
+                ],
+                "active_job_ids": [93],
+            },
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"plan_hash": "ready", "blockers": [], "active_job_ids": []},
+            {"status": "applied"},
+        ]
+    )
+
+    def run_async(coroutine):
+        coroutine.close()
+        return next(responses)
+
+    monkeypatch.setattr(tool, "run_database_async", run_async)
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+
+    result = tool._reset_after_active_jobs_idle(
+        ["<gold@example.com>"],
+        suite_id="suite",
+        run_id="post",
+        timeout_seconds=5,
+    )
+
+    assert result == {"status": "applied"}
+
+
 def test_run_parser_accepts_controlled_message_id_subset(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     args = tool.build_parser().parse_args(
@@ -222,6 +430,92 @@ def test_set_and_verify_runtime_switches_detects_drift(monkeypatch) -> None:
         )
 
     assert exc.value.code == "RUNTIME_SEND_SWITCH_DRIFT"
+
+
+def test_target_relay_gate_rejects_sqlserver_worker() -> None:
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool._assert_target_relay_is_test_http(
+            {
+                "integrations": {
+                    "sqlserver_relay": {
+                        "adapter": "sqlserver",
+                        "configured": True,
+                        "status": "configured",
+                        "missing": [],
+                    }
+                }
+            }
+        )
+
+    assert exc.value.code == "TARGET_RELAY_NOT_TEST_HTTP"
+
+
+def test_target_relay_gate_accepts_configured_test_http_worker() -> None:
+    tool._assert_target_relay_is_test_http(
+        {
+            "integrations": {
+                "sqlserver_relay": {
+                    "adapter": "test_http",
+                    "configured": True,
+                    "status": "configured",
+                    "missing": [],
+                }
+            }
+        }
+    )
+
+
+def test_config_restore_does_not_mask_primary_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tool,
+        "patch_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("MAIL_TEST_PREFLIGHT_FAILED:sensitive")
+        ),
+    )
+    primary = ValueError("original failure")
+
+    tool._restore_config_without_masking_primary_error(object(), {}, primary)
+
+    assert primary.__notes__ == [
+        "RUNTIME_CONFIG_RESTORE_FAILED:MAIL_TEST_PREFLIGHT_FAILED"
+    ]
+
+
+def test_config_restore_failure_is_structured_without_primary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tool,
+        "patch_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("secret")),
+    )
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool._restore_config_without_masking_primary_error(object(), {}, None)
+
+    assert exc.value.code == "RUNTIME_CONFIG_RESTORE_FAILED"
+    assert exc.value.details == {"cause": "PermissionError"}
+
+
+def test_config_restore_includes_relay_runtime_switch(monkeypatch) -> None:
+    captured = {}
+
+    def patch(_client, **values):
+        captured.update(values)
+
+    monkeypatch.setattr(tool, "patch_config", patch)
+
+    tool._restore_config_without_masking_primary_error(
+        object(),
+        {
+            "auto_send_enabled": False,
+            "auto_followup_enabled": True,
+            "rma_auto_send_enabled": False,
+            "relay_sqlserver_enabled": True,
+        },
+        None,
+    )
+
+    assert captured["relay_sqlserver_enabled"] is True
 
 
 def test_safe_exception_code_preserves_only_machine_prefix() -> None:
@@ -320,6 +614,287 @@ def test_classification_issues_rejects_wrong_business_stage(tmp_path: Path) -> N
             "codes": ["CLASSIFICATION_STAGE_MISMATCH"],
         }
     ]
+
+
+def test_classification_accepts_resolved_problem_description(tmp_path: Path) -> None:
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gold = manifest["messages"][0]["gold"]
+    gold["missing_fields"] = ["problem_description"]
+    message_id = manifest["messages"][0]["message_id"]
+    result = {
+        "cases": [{
+            "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
+            "intent_type": "new_repair",
+            "handling_level": "auto_repair",
+            "persistence_tier": "business",
+            "ticket": {
+                "status": "ready_for_export",
+                "customer_code": "CM00001",
+                "problem_description": "Explicit failure",
+                "missing_fields": {},
+            },
+            "items": [{"sn": "SN-GOLD-001"}],
+        }]
+    }
+
+    assert tool._classification_issues(manifest, result) == []
+
+
+def test_classification_accepts_explicit_manual_review_outcome(tmp_path: Path) -> None:
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gold = manifest["messages"][0]["gold"]
+    gold["missing_fields"] = ["contact_person", "contact_phone", "mailing_address"]
+    gold["expected_final_status"] = "manual_review"
+    gold["allow_manual_review"] = True
+    message_id = manifest["messages"][0]["message_id"]
+    result = {
+        "cases": [{
+            "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
+            "intent_type": "new_repair",
+            "handling_level": "auto_repair",
+            "persistence_tier": "business",
+            "ticket": {
+                "status": "manual_review",
+                "customer_code": "CM00001",
+                "missing_fields": {
+                    "contact_person": "required",
+                    "contact_phone": "required",
+                    "mailing_address": "required",
+                },
+            },
+            "items": [{"sn": "SN-GOLD-001"}],
+        }]
+    }
+
+    assert tool._classification_issues(manifest, result) == []
+
+
+def test_manual_review_then_rma_uses_operator_workflow() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class Client:
+        def data(self, method: str, path: str, body: dict | None = None, **_kwargs):
+            calls.append((method, path, body))
+            if path.endswith("/fields"):
+                return {"ticket": {"id": 7}}
+            if path.endswith("/validate-sn"):
+                return {"ticket": {"id": 7, "sn_validation_status": "passed"}}
+            if method == "GET":
+                return {
+                    "ticket": {"id": 7, "current_status_code": "manual_review"},
+                    "manual_tasks": [
+                        {"id": 19, "task_type": "ai_review_required", "status": "pending"}
+                    ],
+                }
+            return {
+                "safety_result": {"status": "ready_for_export"},
+                "ticket": {"id": 7, "current_status_code": "ready_for_export"},
+            }
+
+    result = tool._resolve_manual_review_for_rma(
+        Client(),
+        ticket_detail={"ticket": {"id": 7, "current_status_code": "manual_review"}},
+        gold={"manual_resolution_fields": {"request_date": "2026-08-12"}},
+        suite_id="gold-suite",
+    )
+
+    assert result["safety_result"]["status"] == "ready_for_export"
+    assert [call[:2] for call in calls] == [
+        ("PATCH", "/api/v1/tickets/7/fields"),
+        ("POST", "/api/v1/tickets/7/validate-sn"),
+        ("GET", "/api/v1/tickets/7"),
+        ("POST", "/api/v1/manual-review/tasks/19/resolve"),
+    ]
+    assert calls[-1][2]["next_action"] == "transition_ready_for_export"
+
+
+def test_known_repair_need_customer_info_uses_manual_fields_then_export_gate() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def data(self, method: str, path: str, **_kwargs):
+            calls.append((method, path))
+            if path.endswith("/validate-sn"):
+                return {"ticket": {"id": 7, "sn_validation_status": "passed"}}
+            if path.endswith("/validate-export"):
+                return {"status": "ready_for_export", "ticket_id": 7}
+            return {"ticket": {"id": 7, "current_status_code": "need_customer_info"}}
+
+    result = tool._resolve_manual_review_for_rma(
+        Client(),
+        ticket_detail={"ticket": {"id": 7, "current_status_code": "need_customer_info"}},
+        gold={"manual_resolution_fields": {"request_date": "2026-08-12"}},
+        suite_id="gold-suite",
+    )
+
+    assert result["status"] == "ready_for_export"
+    assert ("POST", "/api/v1/tickets/7/validate-export") in calls
+
+
+def test_known_repair_does_not_repeat_export_validation_after_sn_validation_advanced_ticket() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def data(self, method: str, path: str, **_kwargs):
+            calls.append((method, path))
+            if path.endswith("/validate-sn"):
+                return {"ticket": {"id": 7, "sn_validation_status": "passed"}}
+            if method == "GET":
+                return {"ticket": {"id": 7, "current_status_code": "ready_for_export"}}
+            return {"ticket": {"id": 7, "current_status_code": "need_customer_info"}}
+
+    result = tool._resolve_manual_review_for_rma(
+        Client(),
+        ticket_detail={"ticket": {"id": 7, "current_status_code": "need_customer_info"}},
+        gold={"manual_resolution_fields": {"request_date": "2026-08-12"}},
+        suite_id="gold-suite",
+    )
+
+    assert result["ticket"]["current_status_code"] == "ready_for_export"
+    assert not any(path.endswith("/validate-export") for _, path in calls)
+
+
+def test_known_repair_accepts_only_verified_ready_state_after_export_transition_race() -> None:
+    get_count = 0
+
+    class Client:
+        def data(self, method: str, path: str, **_kwargs):
+            nonlocal get_count
+            if path.endswith("/validate-sn"):
+                return {"ticket": {"id": 7, "sn_validation_status": "passed"}}
+            if method == "GET":
+                get_count += 1
+                status = "need_customer_info" if get_count == 1 else "ready_for_export"
+                return {"ticket": {"id": 7, "current_status_code": status}}
+            if path.endswith("/validate-export"):
+                raise RuntimeError("WORKFLOW_TRANSITION_NOT_ALLOWED")
+            return {"ticket": {"id": 7}}
+
+    result = tool._resolve_manual_review_for_rma(
+        Client(),
+        ticket_detail={"ticket": {"id": 7, "current_status_code": "need_customer_info"}},
+        gold={"manual_resolution_fields": {"request_date": "2026-08-12"}},
+        suite_id="gold-suite",
+    )
+
+    assert result["ticket"]["current_status_code"] == "ready_for_export"
+    assert get_count == 2
+
+
+def test_classification_accepts_email_level_manual_review_for_known_repair(tmp_path: Path) -> None:
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gold = manifest["messages"][0]["gold"]
+    gold["allow_manual_review"] = True
+    gold["send_mode"] = "manual_review_then_rma"
+    message_id = manifest["messages"][0]["message_id"]
+    result = {
+        "cases": [{
+            "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
+            "email_id": 17,
+            "intent_type": "unknown",
+            "handling_level": "unknown",
+            "persistence_tier": "minimal",
+            "classification_reason_code": "PRECLASSIFICATION_PROVIDER_FAILED",
+            "parse_status": "manual_review",
+            "ticket": None,
+            "items": [],
+        }]
+    }
+
+    assert tool._classification_issues(manifest, result) == []
+
+
+def test_email_level_manual_review_promotes_known_repair() -> None:
+    calls: list[tuple[str, str, dict | None, dict | None]] = []
+
+    class Client:
+        def data(self, method: str, path: str, body: dict | None = None, params: dict | None = None):
+            calls.append((method, path, body, params))
+            if method == "GET":
+                return {"items": [{
+                    "id": 23,
+                    "email_id": 17,
+                    "ticket_id": None,
+                    "task_type": "unknown_mail_classification",
+                    "status": "pending",
+                }]}
+            return {"reparse_result": {"status": "promoted", "email_id": 17}}
+
+    result = tool._promote_email_to_known_repair(Client(), email_id=17, suite_id="gold-suite")
+
+    assert result["reparse_result"]["status"] == "promoted"
+    assert calls[-1][1] == "/api/v1/manual-review/tasks/23/resolve"
+    assert calls[-1][2]["next_action"] == "promote_to_first"
+    assert calls[-1][2]["target_first_intent"] == "new_repair"
+
+
+def test_email_level_manual_review_ignores_unrelated_tasks() -> None:
+    class Client:
+        def data(self, method: str, path: str, body: dict | None = None, params: dict | None = None):
+            if method == "GET":
+                return {"items": [
+                    {"id": 21, "email_id": 17, "ticket_id": None, "task_type": "manual_rma_business", "status": "pending"},
+                    {"id": 23, "email_id": 17, "ticket_id": None, "task_type": "ai_unavailable", "status": "assignment_failed"},
+                ]}
+            return {"task_id": 23}
+
+    assert tool._promote_email_to_known_repair(Client(), email_id=17, suite_id="gold-suite") == {"task_id": 23}
+
+
+def test_wait_for_parse_terminal_does_not_return_while_ticket_parse_is_pending(monkeypatch) -> None:
+    details = [
+        {"email": {"parse_status": "pending"}, "parse_results": [{"ticket_id": 7}]},
+        {"email": {"parse_status": "needs_manual"}, "parse_results": [{"ticket_id": 7}]},
+    ]
+
+    class Client:
+        def data(self, method: str, path: str, **_kwargs):
+            if path == "/api/v1/emails/17":
+                return details.pop(0)
+            return {"ticket": {"id": 7, "current_status_code": "manual_review"}}
+
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+    email_detail, ticket_detail = tool._wait_for_parse_terminal(Client(), 17, timeout_seconds=1)
+
+    assert email_detail["email"]["parse_status"] == "needs_manual"
+    assert ticket_detail["ticket"]["current_status_code"] == "manual_review"
+
+
+def test_manual_review_accepts_nested_ticket_detail_response() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def data(self, method: str, path: str, **kwargs):
+            calls.append((method, path))
+            if path.endswith("/fields"):
+                return {"ticket": {"id": 7}}
+            if path.endswith("/validate-sn"):
+                return {"ticket": {"sn_validation_status": "passed"}}
+            if path == "/api/v1/tickets/7":
+                return {
+                    "ticket": {"id": 7, "current_status_code": "manual_review"},
+                    "manual_tasks": [{"id": 9, "task_type": "ai_review_required", "status": "pending"}],
+                }
+            if path.endswith("/resolve"):
+                return {"ticket": {"ticket": {"id": 7, "current_status_code": "ready_for_export"}}}
+            return {}
+
+    result = tool._resolve_manual_review_for_rma(
+        Client(),
+        ticket_detail={
+            "ticket": {"id": 7, "current_status_code": "manual_review"},
+            "manual_tasks": [{"id": 9, "task_type": "ai_review_required", "status": "pending"}],
+        },
+        gold={
+            "manual_resolution_fields": {"contact_person": "张跃"},
+        },
+        suite_id="gold-suite",
+    )
+
+    assert result["ticket"]["ticket"]["current_status_code"] == "ready_for_export"
 
 
 def test_refresh_authoritative_send_counts_uses_both_mailboxes(monkeypatch) -> None:
@@ -685,6 +1260,79 @@ def test_fetch_system_message_retries_until_smtp_mail_is_imap_visible(monkeypatc
     assert calls == 2
 
 
+def test_fetch_system_message_waits_for_async_ingress_job(monkeypatch) -> None:
+    class Client:
+        def data(self, method, path, **kwargs):
+            return {"job": {"id": 71}}
+
+    jobs = [
+        {
+            "result_json": {
+                "fetched": [
+                    {
+                        "message_id": "<async@accotest.com>",
+                        "email_id": None,
+                        "fetch_status": "spooled",
+                        "processing_job_id": 72,
+                    }
+                ]
+            }
+        },
+        {"result_json": {"status": "success", "email_id": 93}},
+    ]
+    waited: list[int] = []
+
+    def wait(_client, job_id):
+        waited.append(job_id)
+        return jobs.pop(0)
+
+    monkeypatch.setattr(tool, "wait_for_job", wait)
+    monkeypatch.setattr(
+        tool,
+        "find_email",
+        lambda *_args: pytest.fail("ingress job result should provide email_id"),
+    )
+
+    email_id, row = tool._fetch_system_message(Client(), "<async@accotest.com>")
+
+    assert email_id == 93
+    assert row["fetch_status"] == "spooled"
+    assert waited == [71, 72]
+
+
+def test_fetch_system_message_retries_reused_fetch_job(monkeypatch) -> None:
+    responses = iter(
+        [
+            {"job": {"id": 80}, "reused": True},
+            {"job": {"id": 81}, "reused": False},
+        ]
+    )
+
+    class Client:
+        def data(self, method, path, **kwargs):
+            return next(responses)
+
+    waited: list[int] = []
+
+    def wait(_client, job_id):
+        waited.append(job_id)
+        return {
+            "result_json": {
+                "fetched": [
+                    {"message_id": "<fresh@accotest.com>", "email_id": 94}
+                ]
+            }
+        }
+
+    monkeypatch.setattr(tool, "wait_for_job", wait)
+    monkeypatch.setattr(tool.time, "sleep", lambda _seconds: None)
+
+    email_id, _ = tool._fetch_system_message(Client(), "<fresh@accotest.com>")
+
+    assert email_id == 94
+    assert waited == [81]
+
+
 def test_wait_for_case_approves_special_policy_then_manual_reply(monkeypatch) -> None:
     calls: list[tuple[str, str, dict]] = []
     ticket_details = [
@@ -728,6 +1376,30 @@ def test_closed_satisfies_legacy_rma_sent_gold_expectation() -> None:
     assert tool._status_satisfies_expected("closed", "rma_sent") is True
     assert tool._status_satisfies_expected("rma_sent", "rma_sent") is True
     assert tool._status_satisfies_expected("ready_for_export", "rma_sent") is False
+
+
+def test_wait_for_case_accepts_explicit_compatible_status(monkeypatch) -> None:
+    class Client:
+        def data(self, method, path, **kwargs):
+            if path == "/api/v1/emails/44":
+                return {"parse_results": [{"ticket_id": 55}]}
+            if path == "/api/v1/tickets/55":
+                return {
+                    "ticket": {"id": 55, "current_status_code": "ready_for_export"},
+                    "reply_records": [],
+                }
+            return {}
+
+    value = tool._wait_for_case(
+        Client(),
+        44,
+        "need_customer_info",
+        0,
+        timeout_seconds=1,
+        accepted_statuses={"ready_for_export"},
+    )
+
+    assert value["ticket_detail"]["ticket"]["current_status_code"] == "ready_for_export"
 
 
 def test_wait_for_case_fails_fast_when_followup_makes_no_progress(monkeypatch) -> None:

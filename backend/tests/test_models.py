@@ -3,7 +3,7 @@ from app.services.tickets import EMAIL_FIELDS, TICKET_FIELDS
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 38
+    assert len(Base.metadata.tables) == 41
 
 
 def test_ticket_serializer_fields_exist_on_ticket_model() -> None:
@@ -30,6 +30,9 @@ def test_phase_one_table_names() -> None:
         "field_audit_logs",
         "job_run_logs",
         "mail_fetch_records",
+        "mailbox_sync_states",
+        "email_outbox",
+        "mail_delivery_events",
         "manual_review_tasks",
         "notification_events",
         "notification_user_states",
@@ -79,6 +82,20 @@ def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:
         "imap_uid",
     )
     assert "fetch_status" in table.columns
+    assert table.columns["message_id"].nullable is True
+    assert {"raw_eml_oss_object_id", "raw_eml_sha256", "internal_date", "raw_retention_mode"} <= set(table.columns.keys())
+
+
+def test_mail_transport_foundation_contract() -> None:
+    sync_columns = Base.metadata.tables["mailbox_sync_states"].columns
+    assert {"uid_validity", "sync_mode", "last_discovered_uid", "last_fetched_uid", "lease_expires_at"} <= set(sync_columns.keys())
+    outbox_columns = Base.metadata.tables["email_outbox"].columns
+    assert {
+        "reply_record_id", "idempotency_key", "message_id", "frozen_eml_oss_object_id",
+        "frozen_eml_sha256", "status", "lease_owner", "accepted_at",
+    } <= set(outbox_columns.keys())
+    delivery_columns = Base.metadata.tables["mail_delivery_events"].columns
+    assert {"outbox_id", "original_message_id", "final_recipient", "delivery_status"} <= set(delivery_columns.keys())
 
 
 def test_email_oss_link_columns_exist_for_archival_consistency() -> None:

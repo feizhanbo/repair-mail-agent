@@ -389,9 +389,19 @@ def _temporary_master_rows(
             sn = str(row.get("sn") or "").strip().upper()
             if not sn:
                 raise BatchError("TEMPORARY_SN_REQUIRES_SN")
-            if sn in sn_rows and sn_rows[sn] != row:
+            normalized_row = dict(row)
+            normalized_row["sn"] = sn
+            # SAP export now requires the source-system primary key. Older
+            # reusable gold manifests predate that field, so provide a stable,
+            # test-only integer rather than weakening the production safety
+            # gate or making every approved manifest churn.
+            normalized_row.setdefault(
+                "ins_id",
+                1_000_000_000 + int(hashlib.sha256(sn.encode("utf-8")).hexdigest()[:7], 16),
+            )
+            if sn in sn_rows and sn_rows[sn] != normalized_row:
                 raise BatchError(f"TEMPORARY_SN_CONFLICT:{sn}")
-            sn_rows[sn] = row
+            sn_rows[sn] = normalized_row
         for row in gold.get("temporary_board_cards") or []:
             material = str(row.get("material_code") or "").strip()
             board_code = str(row.get("board_code") or "").strip()
@@ -451,6 +461,7 @@ async def apply_temporary_master_data(
             existing = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
             if existing is not None:
                 if existing.source_file_name == batch_id and existing.id in created["sn_asset_ids"]:
+                    existing.ins_id = int(row["ins_id"])
                     existing.warranty_start_date = _optional_date(
                         row.get("warranty_start_date")
                     )
@@ -496,6 +507,7 @@ async def apply_temporary_master_data(
                         {
                             "id": existing.id,
                             "sn": existing.sn,
+                            "ins_id": existing.ins_id,
                             "customer_code": existing.customer_code,
                             "customer_name": existing.customer_name,
                             "material_code": existing.material_code,
@@ -513,6 +525,7 @@ async def apply_temporary_master_data(
                         }
                     )
                 existing.customer_code = str(row["customer_code"]).strip()
+                existing.ins_id = int(row["ins_id"])
                 existing.customer_name = str(row["customer_name"]).strip()
                 existing.material_code = str(row["material_code"]).strip()
                 existing.material_name = (
@@ -542,6 +555,7 @@ async def apply_temporary_master_data(
             if missing:
                 raise BatchError(f"TEMPORARY_SN_FIELDS_REQUIRED:{sn}:{','.join(missing)}")
             asset = SnAsset(
+                ins_id=int(row["ins_id"]),
                 sn=sn,
                 customer_code=str(row["customer_code"]).strip(),
                 customer_name=str(row["customer_name"]).strip(),
@@ -905,6 +919,7 @@ async def cleanup_temporary_master_data(
                 raise BatchError("TEMPORARY_SN_RESTORE_SCOPE_MISMATCH")
             if asset.source_file_name != batch_id:
                 restored_fields = (
+                    "ins_id",
                     "customer_code",
                     "customer_name",
                     "material_code",
@@ -926,6 +941,7 @@ async def cleanup_temporary_master_data(
                 continue
             for field in (
                 "customer_code",
+                "ins_id",
                 "customer_name",
                 "material_code",
                 "material_name",

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from datetime import date, datetime, time
+from decimal import Decimal
+from uuid import UUID
+
+from app.integrations.sap_middleware.test_http import _json_payload_value
 from tools.test_relay_server import RelayBatch, RelayControl, RelayRecord, TestRelayStore
 
 
@@ -78,3 +83,24 @@ def test_default_control_can_lock_a_gold_rma_before_submission(tmp_path) -> None
         row["rma_no"]
         for row in store.query(["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"])
     } == {"2026081201"}
+def test_test_http_payload_conversion_is_lossless_and_json_safe() -> None:
+    request_id = UUID("12345678-1234-5678-1234-567812345678")
+    converted = _json_payload_value(
+        {
+            "requested_on": date(2026, 8, 12),
+            "submitted_at": datetime(2026, 8, 12, 14, 19, 7),
+            "at": time(14, 19, 7),
+            "amount": Decimal("12.3400"),
+            "request_id": request_id,
+            "nested": [Decimal("0.10"), date(2026, 8, 13)],
+        }
+    )
+
+    assert converted == {
+        "requested_on": "2026-08-12",
+        "submitted_at": "2026-08-12T14:19:07",
+        "at": "14:19:07",
+        "amount": "12.3400",
+        "request_id": str(request_id),
+        "nested": ["0.10", "2026-08-13"],
+    }

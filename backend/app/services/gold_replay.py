@@ -299,6 +299,7 @@ async def plan_gold_test_reset(
     fetch_job_ids = _ints(row.fetch_job_run_id for row in emails)
     job_ids = set(fetch_job_ids)
     job_ids.update(await _scalar_ids(session, select(JobRunLog.id).where(or_(
+        (JobRunLog.resource_type == "mail_fetch_record") & JobRunLog.resource_id.in_(fetch_record_ids or [-1]),
         (JobRunLog.resource_type == "email") & JobRunLog.resource_id.in_(email_ids),
         (JobRunLog.resource_type.in_(["ticket", "repair_ticket"])) & JobRunLog.resource_id.in_(ticket_id_list or [-1]),
         (JobRunLog.resource_type == "reply_record") & JobRunLog.resource_id.in_(reply_ids or [-1]),
@@ -479,6 +480,14 @@ async def apply_gold_test_reset(
     await session.execute(delete(RepairTicket).where(RepairTicket.id.in_(ids["tickets"] or [-1])))
     await session.execute(delete(EmailAttachment).where(EmailAttachment.id.in_(ids["attachments"] or [-1])))
     await session.execute(update(Email).where(Email.duplicate_of_email_id.in_(ids["emails"] or [-1])).values(duplicate_of_email_id=None))
+    # Current mail ingestion links each persisted email back to its fetch job.
+    # Detach only the emails already included in this approved reset closure
+    # before deleting their job rows.
+    await session.execute(
+        update(Email)
+        .where(Email.id.in_(ids["emails"] or [-1]))
+        .values(fetch_job_run_id=None)
+    )
     await session.execute(delete(MailFetchRecord).where(MailFetchRecord.id.in_(ids["mail_fetch_records"] or [-1])))
     await session.execute(delete(Email).where(Email.id.in_(ids["emails"] or [-1])))
     await session.execute(delete(EmailThread).where(EmailThread.id.in_(ids["threads"] or [-1])))

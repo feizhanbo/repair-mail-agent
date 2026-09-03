@@ -242,7 +242,10 @@ async def test_uncertain_followup_count_changes_only_after_confirmed_sent(monkey
         followup_count=0,
         max_followup_count=3,
     )
-    session = SimpleNamespace(get=AsyncMock(side_effect=[reply, ticket]))
+    session = SimpleNamespace(
+        get=AsyncMock(side_effect=[reply, ticket]),
+        scalar=AsyncMock(return_value=None),
+    )
     transition = AsyncMock()
     monkeypatch.setattr(replies, "transition_ticket", transition)
     monkeypatch.setattr(replies, "log_operation", AsyncMock())

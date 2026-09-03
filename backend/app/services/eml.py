@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
+import re
+from pathlib import Path
 from datetime import timezone
 from email import policy
 from email.message import EmailMessage, Message
@@ -110,7 +113,7 @@ def _parse_eml(raw: bytes) -> tuple[Message, list[dict[str, Any]], list[dict[str
     for part in parts:
         if part.is_multipart():
             continue
-        content_type = part.get_content_type()
+        original_content_type = part.get_content_type()
         if _is_attachment(part):
             content = _part_bytes(part)
             index = len(attachments) + 1
@@ -120,9 +123,20 @@ def _parse_eml(raw: bytes) -> tuple[Message, list[dict[str, Any]], list[dict[str
                 (part.get_content_disposition() or "").lower() == "inline"
                 or (bool(content_id) and (part.get_content_disposition() or "").lower() != "attachment")
             )
+            file_extension = Path(file_name).suffix.lower().lstrip(".") or None
+            guessed_content_type, _ = mimetypes.guess_type(file_name)
+            detected_content_type = (
+                guessed_content_type
+                if original_content_type in {"application/octet-stream", "binary/octet-stream"}
+                else original_content_type
+            )
             metadata = {
                 "file_name": file_name,
-                "content_type": content_type,
+                "content_type": detected_content_type,
+                "original_content_type": original_content_type,
+                "detected_content_type": detected_content_type,
+                "content_disposition": (part.get_content_disposition() or "").lower() or None,
+                "file_extension": file_extension,
                 "file_size": len(content),
                 "file_hash": hashlib.sha256(content).hexdigest(),
                 "is_inline": is_inline,
@@ -133,7 +147,11 @@ def _parse_eml(raw: bytes) -> tuple[Message, list[dict[str, Any]], list[dict[str
             blobs.append(
                 {
                     "file_name": file_name,
-                    "content_type": content_type,
+                    "content_type": detected_content_type,
+                    "original_content_type": original_content_type,
+                    "detected_content_type": detected_content_type,
+                    "content_disposition": metadata["content_disposition"],
+                    "file_extension": file_extension,
                     "content": content,
                     "file_hash": metadata["file_hash"],
                     "is_inline": metadata["is_inline"],
@@ -141,13 +159,22 @@ def _parse_eml(raw: bytes) -> tuple[Message, list[dict[str, Any]], list[dict[str
                 }
             )
             continue
-        if content_type == "text/plain":
+        if original_content_type == "text/plain":
             plain_parts.append(_part_text(part))
-        elif content_type == "text/html":
+        elif original_content_type == "text/html":
             html_parts.append(_part_text(part))
 
     plain = "\n".join(part.strip() for part in plain_parts if part and part.strip()) or None
     html = "\n".join(part.strip() for part in html_parts if part and part.strip()) or None
+    referenced_cids = {
+        value.strip().strip("<>").lower()
+        for value in re.findall(r"cid:([^\"'\s)>]+)", html or "", flags=re.IGNORECASE)
+    }
+    for metadata, blob in zip(attachments, blobs, strict=True):
+        cid = str(metadata.get("content_id") or "").strip().strip("<>").lower()
+        role = "inline_resource" if cid and cid in referenced_cids else "regular_attachment"
+        metadata["resource_role"] = role
+        blob["resource_role"] = role
     return message, attachments, blobs, plain, html
 
 

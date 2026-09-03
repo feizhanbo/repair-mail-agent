@@ -8,7 +8,9 @@ import re
 import smtplib
 import time
 from datetime import date, timedelta
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
 from email.utils import getaddresses, make_msgid, parseaddr
 from typing import Any
 
@@ -21,7 +23,9 @@ from app.core.request_context import get_correlation_id
 from app.models import (
     Email,
     EmailAttachment,
+    EmailOutbox,
     EmailThread,
+    ExportSap,
     EmailTicketLink,
     ManualReviewTask,
     OssObject,
@@ -41,6 +45,12 @@ from app.services.external_operations import (
     start_external_operation,
     succeed_external_operation,
 )
+from app.services.email_outbox import (
+    mark_outbox_accepted,
+    mark_outbox_failed,
+    mark_outbox_sending,
+    prepare_outbox,
+)
 from app.services.mail_safety import TEST_MAIL_RECIPIENT, TEST_MAIL_SENDER, test_envelope_allowed, test_only_subject
 from app.services.mail_reply_renderer import (
     RelatedResource,
@@ -58,11 +68,12 @@ from app.services.rma_pdf import (
     rma_pdf_snapshot,
 )
 from app.services.storage import StorageConfigurationError, StorageUploadError, download_oss_object_bytes, upload_bytes_to_oss
+from app.services.smtp_pool import smtp_connection_pool
 from app.services.tickets import get_ticket
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 logger = logging.getLogger(__name__)
-_smtp_semaphore = asyncio.Semaphore(max(1, settings.MAIL_IO_CONCURRENCY))
+_smtp_semaphore = asyncio.Semaphore(max(1, settings.SMTP_MAX_CONNECTIONS))
 
 RMA_TASK_TYPES_RESOLVED_ON_SEND = frozenset(
     {
@@ -486,12 +497,6 @@ def _rma_envelope_valid(reply: ReplyRecord) -> bool:
     return test_envelope_allowed(reply.to_addresses, reply.cc_addresses)
 
 
-def _smtp_client() -> smtplib.SMTP:
-    if settings.SMTP_PORT == 465:
-        return smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
-    return smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
-
-
 def _recipient_in_whitelist(*values: str | None) -> bool:
     to_addresses = values[0] if values else None
     cc_addresses = values[1] if len(values) > 1 else None
@@ -588,6 +593,7 @@ def _send_reply_via_smtp(
     reply: ReplyRecord,
     *,
     message: EmailMessage | None = None,
+    raw_message: bytes | None = None,
     attachment_content: bytes | None = None,
     attachment_filename: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
@@ -614,24 +620,50 @@ def _send_reply_via_smtp(
         )
     elif str(message.get("Message-ID") or "") != message_id:
         return False, None, "SMTP_MESSAGE_ID_MISMATCH"
+    if raw_message is not None:
+        frozen_header = BytesParser(policy=policy.default).parsebytes(raw_message, headersonly=True)
+        if str(frozen_header.get("Message-ID") or "") != message_id:
+            return False, None, "SMTP_MESSAGE_ID_MISMATCH"
     started = time.monotonic()
     try:
-        with _smtp_client() as smtp:
-            if settings.SMTP_PORT == 587:
-                smtp.starttls()
-            smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            # Recheck at the last possible point before the network send.
-            if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
-                return False, None, "SMTP_RECIPIENT_NOT_ALLOWED"
-            if not _smtp_sender_is_exact_login() or not _rma_envelope_valid(reply):
-                return False, None, "SMTP_ENVELOPE_RECHECK_FAILED"
-            smtp.send_message(message)
+        # Recheck at the last possible point before the network send.
+        if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
+            return False, None, "SMTP_RECIPIENT_NOT_ALLOWED"
+        if not _smtp_sender_is_exact_login() or not _rma_envelope_valid(reply):
+            return False, None, "SMTP_ENVELOPE_RECHECK_FAILED"
+        pool = smtp_connection_pool()
+        refused = (
+            pool.send_raw(
+                from_address=settings.SMTP_USER,
+                recipients=_recipient_addresses(reply.to_addresses, reply.cc_addresses),
+                raw_message=raw_message,
+            )
+            if raw_message is not None
+            else pool.send_message(message)
+        )
+        if refused:
+            # smtplib returns refused recipients only when at least one other
+            # recipient may already have been accepted. Never retry the whole
+            # envelope automatically.
+            refused_addresses = {str(address).strip().lower() for address in refused}
+            to_addresses = {address.lower() for address in _recipient_addresses(reply.to_addresses, None)}
+            cc_addresses = {address.lower() for address in _recipient_addresses(None, reply.cc_addresses)}
+            if refused_addresses and refused_addresses <= cc_addresses and not (refused_addresses & to_addresses):
+                return True, message_id, "SMTP_CC_PARTIAL_ACCEPTED"
+            return False, message_id, "SMTP_PARTIAL_ACCEPTED"
+    except smtplib.SMTPRecipientsRefused as exc:
+        codes = [int(value[0]) for value in exc.recipients.values() if value and isinstance(value[0], int)]
+        retryable = bool(codes) and all(400 <= code < 500 for code in codes)
+        return False, None, "SMTP_REJECTED_RETRYABLE" if retryable else "SMTP_REJECTED_TERMINAL"
+    except smtplib.SMTPResponseException as exc:
+        retryable = 400 <= int(exc.smtp_code or 0) < 500
+        return False, None, "SMTP_REJECTED_RETRYABLE" if retryable else "SMTP_REJECTED_TERMINAL"
     except Exception as exc:
         logger.exception(
             "SMTP transport failed after send was attempted",
             extra={
-                "event": "smtp_send_failed", "ticket_id": reply.ticket_id,
-                "reply_record_id": reply.id, "smtp_host": settings.SMTP_HOST,
+                "event": "smtp_send_failed", "ticket_id": getattr(reply, "ticket_id", None),
+                "reply_record_id": getattr(reply, "id", None), "smtp_host": settings.SMTP_HOST,
                 "smtp_port": settings.SMTP_PORT,
                 "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
                 "smtp_status": "uncertain", "smtp_response_code": getattr(exc, "smtp_code", None),
@@ -639,7 +671,7 @@ def _send_reply_via_smtp(
                 "error_code": "SMTP_SEND_FAILED_UNCERTAIN",
             },
         )
-        return False, None, "SMTP_SEND_FAILED_UNCERTAIN"
+        return False, message_id, "SMTP_SEND_FAILED_UNCERTAIN"
     return True, message_id, None
 
 
@@ -1332,7 +1364,8 @@ async def _send_reply_record(
     reply: ReplyRecord,
     user_id: int | None,
     auto: bool,
-) -> None:
+    prepare_only: bool = False,
+) -> Any | None:
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
@@ -1350,22 +1383,6 @@ async def _send_reply_record(
             auto=auto,
         )
         return
-    reply.send_attempt_count = int(reply.send_attempt_count or 0) + 1
-    guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
-    if guard_error is not None:
-        reply.send_status = "send_failed"
-        reply.last_error_code = guard_error
-        reply.error_message = guard_error
-        sync_ticket_delivery_status()
-        await _ensure_reply_manual_task(
-            session,
-            ticket=ticket,
-            task_type="reply_send_blocked",
-            reason=guard_error,
-            email_id=reply.related_email_id,
-            user_id=user_id,
-        )
-        return
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
         reply.send_status = "send_uncertain"
         reply.last_error_code = "SMTP_SEND_RESULT_UNCERTAIN"
@@ -1376,6 +1393,24 @@ async def _send_reply_record(
             reason="SMTP_SEND_RESULT_UNCERTAIN", email_id=reply.related_email_id, user_id=user_id,
         )
         return
+    frozen_outbox = await session.scalar(
+        select(EmailOutbox).where(EmailOutbox.reply_record_id == reply.id).with_for_update()
+    )
+    frozen_sendable = frozen_outbox is not None and frozen_outbox.status in {
+        "ready", "claimed", "failed_retryable"
+    }
+    if not frozen_sendable:
+        guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
+        if guard_error is not None:
+            reply.send_status = "send_failed"
+            reply.last_error_code = guard_error
+            reply.error_message = guard_error
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked", reason=guard_error,
+                email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
     if not _smtp_sender_is_exact_login():
         reply.send_status = "send_failed"
         reply.last_error_code = "SMTP_SENDER_LOGIN_MISMATCH"
@@ -1407,84 +1442,112 @@ async def _send_reply_record(
         )
         return
 
+    if frozen_sendable:
+        safety_snapshot = frozen_outbox.safety_snapshot or {}
+        if (
+            frozen_outbox.to_addresses != reply.to_addresses
+            or frozen_outbox.cc_addresses != reply.cc_addresses
+            or frozen_outbox.from_address != settings.SMTP_USER
+            or safety_snapshot.get("rma_pdf_oss_object_id") != reply.rma_pdf_oss_object_id
+        ):
+            reply.send_status = "send_failed"
+            reply.last_error_code = "OUTBOX_ENVELOPE_MISMATCH"
+            reply.error_message = "OUTBOX_ENVELOPE_MISMATCH"
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked",
+                reason="OUTBOX_ENVELOPE_MISMATCH", email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+
     attachment_content: bytes | None = None
     attachment_filename: str | None = None
     if reply.rma_pdf_oss_object_id:
         attachment_content = await download_oss_object_bytes(session, oss_object_id=reply.rma_pdf_oss_object_id)
         oss_object = await session.get(OssObject, reply.rma_pdf_oss_object_id)
         attachment_filename = (oss_object.original_file_name if oss_object else None) or f"RMA-{ticket.ticket_no}.pdf"
-    template = await session.get(ReplyTemplate, reply.template_id) if reply.template_id else None
-    parent = await session.get(Email, reply.related_email_id) if reply.related_email_id else None
-    try:
-        if template is None or parent is None:
-            raise ReplyRenderError("REPLY_RENDER_PREREQUISITE_MISSING")
-        reply_history = await render_reply_history(
-            session,
-            parent=parent,
-            language=template.language,
+    if frozen_sendable:
+        raw_message = await download_oss_object_bytes(
+            session, oss_object_id=frozen_outbox.frozen_eml_oss_object_id
         )
-        if reply_history.snapshot_hash != reply.thread_history_hash:
-            raise ReplyRenderError("REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED")
-    except ReplyRenderError as exc:
-        reply.send_status = "send_failed"
-        reply.last_error_code = exc.code
-        reply.error_message = exc.code
-        sync_ticket_delivery_status()
-        await _ensure_reply_manual_task(
-            session,
-            ticket=ticket,
-            task_type="reply_render_failed",
-            reason=exc.code,
-            email_id=reply.related_email_id,
-            user_id=user_id,
+        raw_hash = hashlib.sha256(raw_message).hexdigest()
+        if raw_hash != frozen_outbox.frozen_eml_sha256:
+            reply.send_status = "send_failed"
+            reply.last_error_code = "OUTBOX_FROZEN_EML_HASH_MISMATCH"
+            reply.error_message = "OUTBOX_FROZEN_EML_HASH_MISMATCH"
+            frozen_outbox.status = "failed_terminal"
+            frozen_outbox.last_error_code = reply.last_error_code
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked",
+                reason=reply.last_error_code, email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+        outbound_message = BytesParser(policy=policy.SMTP).parsebytes(raw_message)
+        message_id = frozen_outbox.message_id
+        reply.smtp_message_id = message_id
+    else:
+        template = await session.get(ReplyTemplate, reply.template_id) if reply.template_id else None
+        parent = await session.get(Email, reply.related_email_id) if reply.related_email_id else None
+        try:
+            if template is None or parent is None:
+                raise ReplyRenderError("REPLY_RENDER_PREREQUISITE_MISSING")
+            reply_history = await render_reply_history(
+                session,
+                parent=parent,
+                language=template.language,
+            )
+            if reply_history.snapshot_hash != reply.thread_history_hash:
+                raise ReplyRenderError("REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED")
+        except ReplyRenderError as exc:
+            reply.send_status = "send_failed"
+            reply.last_error_code = exc.code
+            reply.error_message = exc.code
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_render_failed", reason=exc.code,
+                email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+        message_id = _smtp_message_id(reply)
+        reply.smtp_message_id = message_id
+        outbound_message = _build_reply_message(
+            reply, message_id, related_resources=reply_history.resources,
+            attachment_content=attachment_content, attachment_filename=attachment_filename,
         )
-        return
-    message_id = _smtp_message_id(reply)
-    reply.smtp_message_id = message_id
-    outbound_message = _build_reply_message(
-        reply,
-        message_id,
-        related_resources=reply_history.resources,
-        attachment_content=attachment_content,
-        attachment_filename=attachment_filename,
-    )
-    raw_message = outbound_message.as_bytes()
+        raw_message = outbound_message.as_bytes()
     raw_hash = hashlib.sha256(raw_message).hexdigest()
     archive_operation = None
     try:
-        archive_operation = await start_external_operation(
-            session,
-            operation_type="oss_put_outbound_eml",
-            operation_key=f"reply:{reply.id}:raw-eml",
-            ticket_id=ticket.id,
-            email_id=reply.related_email_id,
-            reply_record_id=reply.id,
-            recovery_stage="outbound_archive",
-        )
-        if archive_operation.status == "succeeded" and archive_operation.remote_reference:
+        if frozen_sendable:
             raw_object = await session.get(
-                OssObject,
-                int(archive_operation.remote_reference),
+                OssObject, frozen_outbox.frozen_eml_oss_object_id,
             )
-            archived_hash = str(
-                (archive_operation.details_json or {}).get("sha256") or ""
-            )
-            if raw_object is None or archived_hash != raw_hash:
-                raise StorageUploadError("OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH")
+            if raw_object is None:
+                raise StorageUploadError("OUTBOX_FROZEN_EML_OBJECT_MISSING")
         else:
-            raw_object = await upload_bytes_to_oss(
+            archive_operation = await start_external_operation(
                 session,
-                content=raw_message,
-                original_file_name=f"reply-{reply.id}.eml",
-                content_type="message/rfc822",
-                source_type="outbound_raw_eml",
-                user_id=user_id,
+                operation_type="oss_put_outbound_eml",
+                operation_key=f"reply:{reply.id}:raw-eml",
+                ticket_id=ticket.id,
+                email_id=reply.related_email_id,
+                reply_record_id=reply.id,
+                recovery_stage="outbound_archive",
             )
-            succeed_external_operation(
-                archive_operation,
-                remote_reference=str(raw_object.id),
-                details={"sha256": raw_hash},
-            )
+            if archive_operation.status == "succeeded" and archive_operation.remote_reference:
+                raw_object = await session.get(OssObject, int(archive_operation.remote_reference))
+                archived_hash = str((archive_operation.details_json or {}).get("sha256") or "")
+                if raw_object is None or archived_hash != raw_hash:
+                    raise StorageUploadError("OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH")
+            else:
+                raw_object = await upload_bytes_to_oss(
+                    session, content=raw_message, original_file_name=f"reply-{reply.id}.eml",
+                    content_type="message/rfc822", source_type="outbound_raw_eml", user_id=user_id,
+                )
+                succeed_external_operation(
+                    archive_operation, remote_reference=str(raw_object.id), details={"sha256": raw_hash},
+                )
     except (StorageConfigurationError, StorageUploadError) as exc:
         reply.send_status = "send_failed"
         reply.archive_status = "archive_failed"
@@ -1521,6 +1584,55 @@ async def _send_reply_record(
         )
         return
 
+    rma_snapshot = await session.scalar(
+        select(TicketRma).where(TicketRma.ticket_id == ticket.id).order_by(TicketRma.id.desc()).limit(1)
+    )
+    sap_request_ids = list(
+        (
+            await session.execute(
+                select(ExportSap.request_id)
+                .where(ExportSap.ticket_id == ticket.id)
+                .order_by(ExportSap.id)
+            )
+        ).scalars().all()
+    )
+    outbox = frozen_outbox
+    if outbox is None:
+        outbox = await prepare_outbox(
+            session, reply=reply, frozen_eml_oss_object_id=raw_object.id,
+            frozen_eml_sha256=raw_hash, message_id=message_id, from_address=settings.SMTP_USER,
+            ticket_version=int(ticket.version or 0),
+            request_id=sap_request_ids[0] if len(sap_request_ids) == 1 else None,
+            rma_no=rma_snapshot.rma_no if rma_snapshot is not None else None,
+            pdf_sha256=rma_snapshot.pdf_sha256 if rma_snapshot is not None else None,
+            safety_snapshot={
+                "reply_type": reply.reply_type, "thread_history_hash": reply.thread_history_hash,
+                "render_hash": reply.render_hash, "rma_template_version": reply.rma_template_version,
+                "rma_pdf_oss_object_id": reply.rma_pdf_oss_object_id,
+                "sap_request_ids": sap_request_ids,
+                "pdf_sha256": rma_snapshot.pdf_sha256 if rma_snapshot is not None else None,
+            },
+        )
+    # READY means the exact MIME object is frozen and durable. From this point
+    # the transport path must not render or mutate customer-visible content.
+    await _commit_if_available(session)
+    if prepare_only:
+        from app.services.jobs import enqueue_job
+
+        reply.send_status = "approved_pending_send"
+        queued_job = await enqueue_job(
+            session,
+            job_type="smtp_send",
+            resource_type="email_outbox",
+            resource_id=reply.id,
+            idempotency_key=f"smtp_outbox:{outbox.id}",
+            metadata={"user_id": user_id, "outbox_id": outbox.id},
+            max_attempts=max(1, settings.SMTP_RETRY_LIMIT),
+        )
+        return queued_job
+
+    reply.send_attempt_count = int(reply.send_attempt_count or 0) + 1
+
     smtp_operation = await start_external_operation(
         session,
         operation_type="smtp_send",
@@ -1539,6 +1651,7 @@ async def _send_reply_record(
         error = None
     else:
         reply.send_status = "auto_sending" if auto else "sending"
+        mark_outbox_sending(outbox)
         await _commit_if_available(session)
         smtp_started = time.monotonic()
         logger.info(
@@ -1548,7 +1661,7 @@ async def _send_reply_record(
                 "smtp_host": settings.SMTP_HOST, "smtp_port": settings.SMTP_PORT,
                 "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
                 "attachment_count": 1 if attachment_content else 0,
-                "attempt": int(reply.send_attempt_count or 0) + 1,
+                "attempt": int(reply.send_attempt_count or 0),
             },
         )
         async with _smtp_semaphore:
@@ -1556,7 +1669,14 @@ async def _send_reply_record(
                 _send_reply_via_smtp,
                 reply,
                 message=outbound_message,
+                raw_message=raw_message,
             )
+        if not ok and error == "SMTP_SEND_FAILED_UNCERTAIN" and sent_message_id:
+            from app.services.imap_fetcher import sent_folder_contains_message
+
+            if await sent_folder_contains_message(sent_message_id):
+                ok = True
+                error = "SMTP_ACCEPTED_SENT_FOLDER"
         smtp_duration_ms = int((time.monotonic() - smtp_started) * 1000)
         # Transport exceptions are logged with traceback inside the sync SMTP
         # boundary. Other failures are deterministic policy/configuration
@@ -1577,7 +1697,7 @@ async def _send_reply_record(
         was_counted = reply.send_status == "sent"
         reply.send_status = "sent"
         reply.sent_at = utcnow()
-        reply.smtp_response = "SMTP_ACCEPTED"
+        reply.smtp_response = error or "SMTP_ACCEPTED"
         reply.last_error_code = None
         reply.error_message = None
         succeed_external_operation(
@@ -1585,6 +1705,7 @@ async def _send_reply_record(
             remote_reference=sent_message_id,
             details={"accepted": True},
         )
+        mark_outbox_accepted(outbox, smtp_response=error or "SMTP_ACCEPTED")
         await _archive_outbound_email(
             session,
             reply=reply,
@@ -1666,16 +1787,24 @@ async def _send_reply_record(
                 metadata={"reply_id": reply.id, "smtp_message_id": sent_message_id},
             )
     else:
-        reply.send_status = "send_uncertain" if error == "SMTP_SEND_FAILED_UNCERTAIN" else "send_failed"
+        uncertain_result = error in {"SMTP_SEND_FAILED_UNCERTAIN", "SMTP_PARTIAL_ACCEPTED"}
+        reply.send_status = "send_uncertain" if uncertain_result else "send_failed"
         reply.last_error_code = error or "SMTP_SEND_FAILED"
         reply.error_message = error or "SMTP_SEND_FAILED"
         fail_external_operation(
             smtp_operation,
             error_code=reply.last_error_code,
             error_message=reply.error_message,
-            retryable=reply.send_status == "send_failed",
+            retryable=reply.send_status == "send_failed" and error != "SMTP_REJECTED_TERMINAL",
             uncertain=reply.send_status == "send_uncertain",
             recovery_stage="smtp_send",
+        )
+        mark_outbox_failed(
+            outbox,
+            error_code=reply.last_error_code,
+            uncertain=uncertain_result,
+            partial_accepted=error == "SMTP_PARTIAL_ACCEPTED",
+            retryable=error != "SMTP_REJECTED_TERMINAL",
         )
         await _ensure_reply_manual_task(
             session,
@@ -1767,6 +1896,7 @@ async def create_reply_draft(
                 reply=existing_draft,
                 user_id=user_id,
                 auto=True,
+                prepare_only=True,
             )
         return serialize_reply(existing_draft)
     if is_followup_reply_type(reply_kind) and ticket.followup_count >= ticket.max_followup_count:
@@ -1895,7 +2025,7 @@ async def create_reply_draft(
     if can_auto_send:
         reply.review_status = "auto_approved"
         reply.reviewed_at = utcnow()
-        await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
+        await _send_reply_record(session, reply=reply, user_id=user_id, auto=True, prepare_only=True)
     await log_operation(
         session,
         user_id=user_id,
@@ -1945,7 +2075,9 @@ async def update_reply(session: AsyncSession, *, reply_id: int, user_id: int, va
 
 
 async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -> dict[str, Any]:
-    reply = await get_reply(session, reply_id)
+    reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_NOT_FOUND")
     if reply.send_status == "sent":
         return {"status": "sent", "reply": serialize_reply(reply), "auto_send_enabled": settings.AUTO_SEND_ENABLED, "reply_send_mode": settings.REPLY_SEND_MODE}
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
@@ -1962,7 +2094,13 @@ async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -
     reply.reviewed_at = utcnow()
     reply.send_status = "approved_pending_send"
     reply.error_message = None
-    await _send_reply_record(session, reply=reply, user_id=user_id, auto=False)
+    queued_job = await _send_reply_record(
+        session,
+        reply=reply,
+        user_id=user_id,
+        auto=False,
+        prepare_only=True,
+    )
     await log_operation(
         session,
         user_id=user_id,
@@ -1977,37 +2115,34 @@ async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -
             "reply_send_mode": settings.REPLY_SEND_MODE,
         },
     )
+    from app.services.jobs import serialize_job
+
     return {
         "status": reply.send_status,
         "error_code": reply.last_error_code or reply.error_message,
         "reply": serialize_reply(reply),
+        "job_id": getattr(queued_job, "id", None),
+        "job": serialize_job(queued_job) if queued_job is not None else None,
         "auto_send_enabled": settings.AUTO_SEND_ENABLED,
         "reply_send_mode": settings.REPLY_SEND_MODE,
     }
 
 
-async def approve_reply_for_async(session: AsyncSession, *, reply_id: int, user_id: int) -> ReplyRecord:
-    reply = await get_reply(session, reply_id)
-    if reply.send_status == "sent":
-        return reply
-    if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_SEND_RESULT_UNCERTAIN")
-    reply.review_status = "approved"
-    reply.reviewed_by_user_id = user_id
-    reply.reviewed_at = utcnow()
-    reply.send_status = "approved_pending_send"
-    reply.error_message = None
-    await log_operation(
-        session,
-        user_id=user_id,
-        operation_type="reply_approved_for_async_send",
-        target_type="reply_record",
-        target_id=reply.id,
-        email_id=reply.related_email_id,
-        ticket_id=reply.ticket_id,
-        after_data={"send_status": reply.send_status},
-    )
-    return reply
+async def execute_approved_reply_send(
+    session: AsyncSession,
+    *,
+    reply_id: int,
+    user_id: int,
+) -> dict[str, Any]:
+    reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_NOT_FOUND")
+    await _send_reply_record(session, reply=reply, user_id=user_id, auto=reply.review_status == "auto_approved")
+    return {
+        "status": reply.send_status,
+        "error_code": reply.last_error_code or reply.error_message,
+        "reply": serialize_reply(reply),
+    }
 
 
 async def reject_reply(session: AsyncSession, *, reply_id: int, user_id: int, reason: str) -> dict[str, Any]:
@@ -2047,12 +2182,17 @@ async def reconcile_uncertain_reply(
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
+    outbox = await session.scalar(
+        select(EmailOutbox).where(EmailOutbox.reply_record_id == reply.id).with_for_update()
+    )
 
     if outcome == "sent":
         reply.send_status = "sent"
         reply.sent_at = utcnow()
         reply.smtp_message_id = smtp_message_id or reply.smtp_message_id
         reply.error_message = None
+        if outbox is not None:
+            mark_outbox_accepted(outbox, smtp_response="SMTP_ACCEPTED_MANUAL_RECONCILIATION")
         if is_followup_reply_type(reply.reply_type):
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
             if ticket.current_status_code == "need_customer_info":
@@ -2100,6 +2240,12 @@ async def reconcile_uncertain_reply(
         reply.error_message = "SMTP_SEND_CONFIRMED_FAILED"
         if reply.reply_type == "rma_authorization":
             ticket.rma_status = "manual_review"
+        if outbox is not None:
+            outbox.status = "failed_terminal"
+            outbox.last_error_code = "SMTP_SEND_CONFIRMED_FAILED"
+            outbox.last_error_message = reason
+            outbox.lease_owner = None
+            outbox.lease_expires_at = None
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="REPLY_RECONCILE_OUTCOME_INVALID")
 
@@ -2504,7 +2650,14 @@ async def create_and_send_rma_authorization(
         return {"status": "pending_review", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
 
     ticket.rma_status = "sending" if attach_rma else "manual_review"
-    await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
+    await _send_reply_record(session, reply=reply, user_id=user_id, auto=True, prepare_only=True)
+    if reply.send_status == "approved_pending_send":
+        return {
+            "status": "queued",
+            "ticket_id": ticket.id,
+            "reply_id": reply.id,
+            "idempotent_reuse": False,
+        }
     if reply.send_status == "sent":
         if not attach_rma:
             ticket.rma_status = "manual_review"

@@ -26,7 +26,16 @@ class MailFetchRecord(CreatedAtMixin, Base):
     folder_name: Mapped[str] = mapped_column(String(255), nullable=False)
     uid_validity: Mapped[int] = mapped_column(mysql.BIGINT(unsigned=True), nullable=False, server_default="0")
     imap_uid: Mapped[str] = mapped_column(String(100), nullable=False)
-    message_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    message_id: Mapped[str | None] = mapped_column(String(500))
+    raw_eml_oss_object_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("oss_objects.id", name="fk_mail_fetch_records_raw_eml_oss"),
+    )
+    raw_eml_sha256: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    internal_date: Mapped[datetime | None] = datetime_column()
+    raw_retention_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="temporary"
+    )
     in_reply_to: Mapped[str | None] = mapped_column(String(500))
     references_header: Mapped[str | None] = mapped_column(Text)
     fetch_job_run_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("job_run_logs.id", name="fk_mail_fetch_records_job"))
@@ -52,4 +61,7 @@ class MailFetchRecord(CreatedAtMixin, Base):
     thread: Mapped["EmailThread | None"] = relationship("EmailThread", foreign_keys=[thread_id], lazy="raise")
     ai_call_logs: Mapped[list["AiCallLog"]] = relationship(
         "AiCallLog", foreign_keys="AiCallLog.mail_fetch_record_id", back_populates="mail_fetch_record", lazy="raise"
+    )
+    raw_eml_oss_object: Mapped["OssObject | None"] = relationship(
+        "OssObject", foreign_keys=[raw_eml_oss_object_id], lazy="raise"
     )

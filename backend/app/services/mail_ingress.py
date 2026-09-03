@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.request_context import get_correlation_id
-from app.models import MailFetchRecord
+from app.models import MailFetchRecord, ManualReviewTask
 from app.schemas.business import EmailIngestRequest
 from app.services import emails as email_service
 from app.services.common import utcnow
@@ -21,6 +23,65 @@ def _needs_transient_evidence(payload: EmailIngestRequest, decision, blobs: list
         or decision.reason_code in {"PRECLASSIFICATION_LOW_CONFIDENCE", "PRECLASSIFICATION_INTENT_CONFLICT"}
         or len((payload.text_body or "").strip()) < 80
     )
+
+
+async def persist_missing_message_id_anomaly(
+    session: AsyncSession,
+    *,
+    payload: EmailIngestRequest,
+    raw_eml: bytes,
+    raw_file_name: str,
+    source: str,
+    user_id: int | None,
+) -> MailFetchRecord:
+    """Preserve a non-IMAP raw source that cannot enter the RFC business chain."""
+    source_hash = payload.raw_eml_sha256 or hashlib.sha256(raw_eml).hexdigest()
+    anomaly_uid = f"{source}:{source_hash}"[:100]
+    record = await session.scalar(
+        select(MailFetchRecord).where(
+            MailFetchRecord.mailbox_account == (payload.mailbox_account or "manual_ingest"),
+            MailFetchRecord.folder_name == (payload.folder_name or source),
+            MailFetchRecord.uid_validity == 0,
+            MailFetchRecord.imap_uid == anomaly_uid,
+        )
+    )
+    if record is not None and record.fetch_status == "terminal_manual":
+        return record
+    archived = await archive_raw_email(
+        session,
+        payload=payload,
+        raw_eml=raw_eml,
+        raw_file_name=raw_file_name,
+        user_id=user_id,
+    )
+    if record is None:
+        record = MailFetchRecord(
+            mailbox_account=payload.mailbox_account or "manual_ingest",
+            folder_name=payload.folder_name or source,
+            uid_validity=0,
+            imap_uid=anomaly_uid,
+            message_id=None,
+        )
+        session.add(record)
+    record.fetch_status = "terminal_manual"
+    record.processing_stage = "header_validation_failed"
+    record.error_message = "MISSING_MESSAGE_ID"
+    record.raw_eml_oss_object_id = archived.raw_object_id
+    record.raw_eml_sha256 = archived.source_content_sha256
+    record.raw_retention_mode = "permanent"
+    session.add(
+        ManualReviewTask(
+            task_type="missing_message_id",
+            priority="high",
+            status="pending",
+            description="入站邮件缺少 RFC Message-ID，已保留原始 EML，禁止进入自动业务链。",
+            trigger_reason="MISSING_MESSAGE_ID",
+            recovery_stage="header_validation",
+            recovery_action=f"核对来源 {source} 的原始邮件并决定是否人工处理。",
+        )
+    )
+    await session.flush()
+    return record
 
 
 def _public_result(fetch_record: MailFetchRecord, decision, *, email: dict[str, Any] | None, job) -> dict[str, Any]:
@@ -61,7 +122,7 @@ async def process_preclassified_ingress(
             folder_name=payload.folder_name or source,
             uid_validity=uid_validity,
             imap_uid=deterministic_uid,
-            message_id=payload.message_id or "",
+            message_id=payload.message_id,
             in_reply_to=payload.in_reply_to,
             references_header=payload.references_header,
             fetch_job_run_id=payload.fetch_job_run_id,

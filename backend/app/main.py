@@ -30,7 +30,7 @@ from app.core.runtime_logging import configure_runtime_logging, runtime_log_dire
 from app.models import JobRunLog
 from app.integrations.llm_gateway import public_llm_routes
 from app.services.ai import maintain_ai_jsonl_logs
-from app.services.jobs import claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
+from app.services.jobs import MAIL_JOB_TYPES, claim_next_job, enqueue_job, execute_claimed_job, recover_stale_jobs
 from app.services.notification_task_repair import repair_notification_and_task_data
 from app.services.rma_pdf import validate_rma_runtime_health
 from app.services.runtime_config import load_runtime_config, read_runtime_config
@@ -77,7 +77,10 @@ async def _scheduled_imap_fetch():
 async def _scheduled_job_worker():
     for _ in range(10):
         async with AsyncSessionLocal() as claim_session:
-            job = await claim_next_job(claim_session)
+            job = await claim_next_job(
+                claim_session,
+                excluded_job_types=None if settings.MAIL_SCHEDULER_IN_API else MAIL_JOB_TYPES,
+            )
             if job is None:
                 await claim_session.commit()
                 return
@@ -216,15 +219,16 @@ async def lifespan(app: FastAPI):
     # Run the lightweight gate every minute so database-backed enable/interval
     # changes become effective without restarting the process. The idempotency
     # bucket inside _scheduled_imap_fetch enforces the configured interval.
-    scheduler.add_job(
-        _scheduled_imap_fetch,
-        "interval",
-        minutes=1,
-        id="imap_poll",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
+    if settings.MAIL_SCHEDULER_IN_API:
+        scheduler.add_job(
+            _scheduled_imap_fetch,
+            "interval",
+            minutes=1,
+            id="imap_poll",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.add_job(
         _scheduled_job_worker,
         "interval",

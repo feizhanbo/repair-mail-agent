@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 from contextlib import asynccontextmanager
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
-from app.models import JobRunLog
+from app.models import JobRunLog, MailboxSyncState
 from app.models.mail_fetch import MailFetchRecord
 from app.services import email_archival, imap_fetcher, mail_ingress
 
@@ -22,6 +23,16 @@ def configured_oss(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(imap_fetcher.settings, "OSS_BUCKET", "test-bucket")
     monkeypatch.setattr(imap_fetcher.settings, "OSS_ACCESS_KEY", "test-access")
     monkeypatch.setattr(imap_fetcher.settings, "OSS_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_INITIAL_SYNC_START_AT", datetime(2026, 8, 1))
+
+    uploaded_id = 500
+
+    async def fake_upload(*_args, **_kwargs):
+        nonlocal uploaded_id
+        uploaded_id += 1
+        return SimpleNamespace(id=uploaded_id)
+
+    monkeypatch.setattr(email_archival, "upload_bytes_to_oss", fake_upload)
 
     async def classify_first(*_args, **_kwargs):
         return SimpleNamespace(
@@ -43,10 +54,34 @@ class FakeSession:
         self.added.append(instance)
 
     async def scalar(self, _statement):
-        return self.scalar_result
+        entity = (_statement.column_descriptions[0].get("entity") if getattr(_statement, "column_descriptions", None) else None)
+        if entity is MailboxSyncState:
+            return next((item for item in self.added if isinstance(item, MailboxSyncState)), None)
+        if entity is JobRunLog:
+            return None
+        if entity is MailFetchRecord:
+            where_text = " ".join(str(item) for item in getattr(_statement, "_where_criteria", ()))
+            if "mail_fetch_records.message_id" in where_text and "mail_fetch_records.imap_uid" not in where_text:
+                if "mail_fetch_records.id !=" in where_text:
+                    return None
+                return self.scalar_result if isinstance(self.scalar_result, MailFetchRecord) else None
+            if isinstance(self.scalar_result, MailFetchRecord):
+                return self.scalar_result
+            return next((item for item in reversed(self.added) if isinstance(item, MailFetchRecord)), None)
+        if entity is not None and getattr(entity, "__name__", "") == "Email":
+            return self.scalar_result if getattr(self.scalar_result, "__class__", None).__name__ == "Email" else None
+        return None
 
     async def execute(self, _statement):
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        entity = (_statement.column_descriptions[0].get("entity") if getattr(_statement, "column_descriptions", None) else None)
+        keys = list(getattr(_statement, "selected_columns", {}).keys())
+        rows = []
+        if entity is MailFetchRecord and keys == ["imap_uid"]:
+            if isinstance(self.scalar_result, MailFetchRecord) and self.scalar_result.fetch_status in {"retry_wait", "failed"}:
+                rows = [self.scalar_result.imap_uid]
+        elif entity is MailFetchRecord and isinstance(self.scalar_result, MailFetchRecord):
+            rows = [self.scalar_result]
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
 
     async def get(self, model, object_id, **_kwargs):
         return next(
@@ -104,6 +139,8 @@ class MultiUidImapClient(FakeImapClient):
             return "OK", [" ".join(self.uids).encode()]
         if command == "FETCH":
             assert uid is not None
+            if args and args[0] == "(INTERNALDATE)":
+                return "OK", [(b'101 (INTERNALDATE "31-Aug-2026 10:20:30 +0800")', b"")]
             self.fetched_uids.append(uid)
             message = EmailMessage()
             message["From"] = "Customer <customer@example.com>"
@@ -128,8 +165,10 @@ def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: 
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "rmatest1@accotest.com")
     client = SearchClient()
 
-    assert imap_fetcher._uid_search(client, message_id=None, unseen_only=True) == ["101"]
-    assert calls[-1] == ("SEARCH", None, "UNSEEN", "NOT", "FROM", "rmatest1@accotest.com")
+    assert imap_fetcher._uid_search(client, message_id=None, start_uid=101) == ["101"]
+    assert calls[-1] == ("SEARCH", None, "UID", "101:*", "NOT", "FROM", "rmatest1@accotest.com")
+    assert imap_fetcher._uid_search(client, message_id=None, since_date="01-Aug-2026") == ["101"]
+    assert calls[-1] == ("SEARCH", None, "SINCE", "01-Aug-2026", "NOT", "FROM", "rmatest1@accotest.com")
     assert imap_fetcher._uid_search(client, message_id="<recover@example.com>", unseen_only=False) == ["101"]
     assert calls[-2] == ("SEARCH", None, "HEADER", "Message-ID", "<recover@example.com>")
 
@@ -148,6 +187,38 @@ def test_uid_search_filters_reference_header_false_positive() -> None:
     assert imap_fetcher._uid_search(
         SearchClient(), message_id="<recover@example.com>", unseen_only=False
     ) == ["101"]
+
+
+@pytest.mark.anyio
+async def test_sent_folder_reconciliation_uses_exact_message_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SentClient:
+        def __init__(self) -> None:
+            self.closed = False
+            self.logged_out = False
+
+        def select(self, folder_name: str, readonly: bool = True):
+            assert folder_name == "Sent"
+            assert readonly is True
+            return "OK", [b""]
+
+        def uid(self, command: str, uid: str | None, *args):
+            if command == "SEARCH":
+                return "OK", [b"88"]
+            return "OK", [(b"HEADER", b"Message-ID: <frozen@example.com>\r\n\r\n")]
+
+        def close(self) -> None:
+            self.closed = True
+
+        def logout(self) -> None:
+            self.logged_out = True
+
+    client = SentClient()
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher.settings, "SMTP_SENT_FOLDER", "Sent")
+
+    assert await imap_fetcher.sent_folder_contains_message("<frozen@example.com>") is True
+    assert client.closed is True
+    assert client.logged_out is True
 
 
 def _raw_eml() -> bytes:
@@ -203,15 +274,17 @@ async def test_fetch_imap_emails_archives_eml_and_attachments_with_mocked_imap(m
     assert result["processed_count"] == 1
     assert result["success_count"] == 1
     assert result["failed_count"] == 0
-    assert uploaded == [("raw_eml", "imap-101.eml"), ("email_attachment", "fault.txt")]
-    assert len(ingested_payloads) == 1
-    payload = ingested_payloads[0]
-    assert payload.raw_eml_oss_object_id == 101
-    assert payload.attachments[0]["oss_object_id"] == 102
-    assert payload.imap_uid == "101"
-    assert payload.fetch_job_run_id == 1
+    assert uploaded == [("raw_eml", "imap-101.eml")]
+    assert ingested_payloads == []
     assert any(isinstance(item, JobRunLog) and item.status == "success" for item in session.added)
-    assert any(isinstance(item, MailFetchRecord) and item.email_id == 77 and item.uid_validity == 777 for item in session.added)
+    assert any(
+        isinstance(item, MailFetchRecord)
+        and item.fetch_status == "spooled"
+        and item.raw_eml_oss_object_id == 101
+        and item.uid_validity == 777
+        for item in session.added
+    )
+    assert any(isinstance(item, JobRunLog) and item.job_type == "mail_ingress_process" for item in session.added)
     assert client.closed is True
     assert client.logged_out is True
 
@@ -245,8 +318,7 @@ async def test_fetch_imap_emails_skips_existing_uid_before_fetching_raw(monkeypa
     assert fetched_raw is False
     assert result["status"] == "success"
     assert result["success_count"] == 0
-    assert result["skipped_count"] == 1
-    assert result["fetched"][0]["fetch_status"] == "duplicate_uid_skipped"
+    assert result["processed_count"] == 0
 
 
 @pytest.mark.anyio
@@ -286,25 +358,20 @@ async def test_fetch_imap_emails_skips_irrelevant_before_oss_upload(monkeypatch:
 
 @pytest.mark.anyio
 async def test_fetch_filters_processed_uids_before_applying_batch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = FakeSession()
+    existing = MailFetchRecord(
+        mailbox_account="imap-test@example.com", folder_name="INBOX", uid_validity=777,
+        imap_uid="101", message_id="<existing@example.com>", fetch_status="ingested",
+    )
+    existing.id = 41
+    session = FakeSession(existing)
     client = MultiUidImapClient(["103", "101", "102"])
     ingested: list[str] = []
-
-    async def fake_uid_precheck(_session, *, imap_uid: str, **_kwargs):
-        if imap_uid == "101":
-            return SimpleNamespace(status="duplicate_uid_skipped", to_dict=lambda: {"status": "duplicate_uid_skipped"})
-        return None
-
-    async def fake_archive(_session, *, payload, **_kwargs):
-        return payload
 
     async def fake_ingest(_session, *, payload, **_kwargs):
         ingested.append(payload.imap_uid)
         return {"duplicate": False, "email": {"id": len(ingested), "parse_status": "pending"}}
 
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
-    monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", fake_uid_precheck)
-    monkeypatch.setattr(mail_ingress, "archive_email_bundle", fake_archive)
     monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
 
@@ -317,10 +384,27 @@ async def test_fetch_filters_processed_uids_before_applying_batch_limit(monkeypa
     )
 
     assert client.fetched_uids == ["102", "103"]
-    assert ingested == ["102", "103"]
+    assert ingested == []
     assert result["processed_count"] == 2
     assert result["success_count"] == 2
-    assert result["skipped_count"] == 1
+    assert result["skipped_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_initial_sync_respects_configured_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    client = MultiUidImapClient([str(uid) for uid in range(1, 61)])
+    monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
+    monkeypatch.setattr(imap_fetcher.settings, "IMAP_INITIAL_BATCH_SIZE", 7)
+
+    result = await imap_fetcher.fetch_imap_emails(
+        session, limit=100, auto_parse=False, archive_to_oss=True, user_id=7
+    )
+
+    assert result["processed_count"] == 7
+    assert result["success_count"] == 7
+    assert client.fetched_uids == [str(uid) for uid in range(1, 8)]
 
 
 @pytest.mark.anyio
@@ -328,7 +412,7 @@ async def test_locked_fetch_does_not_connect_when_another_fetch_owns_lock(monkey
     session = FakeSession()
 
     @asynccontextmanager
-    async def busy_lock():
+    async def busy_lock(*_args):
         yield False
 
     async def fail_fetch(*_args, **_kwargs):
@@ -348,7 +432,7 @@ async def test_background_job_retries_instead_of_reporting_success_when_lock_is_
     session = FakeSession()
 
     @asynccontextmanager
-    async def busy_lock():
+    async def busy_lock(*_args):
         yield False
 
     monkeypatch.setattr(imap_fetcher, "imap_fetch_lock", busy_lock)
@@ -411,10 +495,7 @@ async def test_retry_success_updates_existing_uidvalidity_record(monkeypatch: py
         return None
 
     async def accept_payload(*_args, **_kwargs):
-        return SimpleNamespace(accepted=True, rule_analysis=SimpleNamespace(), message_id="<imap-101@example.com>")
-
-    async def fake_archive(*_args, **_kwargs):
-        return None
+        return SimpleNamespace(accepted=True, status="accepted", rule_analysis=SimpleNamespace(), message_id="<imap-101@example.com>")
 
     async def fake_ingest(*_args, **_kwargs):
         return {"duplicate": False, "email": {"id": 77, "parse_status": "pending"}}
@@ -422,16 +503,15 @@ async def test_retry_success_updates_existing_uidvalidity_record(monkeypatch: py
     monkeypatch.setattr(imap_fetcher, "_connect", lambda: client)
     monkeypatch.setattr(imap_fetcher, "precheck_imap_uid", allow_uid)
     monkeypatch.setattr(imap_fetcher, "precheck_email_payload", accept_payload)
-    monkeypatch.setattr(mail_ingress, "archive_email_bundle", fake_archive)
     monkeypatch.setattr(mail_ingress.email_service, "ingest_email", fake_ingest)
     monkeypatch.setattr(imap_fetcher.settings, "IMAP_USER", "imap-test@example.com")
 
     result = await imap_fetcher.fetch_imap_emails(session, limit=1, auto_parse=False, archive_to_oss=True, user_id=7)
 
     assert result["status"] == "success"
-    assert existing.fetch_status == "classified_first"
-    assert existing.processing_stage == "first_ingested"
-    assert existing.email_id == 77
+    assert existing.fetch_status == "spooled"
+    assert existing.processing_stage == "spooled"
+    assert existing.email_id is None
     assert existing.attempt_count == 2
     assert existing.next_retry_at is None
     assert [item for item in session.added if isinstance(item, MailFetchRecord)] == []
@@ -473,4 +553,4 @@ async def test_due_seen_retry_uid_is_merged_with_unseen_search(monkeypatch: pyte
     )
 
     assert result["processed_count"] == 2
-    assert ingested == ["99", "101"]
+    assert ingested == []

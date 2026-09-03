@@ -473,6 +473,29 @@ def test_operator_can_approve_reply(monkeypatch) -> None:
     assert session.committed is True
 
 
+def test_operator_can_queue_frozen_reply_outbox(monkeypatch) -> None:
+    session = FakeSession()
+
+    async def fake_approve(_session, *, reply_id: int, user_id: int):
+        assert reply_id == 6
+        assert user_id == 7
+        return {
+            "reply": {"id": reply_id, "send_status": "approved_pending_send"},
+            "job": {"id": 81, "job_type": "smtp_send", "status": "queued"},
+        }
+
+    monkeypatch.setattr(reply_service, "approve_reply", fake_approve)
+
+    with make_client(session, roles=["operator"]) as client:
+        response = client.post("/api/v1/replies/6/approve-send/jobs")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["reply"]["send_status"] == "approved_pending_send"
+    assert payload["data"]["job"]["job_type"] == "smtp_send"
+    assert session.committed is True
+
+
 def test_operator_can_approve_reply(monkeypatch) -> None:
     session = FakeSession()
 

@@ -14,6 +14,7 @@ from app.models.integrations import (
 from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog
 from app.models.mail import Email, EmailAttachment, EmailThread, EmailTicketLink
 from app.models.mail_fetch import MailFetchRecord
+from app.models.mail_transport import EmailOutbox, MailboxSyncState, MailDeliveryEvent
 from app.models.master_data import BoardCard, CustomerServicePolicy, SnAsset
 from app.models.parsing import ParseResult, SnValidationResult
 from app.models.replies import ReplyRecord, ReplyTemplate
@@ -34,6 +35,9 @@ __all__ = [
     "EmailAttachment",
     "EmailTicketLink",
     "MailFetchRecord",
+    "MailboxSyncState",
+    "EmailOutbox",
+    "MailDeliveryEvent",
     "RepairTicket",
     "RepairTicketItem",
     "WorkflowStatus",

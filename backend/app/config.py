@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import field_validator, model_validator
@@ -49,6 +50,10 @@ class Settings(BaseSettings):
     IMAP_FETCH_ENABLED: bool = True
     IMAP_FOLDER: str = "INBOX"
     IMAP_FETCH_LIMIT: int = 10
+    IMAP_INITIAL_SYNC_START_AT: datetime | None = None
+    IMAP_INITIAL_BATCH_SIZE: int = 50
+    IMAP_INCREMENTAL_LIMIT: int = 20
+    IMAP_FETCH_BATCH_SIZE: int = 10
     IMAP_UNSEEN_ONLY: bool = True
     IMAP_ARCHIVE_TO_OSS: bool = True
     IMAP_MAX_RETRIES: int = 5
@@ -64,6 +69,16 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USER: str = "repair@example.com"
     SMTP_PASSWORD: str = ""
+    SMTP_MAX_CONNECTIONS: int = 2
+    SMTP_MESSAGES_PER_CONNECTION: int = 20
+    SMTP_CONNECTION_MAX_AGE_SECONDS: int = 600
+    SMTP_IDLE_TIMEOUT_SECONDS: int = 60
+    SMTP_CONNECT_TIMEOUT_SECONDS: int = 20
+    SMTP_SEND_TIMEOUT_SECONDS: int = 60
+    SMTP_RETRY_LIMIT: int = 3
+    SMTP_RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 300]
+    SMTP_RATE_LIMIT_PER_MINUTE: int = 60
+    SMTP_SENT_FOLDER: str = "Sent"
 
     OSS_ENDPOINT: str = "https://oss-cn-shanghai.aliyuncs.com"
     OSS_BUCKET: str = "acco-repair-mail-file"
@@ -180,6 +195,8 @@ class Settings(BaseSettings):
 
     EMAIL_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
+    MAIL_WORKER_ENABLED: bool = True
+    MAIL_SCHEDULER_IN_API: bool = False
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
     ASYNC_JOB_STALE_SECONDS: int = 900
