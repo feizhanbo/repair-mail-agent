@@ -240,6 +240,20 @@ async def classify_mail(
             fallback_used=bool(getattr(completion, "fallback_used", False)),
         )
 
+    # 链路 smoke 测试开关：非空时强制最终 intent，需在低置信度/候选冲突判定之前，
+    # 否则 Qwen 等模型返回 low-confidence 时会先短路为 unknown，导致开关失效。
+    forced = settings.MAIL_INTENT_FORCE.strip()
+    if forced:
+        canonical = decision_for_intent(forced, reason_code=f"SMOKE_FORCE:{forced}")
+        return MailPreclassificationDecision(
+            intent_type=canonical.intent_type,
+            handling_level=canonical.handling_level,
+            confidence=result.confidence,
+            reason_code=canonical.reason_code,
+            candidates=[candidate.model_dump() for candidate in result.candidates],
+            needs_attachment_content=result.needs_attachment_content,
+            evidence=result.evidence,
+        )
     canonical = decision_for_intent(result.intent, reason_code=result.reason_code)
     below_threshold = result.confidence < settings.MAIL_PRECLASSIFICATION_MIN_CONFIDENCE
     conflicting = bool(result.candidates) and result.candidates[0].intent != canonical.intent_type
@@ -256,7 +270,7 @@ async def classify_mail(
         intent_type=canonical.intent_type,
         handling_level=canonical.handling_level,
         confidence=result.confidence,
-        reason_code=result.reason_code,
+        reason_code=canonical.reason_code,
         candidates=[candidate.model_dump() for candidate in result.candidates],
         needs_attachment_content=result.needs_attachment_content,
         evidence=result.evidence,

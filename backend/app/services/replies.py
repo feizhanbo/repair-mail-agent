@@ -7,11 +7,11 @@ import logging
 import re
 import smtplib
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses, make_msgid, parseaddr
+from email.utils import format_datetime, getaddresses, make_msgid, parseaddr
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -529,6 +529,15 @@ def _smtp_message_id(reply: ReplyRecord) -> str:
     return f"<repair-reply-{reply_id}@{domain}>" if reply_id else make_msgid(domain=domain)
 
 
+def _deterministic_date(reply: ReplyRecord) -> str:
+    """构建稳定的 Date 头，保证跨重试重建 EML 字节一致。"""
+    created = getattr(reply, "created_at", None)
+    dt = created if isinstance(created, datetime) else utcnow()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return format_datetime(dt)
+
+
 def _build_reply_message(
     reply: ReplyRecord,
     message_id: str,
@@ -544,6 +553,10 @@ def _build_reply_message(
         message["Cc"] = reply.cc_addresses
     message["Subject"] = test_only_subject(reply.subject)
     message["Message-ID"] = message_id
+    # 显式写入稳定的 Date 头，避免 email 库在 as_bytes() 时注入当前时间，
+    # 否则每次重建 EML 的 sha256 都不同，导致重试时
+    # OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH。
+    message["Date"] = _deterministic_date(reply)
     if reply.in_reply_to:
         message["In-Reply-To"] = reply.in_reply_to
     if reply.references_header:
@@ -586,7 +599,27 @@ def _build_reply_message(
             subtype="pdf",
             filename=attachment_filename or "rma-authorization.pdf",
         )
+    _pin_deterministic_boundaries(message, reply)
     return message
+
+
+def _pin_deterministic_boundaries(message: EmailMessage, reply: ReplyRecord) -> None:
+    """为每个 multipart 子部件写入确定性的 MIME boundary。
+
+    Python 3.11 的 email 库在建 multipart 时注入随机 boundary，导致同一逻辑
+    邮件每次重建的字节都不同，使 outbound EML 归档哈希在重试重建时不一致
+    （OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH）。此处按 reply.id + 层序派生稳定
+    boundary，保证跨重试重建字节一致，同时避免嵌套层 boundary 复用。
+    """
+    reply_id = getattr(reply, "id", None)
+    depth = 0
+    for part in message.walk():
+        if not part.get_content_type().startswith("multipart/"):
+            continue
+        seed = f"reply:{reply_id or ''}:boundary:{depth}"
+        boundary = "====" + hashlib.sha256(seed.encode()).hexdigest()[:20] + "=="
+        part.set_param("boundary", boundary, header="Content-Type")
+        depth += 1
 
 
 def _send_reply_via_smtp(

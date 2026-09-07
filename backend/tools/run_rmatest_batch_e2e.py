@@ -573,6 +573,42 @@ async def apply_temporary_master_data(
             session.add(asset)
             await session.flush()
             created["sn_asset_ids"].append(asset.id)
+        # Some fixtures declare SNs under expected_items while their material
+        # master data lives in temporary_board_cards.  The 8/28 SAP contract
+        # requires every ticket SN to resolve against sn_assets (SN safety
+        # checks), so backfill a valid SnAsset row for any expected-item SN
+        # that is not already injected via temporary_sn_assets.
+        for message in manifest["messages"]:
+            gold = message.get("gold") or {}
+            expected_fields = gold.get("expected_fields") or {}
+            for row in gold.get("expected_items") or []:
+                sn = str(row.get("sn") or "").strip().upper()
+                if not sn:
+                    continue
+                existing = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
+                # 既有资产（非本 batch 注入）不在此静默改写 ins_id：确定性 fake 值
+                # 不会被 cleanup 还原（cleanup 只能恢复 overridden 快照），会残留回归库。
+                if existing is not None:
+                    continue
+                asset = SnAsset(
+                    sn=sn,
+                    customer_code=str(expected_fields.get("customer_code") or "").strip(),
+                    customer_name=str(expected_fields.get("customer_name") or "").strip(),
+                    material_code=str(row.get("material_code") or "").strip(),
+                    material_name=str(row.get("material_name") or "").strip() or None,
+                    ins_id=1_000_000_000 + int(
+                        hashlib.sha256(sn.encode("utf-8")).hexdigest()[:7], 16
+                    ),
+                    asset_status="valid",
+                    source_file_name=batch_id,
+                    source_file_hash=source_hash,
+                    source_row_no=0,
+                    source_system="e2e_test",
+                    raw_data={"batch_id": batch_id, "gold_confirmed": True},
+                )
+                session.add(asset)
+                await session.flush()
+                created["sn_asset_ids"].append(asset.id)
         for row_no, row in enumerate(board_rows, 1):
             material = str(row["material_code"]).strip()
             board_code = str(row.get("board_code") or "").strip()

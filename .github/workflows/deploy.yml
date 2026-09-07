@@ -1,9 +1,25 @@
 name: Deploy
 
+# Required GitHub Secrets (configure in repo Settings → Secrets and variables → Actions):
+#   SERVER_HOST        - remote server host (e.g. 1.2.3.4 or domain)
+#   SERVER_USER        - SSH user (e.g. root)
+#   SERVER_PORT        - SSH port (e.g. 22)
+#   SERVER_SSH_KEY     - SSH private key with login access to the server
+#   SERVER_PROJECT_DIR - absolute project path on the server (must match deploy.sh default: /root/bert/repair-mail-agent)
+#
+# Prerequisites (manual ops, not handled by this workflow):
+#   1. Create a private GitHub repository and configure `origin` remote on the server:
+#        git remote add origin git@github.com:<owner>/repair-mail-agent.git
+#   2. Clone/sync the project to /root/bert/repair-mail-agent on the server.
+#   3. Create /root/bert/repair-mail-agent/.env from .env.example with real secrets (chmod 600).
+#   4. Ensure Docker Engine ≥ 24.0 and Docker Compose v2 are installed on the server.
+
+# Current mode: MANUAL DEPLOYMENT
+#   - push to main does NOT trigger this workflow
+#   - to run deploy: GitHub Actions UI → Deploy → Run workflow (workflow_dispatch)
+#   - to re-enable auto-deploy: restore `push: branches: [main]` under `on:` below
+
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -21,6 +37,7 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
+            echo "Deploying to ${{ secrets.SERVER_PROJECT_DIR }} via SSH (requires SERVER_HOST/USER/PORT/SSH_KEY/PROJECT_DIR secrets)"
             cd "${{ secrets.SERVER_PROJECT_DIR }}"
             bash deploy.sh
 

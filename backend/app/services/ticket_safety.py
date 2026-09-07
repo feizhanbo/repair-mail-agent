@@ -190,7 +190,7 @@ async def build_sn_validation_report(
         settings.RELAY_SQLSERVER_ENABLED
         and settings.RELAY_ADAPTER.strip().lower() == "sqlserver"
     )
-    source_system = "sqlserver_snapshot+local_sn_assets" if sqlserver_live else "local_sn_assets"
+    source_system = "sqlserver+local_sn_assets" if sqlserver_live else "local_sn_assets"
     if sqlserver_live:
         freshness = await sn_snapshot_freshness(session)
         if not freshness["fresh"]:

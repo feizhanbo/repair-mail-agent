@@ -6,8 +6,29 @@ import hashlib
 import html
 import imaplib
 import json
-import msvcrt
 import os
+
+try:
+    import msvcrt  # Windows
+except ImportError:
+    import fcntl  # Linux fallback
+
+    class _MsvcrtShim:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(fd, mode, length):
+            # mode LK_NBLCK -> 排他非阻塞锁; LK_UNLCK -> 解锁
+            if mode == _MsvcrtShim.LK_UNLCK:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    msvcrt = _MsvcrtShim()  # type: ignore
 import re
 import smtplib
 import ssl
@@ -1212,6 +1233,7 @@ def _classify_suite_once(path: Path, confirm_suite: str) -> dict[str, Any]:
     login(client)
     initial = current_config(client)
     _assert_target_relay_is_test_http(initial)
+    sn_initial = client.data("GET", "/api/v1/system/sn-sync/config")
     result: dict[str, Any] = {
         "status": "running",
         "suite_id": suite_id,
@@ -1233,6 +1255,11 @@ def _classify_suite_once(path: Path, confirm_suite: str) -> dict[str, Any]:
             rma_auto_send_enabled=False,
             relay_sqlserver_enabled=False,
         )
+        # Relay export is toggled through the sn-sync config endpoint; disable
+        # it during classification so ready_for_export tickets do not enqueue
+        # asynchronous relay_ticket_export jobs that would block the suite
+        # cleanup (GOLD_REPLAY_ACTIVE_JOBS / UNCERTAIN_EXTERNAL_OPERATION).
+        client.data("PATCH", "/api/v1/system/sn-sync/config", body={"relay_sqlserver_enabled": False})
         # The independent worker refreshes persisted runtime settings from the
         # database in its one-minute scheduler cycle. Keep classification-only
         # cases out of the relay pipeline after the project split that worker
@@ -1383,11 +1410,24 @@ def _classify_suite_once(path: Path, confirm_suite: str) -> dict[str, Any]:
         write_json(suite_root(suite_id) / "classification-gate.json", gate)
         return {**result, "evidence": str(evidence)}
     finally:
-        _restore_config_without_masking_primary_error(
-            client,
-            initial,
-            sys.exc_info()[1],
-        )
+        # 先在外层异常仍在传播时保存它；在 except 块内 sys.exc_info() 返回的是
+        # 刚被捕获的内层异常，不能用于判断"是否有主错误"。
+        primary_error = sys.exc_info()[1]
+        try:
+            client.data(
+                "PATCH",
+                "/api/v1/system/sn-sync/config",
+                body={"relay_sqlserver_enabled": bool((sn_initial or {}).get("relay_sqlserver_enabled"))},
+            )
+        except Exception as exc:
+            if primary_error is not None:
+                primary_error.add_note(f"SN_SYNC_CONFIG_RESTORE_FAILED:{_safe_exception_code(exc)}")
+            else:
+                raise GoldCliError(
+                    "SN_SYNC_CONFIG_RESTORE_FAILED",
+                    details={"cause": _safe_exception_code(exc)},
+                ) from None
+        _restore_config_without_masking_primary_error(client, initial, primary_error)
 
 
 def classify_suite(path: Path, confirm_suite: str, *, max_attempts: int = 3) -> dict[str, Any]:
@@ -2248,6 +2288,7 @@ def _run_suite_unlocked(
     }
     client = Client()
     initial: dict[str, Any] | None = None
+    sn_initial: dict[str, Any] | None = None
     all_message_ids = [str(item["message_id"]) for item in messages]
     selected_system_limit = sum(
         int(item["gold"].get("expected_outbound_count") or 0)
@@ -2265,12 +2306,17 @@ def _run_suite_unlocked(
         login(client)
         initial = current_config(client)
         _assert_target_relay_is_test_http(initial)
+        sn_initial = client.data("GET", "/api/v1/system/sn-sync/config")
         _set_and_verify_config(
             client,
             auto_send_enabled=False,
             auto_followup_enabled=False,
             rma_auto_send_enabled=False,
         )
+        # Disable relay export while the suite runs so ready_for_export
+        # tickets do not enqueue async relay_ticket_export jobs that would
+        # block per-case and final cleanup (GOLD_REPLAY_* blockers).
+        client.data("PATCH", "/api/v1/system/sn-sync/config", body={"relay_sqlserver_enabled": False})
         rmatest2_suite_baseline_uid = _rmatest2_max_uid()
         rmatest1_suite_baseline_uid = _rmatest1_max_uid()
         for index, item in enumerate(messages):
@@ -2383,10 +2429,23 @@ def _run_suite_unlocked(
                     }
                 if mode == "followup_then_rma":
                     original_email_detail = value.get("email_detail")
-                    first = _rmatest2_new_messages(baseline_uid)
-                    matching_first = [row for row in first if row.get("in_reply_to") == message_id or message_id in row.get("references", "")]
-                    if len(matching_first) != 1:
-                        raise GoldCliError("FOLLOWUP_REPLY_NOT_UNIQUE", details={"match_count": len(matching_first)})
+                    deadline = time.monotonic() + 90
+                    matching_first: list[dict[str, Any]] = []
+                    while True:
+                        _assert_config_matches(client, expected_switches)
+                        first = _rmatest2_new_messages(baseline_uid)
+                        matching_first = [
+                            row
+                            for row in first
+                            if row.get("in_reply_to") == message_id or message_id in row.get("references", "")
+                        ]
+                        if len(matching_first) == 1:
+                            break
+                        if len(matching_first) > 1:
+                            raise GoldCliError("FOLLOWUP_REPLY_NOT_UNIQUE", details={"match_count": len(matching_first)})
+                        if time.monotonic() >= deadline:
+                            raise GoldCliError("FOLLOWUP_REPLY_NOT_UNIQUE", details={"match_count": len(matching_first)})
+                        time.sleep(2)
                     supplement_id = _send_supplement(
                         message_id,
                         matching_first[0],
@@ -2582,6 +2641,14 @@ def _run_suite_unlocked(
             except Exception as exc:
                 result["runtime_restore_error"] = type(exc).__name__
                 result["status"] = "error"
+        try:
+            client.data(
+                "PATCH",
+                "/api/v1/system/sn-sync/config",
+                body={"relay_sqlserver_enabled": bool((sn_initial or {}).get("relay_sqlserver_enabled"))},
+            )
+        except Exception as exc:
+            result["relay_restore_error"] = type(exc).__name__
         try:
             final_cleanup = run_database_async(_reset(all_message_ids, suite_id=suite_id, run_id=f"{run_id}-final", apply=True))
             _relay_reset()

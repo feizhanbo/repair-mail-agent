@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS: int = 6000
     MAIL_PRECLASSIFICATION_BODY_CHARS: int = 12000
     MAIL_PRECLASSIFICATION_ATTACHMENT_TEXT_CHARS: int = 8000
+    # 链路 smoke 测试开关：非空时强制邮件分类最终 intent（例如 "new_repair"），
+    # 仅用于链路连通性验证，仍走完整 classify_mail 代码路径；默认空=关闭。
+    MAIL_INTENT_FORCE: str = ""
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
