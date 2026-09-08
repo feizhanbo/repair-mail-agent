@@ -9,6 +9,8 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 
+from app.config import settings
+
 CORE_TABLES = ("emails", "repair_tickets", "reply_records", "mail_fetch_records", "job_run_logs")
 DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_at",
@@ -18,7 +20,7 @@ DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "z3u8v9w0x1y2"
+REQUIRED_REVISION = "a4v9w0x1y2z3"
 
 
 def _sha256(path: Path) -> str:

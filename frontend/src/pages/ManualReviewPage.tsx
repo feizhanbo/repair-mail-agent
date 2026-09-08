@@ -69,6 +69,7 @@ type ResolveForm = {
   next_action: string;
   target_first_intent?: 'new_repair' | 'thread_new_repair' | 'customer_supplement';
   result_payload_text?: string;
+  sn_master_selections?: Record<string, number>;
 };
 
 type PolicyOverrideForm = {
@@ -182,6 +183,17 @@ export default function ManualReviewPage() {
         } catch {
           result_payload = { note: values.result_payload_text };
         }
+      }
+      if (values.sn_master_selections) {
+        result_payload = {
+          ...(result_payload ?? {}),
+          sn_master_selections: Object.entries(values.sn_master_selections).map(
+            ([ticketItemId, snAssetId]) => ({
+              ticket_item_id: Number(ticketItemId),
+              sn_asset_id: snAssetId,
+            }),
+          ),
+        };
       }
       return api.resolveTask(selectedId as number, {
         resolution: values.resolution,
@@ -588,7 +600,13 @@ export default function ManualReviewPage() {
         </Form>
       </Modal>
       <Modal title="完成复核任务" open={resolveOpen} onCancel={() => setResolveOpen(false)} footer={null} destroyOnClose>
-        <Form<ResolveForm> layout="vertical" onFinish={(values) => confirmAction('确认完成复核任务？', () => resolveMutation.mutate(values))}>
+        <Form<ResolveForm>
+          layout="vertical"
+          initialValues={detailQuery.data?.task.task_type === 'sn_master_resolution_failed'
+            ? { next_action: 'transition_ready_for_export', resolution_type: 'sn_checked' }
+            : undefined}
+          onFinish={(values) => confirmAction('确认完成复核任务？', () => resolveMutation.mutate(values))}
+        >
           <Form.Item label="处理类型" name="resolution_type">
             <Select allowClear options={resolutionTypeOptions} />
           </Form.Item>
@@ -608,6 +626,27 @@ export default function ManualReviewPage() {
           <Form.Item label="结构化结果 JSON/备注" name="result_payload_text">
             <Input.TextArea rows={3} placeholder='例如 {"fixed_fields":["sn"]}；非 JSON 将按备注保存' />
           </Form.Item>
+          {detailQuery.data?.task.task_type === 'sn_master_resolution_failed'
+            && detailQuery.data.ticket_context?.items
+              .filter((item) => item.sn_master_resolution_status === 'MASTER_DATA_AMBIGUOUS')
+              .map((item) => {
+                const candidates = Array.isArray(item.sn_master_resolution_snapshot?.candidates)
+                  ? item.sn_master_resolution_snapshot.candidates as JsonRecord[]
+                  : [];
+                return (
+                  <Form.Item
+                    key={item.id}
+                    label={`SN ${item.sn || '-'}：选择 SAP Master Record`}
+                    name={['sn_master_selections', String(item.id)]}
+                    rules={[{ required: true, message: '必须选择一条候选主数据' }]}
+                  >
+                    <Select options={candidates.map((candidate) => ({
+                      value: Number(candidate.id),
+                      label: `${candidate.ins_id} / ${candidate.customer_code} / ${candidate.material_code} / ${candidate.warranty_end_date}`,
+                    }))} />
+                  </Form.Item>
+                );
+              })}
           <Button type="primary" htmlType="submit" loading={resolveMutation.isPending}>
             提交
           </Button>

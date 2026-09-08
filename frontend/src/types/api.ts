@@ -421,6 +421,10 @@ export type TicketLine = {
   return_route_snapshot?: JsonRecord | null;
   sn?: string | null;
   sn_asset_id?: number | null;
+  sn_master_resolution_status?: 'pending' | 'RESOLVED' | 'SN_NOT_FOUND' | 'MASTER_DATA_UNRESOLVED' | 'MASTER_DATA_AMBIGUOUS';
+  sn_master_resolution_method?: string | null;
+  sn_master_resolution_snapshot?: JsonRecord | null;
+  sn_master_resolved_at?: string | null;
   quantity: number;
   failure_description?: string | null;
   failure_information?: string | null;
@@ -749,6 +753,7 @@ export type ReplyRecord = {
 
 export type SnAsset = {
   id: number;
+  ins_id?: number | null;
   customer_code: string;
   customer_name: string;
   material_code: string;
@@ -763,6 +768,7 @@ export type SnAsset = {
   warranty_start_date?: string | null;
   warranty_end_date?: string | null;
   source_system?: string | null;
+  external_id?: string | null;
   imported_at?: string | null;
 };
 

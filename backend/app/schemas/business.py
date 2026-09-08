@@ -189,6 +189,7 @@ class ReplySendReconcileRequest(BaseModel):
 
 
 class SnAssetImportItem(BaseModel):
+    ins_id: int | None = Field(default=None, ge=1)
     customer_code: str = Field(max_length=50)
     customer_name: str = Field(max_length=255)
     material_code: str = Field(max_length=100)

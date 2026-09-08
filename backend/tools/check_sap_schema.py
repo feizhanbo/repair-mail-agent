@@ -4,8 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "z3u8v9w0x1y2"
-EXPECTED_BUSINESS_TABLE_COUNT = 38
+EXPECTED_REVISION = "a4v9w0x1y2z3"
+EXPECTED_BUSINESS_TABLE_COUNT = 41
 
 EXPECTED = {
     "export_sap": {
@@ -93,6 +93,10 @@ EXPECTED = {
             "return_phone",
             "return_route_status",
             "return_route_snapshot",
+            "sn_master_resolution_status",
+            "sn_master_resolution_method",
+            "sn_master_resolution_snapshot",
+            "sn_master_resolved_at",
         },
         "unique": {"uk_ticket_items_line"},
         "foreign_keys": {
@@ -160,19 +164,20 @@ EXPECTED = {
             "external_id",
             "source_row_hash",
         },
-        "unique": {"uk_sn_assets_sn"},
+        "unique": {"uk_sn_assets_source_ins_id", "uk_sn_assets_external"},
         "foreign_keys": {"fk_sn_assets_imported_by"},
     },
     "sap_sn_staging": {
         "columns": {
             "sync_batch_id",
+            "ins_id",
             "sn",
             "customer_code",
             "material_code",
             "values_json",
             "row_hash",
         },
-        "unique": {"uk_sap_sn_staging_batch_sn"},
+        "unique": {"uk_sap_sn_staging_batch_ins_id"},
         "foreign_keys": {"fk_sap_sn_staging_batch"},
     },
 }

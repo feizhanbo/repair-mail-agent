@@ -23,79 +23,45 @@ from app.services.common import utcnow
 CHECKPOINT_NAME = "sqlserver_sn_assets"
 
 
-def _chunks(values: list[str], size: int = 1000):
+def _chunks(values: list[Any], size: int = 1000):
     for offset in range(0, len(values), size):
         yield values[offset : offset + size]
 
 
-def _warranty_date(value: Any) -> date | None:
-    """Parse a warranty_end_date/ExpDate value into a comparable date.
-
-    ``None``, unparseable strings and other types count as "no expiry", which
-    is treated as the earliest possible date when choosing the authoritative
-    row for a duplicated SN.
-    """
+def _date_value(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         try:
-            return date.fromisoformat(value)
+            return datetime.fromisoformat(value).date()
         except ValueError:
-            return None
+            return date.fromisoformat(value[:10])
     return None
-
-
-def _sn_group_authoritative(rows: list[Any]) -> Any:
-    """Pick the authoritative row for one SN from its duplicate rows.
-
-    The row with the latest ``warranty_end_date`` (mapped from ``ExpDate``)
-    wins; a row without an expiry never beats one with an expiry. When no row
-    carries a usable expiry the first row (source read order) is kept so the
-    result is deterministic.
-    """
-    best, best_exp = rows[0], _warranty_date((rows[0].values or {}).get("warranty_end_date"))
-    for row in rows[1:]:
-        exp = _warranty_date((row.values or {}).get("warranty_end_date"))
-        if exp is not None and (best_exp is None or exp > best_exp):
-            best, best_exp = row, exp
-    return best
 
 
 def assess_sn_snapshot(records: list[Any]) -> dict[str, Any]:
     counts = Counter(row.sn for row in records if row.sn)
+    ins_id_counts = Counter(row.ins_id for row in records if row.ins_id is not None)
+    duplicate_ins_ids = {ins_id for ins_id, count in ins_id_counts.items() if count > 1}
     invalid = [
         row
         for row in records
         if not row.sn or row.ins_id is None or not row.customer_code or not row.material_code
     ]
     invalid_ids = {id(row) for row in invalid}
-    # Group the remaining valid rows by SN and keep one authoritative row per
-    # SN. A duplicated SN (e.g. a warranty expiry update in the source) is no
-    # longer discarded entirely: the row with the latest warranty expiry is
-    # still synchronized, historical rows are only counted as dropped.
-    by_sn: dict[str, list[Any]] = {}
-    for row in records:
-        if not row.sn or id(row) in invalid_ids:
-            continue
-        by_sn.setdefault(row.sn, []).append(row)
-    resolved: list[Any] = []
-    duplicate_sns: set[str] = set()
-    dropped = 0
-    for sn, rows in by_sn.items():
-        resolved.append(_sn_group_authoritative(rows))
-        extra = len(rows) - 1
-        if extra:
-            duplicate_sns.add(sn)
-            dropped += extra
+    active_rows = [row for row in records if row.sn and id(row) not in invalid_ids]
+    duplicate_sns = {sn for sn, count in counts.items() if count > 1}
+    duplicate_rows = sum(max(0, count - 1) for count in counts.values())
     return {
         "counts": counts,
         "duplicate_sns": duplicate_sns,
-        "duplicate_count": dropped,
+        "duplicate_ins_ids": duplicate_ins_ids,
+        "duplicate_count": duplicate_rows,
         "invalid": invalid,
-        "valid_count": len(resolved),
-        "resolved": resolved,
+        "valid_count": len(active_rows),
+        "resolved": active_rows,
     }
 
 
@@ -179,6 +145,7 @@ async def create_sn_sync_batch(
     batch.source_count = len(records)
     assessment = assess_sn_snapshot(records)
     duplicate_sns = assessment["duplicate_sns"]
+    duplicate_ins_ids = assessment["duplicate_ins_ids"]
     invalid = assessment["invalid"]
     active_rows = assessment["resolved"]
     batch.duplicate_count = assessment["duplicate_count"]
@@ -186,15 +153,24 @@ async def create_sn_sync_batch(
     batch.valid_count = len(active_rows)
     quarantine_message = {
         "duplicate_sns": sorted(duplicate_sns)[:50],
-        "duplicate_rows_dropped": assessment["duplicate_count"],
+        "duplicate_rows_retained": assessment["duplicate_count"],
         "invalid_rows": [row.sn for row in invalid[:50]],
+        "duplicate_ins_ids": sorted(duplicate_ins_ids)[:50],
     }
+    if duplicate_ins_ids:
+        batch.status = "failed"
+        batch.error_code = "SAP_SN_DUPLICATE_INS_ID"
+        batch.error_message = json.dumps(quarantine_message, ensure_ascii=False)
+        batch.finished_at = utcnow()
+        checkpoint.last_status = "failed"
+        checkpoint.last_error_code = batch.error_code
+        return serialize_sync_batch(batch)
     if invalid:
         batch.error_code = "SAP_SN_ROWS_QUARANTINED"
         batch.error_message = json.dumps(quarantine_message, ensure_ascii=False)
     elif assessment["duplicate_count"]:
-        # Historical duplicate rows are dropped for audit only; they no longer
-        # fail the sync because the authoritative row still gets synchronized.
+        # Duplicate SN rows are expected SAP master records. Keep them all and
+        # expose the count for data-quality observability.
         batch.error_message = json.dumps(quarantine_message, ensure_ascii=False)
     if not records or not active_rows:
         batch.status = "failed"
@@ -215,7 +191,7 @@ async def create_sn_sync_batch(
         checkpoint.last_error_code = batch.error_code
         return serialize_sync_batch(batch)
 
-    protected_sns = {row.sn for row in invalid if row.sn} | set(duplicate_sns)
+    protected_ins_ids = {row.ins_id for row in invalid if row.ins_id is not None}
 
     existing_test: set[str] = set()
     for chunk in _chunks([row.sn for row in active_rows]):
@@ -246,13 +222,14 @@ async def create_sn_sync_batch(
     batch.count_change_percent = snapshot_count_change_percent(batch.previous_count, batch.source_count)
 
     snapshot_rows: list[dict[str, Any]] = []
-    for record in sorted(active_rows, key=lambda row: row.sn):
+    for record in sorted(active_rows, key=lambda row: (row.sn, row.ins_id)):
         values = _json_safe(record.values)
         raw_data = _json_safe(record.raw_data)
-        row_hash = _hash({"sn": record.sn, "values": values})
+        row_hash = _hash({"ins_id": record.ins_id, "sn": record.sn, "values": values})
         session.add(
             SapSnStaging(
                 sync_batch_id=batch.id,
+                ins_id=record.ins_id,
                 sn=record.sn,
                 customer_code=record.customer_code,
                 customer_name=record.customer_name,
@@ -264,7 +241,7 @@ async def create_sn_sync_batch(
                 row_hash=row_hash,
             )
         )
-        snapshot_rows.append({"sn": record.sn, "row_hash": row_hash})
+        snapshot_rows.append({"sn": record.sn, "ins_id": record.ins_id, "row_hash": row_hash})
     batch.snapshot_hash = _hash(snapshot_rows)
     await session.flush()
 
@@ -274,7 +251,7 @@ async def create_sn_sync_batch(
         user_id=user_id,
         reason="SN 页面手动同步" if user_id else None,
         automatic=True,
-        protected_sns=protected_sns,
+        protected_ins_ids=protected_ins_ids,
     )
     return serialize_sync_batch(batch)
 
@@ -286,7 +263,7 @@ async def apply_sn_sync_batch(
     user_id: int | None,
     reason: str | None,
     automatic: bool = False,
-    protected_sns: set[str] | None = None,
+    protected_ins_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     batch = await session.get(SapSnSyncBatch, batch_id, with_for_update=True)
     if batch is None:
@@ -308,19 +285,24 @@ async def apply_sn_sync_batch(
     if len(staging) != batch.valid_count or not staging:
         raise ValueError("SAP_SN_STAGING_COUNT_MISMATCH")
     batch.status = "applying"
-    active_sns = {row.sn for row in staging}
-    existing: dict[str, SnAsset] = {}
-    for chunk in _chunks(list(active_sns)):
+    active_ins_ids = {row.ins_id for row in staging}
+    existing: dict[int, SnAsset] = {}
+    for chunk in _chunks(list(active_ins_ids)):
         existing.update(
             {
-                row.sn: row
+                row.ins_id: row
                 for row in (
-                    await session.execute(select(SnAsset).where(SnAsset.sn.in_(chunk)))
+                    await session.execute(
+                        select(SnAsset).where(
+                            SnAsset.source_system == "sqlserver",
+                            SnAsset.ins_id.in_(chunk),
+                        )
+                    )
                 ).scalars().all()
             }
         )
     for row in staging:
-        asset = existing.get(row.sn)
+        asset = existing.get(row.ins_id)
         if asset is None:
             asset = SnAsset(
                 sn=row.sn,
@@ -330,11 +312,12 @@ async def apply_sn_sync_batch(
             )
             session.add(asset)
         asset.customer_code = row.customer_code
+        asset.sn = row.sn
         asset.customer_name = row.customer_name
         asset.material_code = row.material_code
         asset.material_name = row.material_name
         asset.asset_status = row.asset_status
-        asset.ins_id = int(row.values_json["ins_id"]) if row.values_json and row.values_json.get("ins_id") is not None else None
+        asset.ins_id = row.ins_id
         asset.source_row_hash = row.row_hash
         for field in (
             "service_tracking_card_no",
@@ -348,10 +331,10 @@ async def apply_sn_sync_batch(
             if row.values_json and field in row.values_json:
                 value = row.values_json[field]
                 if field in {"warranty_start_date", "warranty_end_date"} and isinstance(value, str):
-                    value = date.fromisoformat(value)
+                    value = _date_value(value)
                 setattr(asset, field, value)
         asset.source_system = "sqlserver"
-        asset.external_id = None
+        asset.external_id = str(row.ins_id)
         asset.source_updated_at = None
         asset.raw_data = {"sqlserver": row.raw_data, "snapshot_hash": batch.snapshot_hash}
         asset.imported_at = utcnow()
@@ -361,7 +344,7 @@ async def apply_sn_sync_batch(
         ).scalars().all()
     )
     for asset in old_sqlserver:
-        if asset.sn not in active_sns and asset.sn not in (protected_sns or set()):
+        if asset.ins_id not in active_ins_ids and asset.ins_id not in (protected_ins_ids or set()):
             asset.asset_status = "invalid"
     batch.status = "succeeded"
     batch.approved_by_user_id = user_id

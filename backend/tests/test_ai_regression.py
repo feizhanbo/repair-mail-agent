@@ -223,11 +223,8 @@ async def test_enrichment_rejects_signature_only_return_fields_and_repairs_shift
         "M81232105400093",
         "M81172009050036Y",
     ]
-    assert enriched.extracted_fields["customer_code"] == "JSICAT"
-    assert [row["material_code"] for row in enriched.extracted_items] == [
-        "A8200B31327",
-        "A8200B30057",
-    ]
+    assert "customer_code" not in enriched.extracted_fields
+    assert all("material_code" not in row for row in enriched.extracted_items)
     assert not {
         "contact_person",
         "contact_phone",
@@ -286,7 +283,7 @@ async def test_enrichment_keeps_explicit_english_post_repair_address_block() -> 
     enriched = await _enrich_ai_quality(Session(), parsed=parsed, email=email, attachments=[])
 
     assert enriched.extracted_fields["mailing_address"] == "#601, Shouan 3-20-11, Suginami, Tokyo"
-    assert enriched.extracted_items[0]["material_code"] == "M8125"
+    assert "material_code" not in enriched.extracted_items[0]
     assert "mailing_address" not in enriched.missing_fields
     assert enriched.confidence_score == pytest.approx(0.85)
     assert enriched.manual_review_direction is None
@@ -791,7 +788,7 @@ async def test_missing_field_email_uses_failure_description_and_email_date() -> 
 
 
 @pytest.mark.anyio
-async def test_customer_name_uses_unanimous_valid_sn_asset_master_data() -> None:
+async def test_customer_name_waits_for_deterministic_master_resolution() -> None:
     class Session:
         async def scalar(self, _statement):
             return SimpleNamespace(
@@ -827,13 +824,9 @@ async def test_customer_name_uses_unanimous_valid_sn_asset_master_data() -> None
         Session(), parsed=parsed, email=email, attachments=[]
     )
 
-    assert enriched.extracted_fields["customer_name"] == "上海林众电子科技有限公司"
-    assert enriched.extracted_fields["customer_code"] == "E2E-CBIT-20260804"
-    assert enriched.evidence["derived_fields"]["customer_name"] == {
-        "source": "sn_asset_consensus",
-        "sn_count": 2,
-    }
-    assert enriched.missing_fields == {}
+    assert "customer_name" not in enriched.extracted_fields
+    assert "customer_code" not in enriched.extracted_fields
+    assert "customer_name" in enriched.missing_fields
 
 
 def test_ai_reply_schema_accepts_sample_output() -> None:

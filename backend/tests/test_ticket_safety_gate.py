@@ -17,6 +17,11 @@ class ScalarSession:
     async def scalar(self, _statement):
         return self.values.pop(0) if self.values else None
 
+    async def execute(self, _statement):
+        rows = [value for value in self.values if isinstance(value, SnAsset)]
+        self.values = []
+        return Rows(rows)
+
 
 class Rows:
     def __init__(self, values):
@@ -94,7 +99,8 @@ async def test_sn_validation_uses_local_mirror_and_never_calls_sql_when_disabled
 
     assert report["passed"] is True
     assert report["snapshot"]["source"] == "local_sn_assets"
-    assert report["snapshot"]["checks"][0]["warranty_end_date"] == "2026-12-31"
+    assert report["snapshot"]["checks"][0]["record_count"] == 1
+    assert report["snapshot"]["checks"][0]["master_resolution"]["resolved_asset"]["warranty_end_date"] == "2026-12-31"
     assert ticket.current_status_code == "parsed"
 
 
@@ -114,6 +120,7 @@ async def test_persisted_sn_hash_uses_asset_enriched_material_state(monkeypatch)
         material_code="TEST-PART",
         material_name="Synthetic Part",
         asset_status="valid",
+        warranty_end_date=date(2026, 12, 31),
         source_system="local",
     )
 
@@ -180,7 +187,7 @@ async def test_duplicate_sn_fails_core_validation_before_asset_lookup(monkeypatc
 
 
 @pytest.mark.anyio
-async def test_missing_ins_id_fails_during_sn_validation(monkeypatch) -> None:
+async def test_missing_ins_id_keeps_sn_valid_but_master_unresolved(monkeypatch) -> None:
     ticket = _ticket()
     item = _item()
     asset = SnAsset(
@@ -203,9 +210,9 @@ async def test_missing_ins_id_fails_during_sn_validation(monkeypatch) -> None:
 
     report = await ticket_safety.build_sn_validation_report(ScalarSession(asset), ticket_id=1)
 
-    assert report["passed"] is False
-    assert report["errors"]["items.1.ins_id"] == "required_from_sn_master"
-    assert report["snapshot"]["checks"][0]["asset_ins_id"] is None
+    assert report["passed"] is True
+    assert report["errors"] == {}
+    assert report["snapshot"]["checks"][0]["master_resolution"]["status"] == "MASTER_DATA_UNRESOLVED"
 
 
 @pytest.mark.anyio
@@ -301,7 +308,7 @@ async def test_manual_ready_resolution_clears_historical_parse_markers(monkeypat
 
 
 @pytest.mark.anyio
-async def test_changed_sn_input_marks_previous_validation_stale(monkeypatch) -> None:
+async def test_derived_material_change_does_not_stale_sn_existence_validation(monkeypatch) -> None:
     ticket = _ticket()
     item = _item()
     old_hash = ticket_safety._stable_hash(ticket_safety._sn_input_snapshot(ticket, [item]))
@@ -330,5 +337,6 @@ async def test_changed_sn_input_marks_previous_validation_stale(monkeypatch) -> 
     report = await ticket_safety.build_safety_report(object(), ticket_id=1)
 
     assert report["passed"] is False
-    assert report["errors"]["sn_validation"] == "stale"
-    assert ticket.sn_validation_status == "stale"
+    assert "sn_validation" not in report["errors"]
+    assert report["errors"]["items.1.master_resolution"] == "MASTER_DATA_UNRESOLVED"
+    assert ticket.sn_validation_status == "passed"

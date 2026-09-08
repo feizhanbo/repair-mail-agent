@@ -20,6 +20,7 @@ from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.services.audit import log_operation
 from app.services.common import to_plain, utcnow
 from app.services.customer_policies import resolve_customer_policy
+from app.services.sn_master_resolution import RESOLVED, resolved_asset_from_snapshot
 from app.services.workflow import OPEN_TASK_STATUSES, create_manual_task_if_missing
 
 
@@ -61,18 +62,12 @@ async def resolve_and_snapshot_ticket_policy(
             )
         ).scalars()
     )
-    assets: list[SnAsset] = []
+    assets: list[Any] = []
     errors: list[str] = []
     for item in items:
-        asset = (
-            await session.get(SnAsset, item.sn_asset_id)
-            if item.sn_asset_id is not None
-            else None
-        )
-        if asset is None and item.sn:
-            asset = await session.scalar(
-                select(SnAsset).where(SnAsset.sn == item.sn.strip().upper())
-            )
+        asset = resolved_asset_from_snapshot(item.sn_master_resolution_snapshot)
+        if item.sn_master_resolution_status != RESOLVED:
+            asset = None
         if asset is None:
             errors.append(f"SN_ASSET_MISSING:{item.line_no}")
         else:

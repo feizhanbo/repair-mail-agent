@@ -170,3 +170,28 @@ def test_board_policy_and_ticket_route_columns_exist() -> None:
         "return_route_status",
         "return_route_snapshot",
     } <= set(item_columns.keys())
+
+
+def test_sn_asset_business_sn_is_indexed_but_not_unique() -> None:
+    table = Base.metadata.tables["sn_assets"]
+    unique_sets = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("sn",) not in unique_sets
+    assert ("source_system", "ins_id") in unique_sets
+    assert ("source_system", "external_id") in unique_sets
+    assert any(index.name == "idx_sn_assets_sn" and not index.unique for index in table.indexes)
+
+
+def test_sap_sn_staging_identity_is_batch_and_ins_id() -> None:
+    table = Base.metadata.tables["sap_sn_staging"]
+    unique_sets = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("sync_batch_id", "ins_id") in unique_sets
+    assert ("sync_batch_id", "sn") not in unique_sets
+    assert table.columns["ins_id"].nullable is False

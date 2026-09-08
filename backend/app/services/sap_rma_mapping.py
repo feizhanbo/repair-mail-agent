@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from app.models import RepairTicket, RepairTicketItem, SnAsset
+from app.services.sn_master_resolution import ResolvedAssetSnapshot
 
 
 RMA1_REQUIRED_FIELDS = (
@@ -75,7 +76,7 @@ def build_rma_submission(
     request_id: str,
     ticket: RepairTicket,
     item: RepairTicketItem,
-    asset: SnAsset,
+    asset: SnAsset | ResolvedAssetSnapshot,
     policy: dict[str, Any],
 ) -> RmaSubmissionDTO:
     try:

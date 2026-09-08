@@ -458,7 +458,30 @@ async def apply_temporary_master_data(
     async with AsyncSessionLocal() as session:
         for row_no, row in enumerate(sn_rows, 1):
             sn = str(row["sn"]).strip().upper()
-            existing = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
+            existing_rows = list(
+                (
+                    await session.execute(select(SnAsset).where(SnAsset.sn == sn))
+                ).scalars().all()
+            )
+            same_batch = next(
+                (
+                    candidate
+                    for candidate in existing_rows
+                    if candidate.source_file_name == batch_id
+                    and candidate.id in created["sn_asset_ids"]
+                ),
+                None,
+            )
+            eligible_gold = [
+                candidate
+                for candidate in existing_rows
+                if candidate.source_system == "e2e_test"
+                and isinstance(candidate.raw_data, dict)
+                and candidate.raw_data.get("gold_confirmed") is True
+            ]
+            existing = same_batch or (eligible_gold[0] if len(eligible_gold) == 1 else None)
+            if existing_rows and existing is None:
+                raise BatchError(f"TEMPORARY_SN_ALREADY_EXISTS:{sn}")
             if existing is not None:
                 if existing.source_file_name == batch_id and existing.id in created["sn_asset_ids"]:
                     existing.ins_id = int(row["ins_id"])
@@ -542,7 +565,6 @@ async def apply_temporary_master_data(
                 existing.source_file_hash = source_hash
                 existing.source_row_no = row_no
                 existing.source_system = "e2e_test"
-                existing.external_id = None
                 existing.source_updated_at = None
                 existing.raw_data = {
                     "batch_id": batch_id,
@@ -568,6 +590,7 @@ async def apply_temporary_master_data(
                 source_file_hash=source_hash,
                 source_row_no=row_no,
                 source_system="e2e_test",
+                external_id=f"gold:{batch_id}:{sn}",
                 raw_data={"batch_id": batch_id, "gold_confirmed": True},
             )
             session.add(asset)

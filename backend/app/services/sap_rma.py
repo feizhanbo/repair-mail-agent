@@ -20,7 +20,6 @@ from app.models import (
     ManualReviewTask,
     RepairTicket,
     RepairTicketItem,
-    SnAsset,
     TicketRelayExport,
     TicketRma,
     TicketRmaItem,
@@ -41,6 +40,7 @@ from app.integrations.sap_middleware import (
 from app.services.jobs import enqueue_job
 from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
 from app.services.sap_rma_mapping import build_rma_submission
+from app.services.sn_master_resolution import RESOLVED, resolved_asset_from_snapshot
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 
@@ -193,15 +193,16 @@ async def ensure_export_lines(
         raise ValueError("SAP_EXPORT_ITEMS_REQUIRED")
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     requested_on = ticket.request_date or utcnow().date()
-    prepared: list[tuple[RepairTicketItem, SnAsset, dict[str, Any], str]] = []
+    prepared: list[tuple[RepairTicketItem, Any, dict[str, Any], str]] = []
 
     for item in items:
         sn = (item.sn or "").strip().upper()
-        asset = await session.get(SnAsset, item.sn_asset_id) if item.sn_asset_id else None
+        asset = resolved_asset_from_snapshot(item.sn_master_resolution_snapshot)
         if (
             not sn
             or asset is None
-            or asset.asset_status != "valid"
+            or item.sn_master_resolution_status != RESOLVED
+            or item.sn_asset_id != asset.id
             or asset.ins_id is None
             or not asset.customer_code
             or not asset.material_code
@@ -229,6 +230,8 @@ async def ensure_export_lines(
         policy["sn_asset_id"] = asset.id
         policy["sn_source_row_hash"] = asset.source_row_hash
         policy["ins_id"] = asset.ins_id
+        policy["sn_master_resolution_method"] = item.sn_master_resolution_method
+        policy["sn_master_resolution_snapshot"] = item.sn_master_resolution_snapshot
         prepared.append((item, asset, policy, sn))
 
     rows: list[ExportSap] = []
@@ -309,7 +312,9 @@ async def _submission_items(
     prepared: list[ExternalRmaSubmissionItem] = []
     for line in lines:
         item = await session.get(RepairTicketItem, line.ticket_item_id)
-        asset = await session.get(SnAsset, item.sn_asset_id) if item and item.sn_asset_id else None
+        asset = resolved_asset_from_snapshot(
+            dict(line.policy_snapshot or {}).get("sn_master_resolution_snapshot")
+        )
         if item is None or asset is None:
             raise ValueError("SAP_EXPORT_SN_MASTER_REQUIRED")
         dto = build_rma_submission(

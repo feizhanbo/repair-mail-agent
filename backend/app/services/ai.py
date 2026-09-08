@@ -25,11 +25,12 @@ from app.core.repair_items import (
 from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse
 from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
-from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem, SnAsset
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
 from app.services.parser import clean_email_body
+from app.services.sn_master_resolution import sn_exists
 
 logger = logging.getLogger(__name__)
 _ai_log_file_lock = asyncio.Lock()
@@ -238,12 +239,11 @@ async def _replace_ai_sns_with_known_body_assets(
             + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
         )
     )
-    assets: list[SnAsset] = []
+    known_sns: list[str] = []
     for token in tokens:
-        asset = await session.scalar(select(SnAsset).where(SnAsset.sn == token))
-        if asset is not None and asset.asset_status == "valid":
-            assets.append(asset)
-    known_sns = list(dict.fromkeys(str(asset.sn).strip().upper() for asset in assets))
+        if await sn_exists(session, token):
+            known_sns.append(token)
+    known_sns = list(dict.fromkeys(known_sns))
     actual_sns = [canonical_sn(item) for item in items if canonical_sn(item)]
     if not known_sns or known_sns == actual_sns:
         return items
@@ -1232,55 +1232,6 @@ async def _enrich_ai_quality(
         item_sns = [str(item.get("sn") or "").strip().upper() for item in items if isinstance(item, dict) and item.get("sn")]
         if not item_sns:
             missing.setdefault("sn", "缺少设备 SN，无法校验资产。")
-        else:
-            invalid_sns: list[str] = []
-            resolved_assets: list[SnAsset] = []
-            for sn in item_sns:
-                asset = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
-                if asset is None:
-                    invalid_sns.append(f"{sn}: 资产库不存在")
-                elif asset.asset_status != "valid":
-                    invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
-                else:
-                    resolved_assets.append(asset)
-            if invalid_sns:
-                conflicts.setdefault("sn", "；".join(invalid_sns))
-            elif len(resolved_assets) == len(item_sns):
-                assets_by_sn = {
-                    sn: asset for sn, asset in zip(item_sns, resolved_assets, strict=True)
-                }
-                for item in normalized_items:
-                    asset = assets_by_sn.get(canonical_sn(item))
-                    if asset is None:
-                        continue
-                    if not item.get("material_code"):
-                        item["material_code"] = getattr(asset, "material_code", None)
-                    if not item.get("material_name"):
-                        item["material_name"] = getattr(asset, "material_name", None)
-                customer_names = {
-                    str(getattr(asset, "customer_name", "") or "").strip()
-                    for asset in resolved_assets
-                    if str(getattr(asset, "customer_name", "") or "").strip()
-                }
-                customer_codes = {
-                    str(getattr(asset, "customer_code", "") or "").strip()
-                    for asset in resolved_assets
-                    if str(getattr(asset, "customer_code", "") or "").strip()
-                }
-                if len(customer_names) == 1 and not fields.get("customer_name"):
-                    fields["customer_name"] = next(iter(customer_names))
-                    field_confidences["customer_name"] = 1.0
-                    evidence.setdefault("derived_fields", {})["customer_name"] = {
-                        "source": "sn_asset_consensus",
-                        "sn_count": len(resolved_assets),
-                    }
-                if len(customer_codes) == 1 and not fields.get("customer_code"):
-                    fields["customer_code"] = next(iter(customer_codes))
-                    field_confidences["customer_code"] = 1.0
-                    evidence.setdefault("derived_fields", {})["customer_code"] = {
-                        "source": "sn_asset_consensus",
-                        "sn_count": len(resolved_assets),
-                    }
 
     if parsed.intent_type in {"new_repair", "customer_supplement"}:
         source_email, existing_ticket = await _request_date_source(

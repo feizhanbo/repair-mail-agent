@@ -24,6 +24,7 @@ from app.services.common import model_to_dict, paginate_scalars, utcnow
 
 SN_ASSET_FIELDS = (
     "id",
+    "ins_id",
     "customer_code",
     "customer_name",
     "material_code",
@@ -41,6 +42,10 @@ SN_ASSET_FIELDS = (
     "source_file_hash",
     "source_row_no",
     "raw_data",
+    "source_system",
+    "external_id",
+    "source_updated_at",
+    "source_row_hash",
     "imported_by_user_id",
     "imported_at",
     "created_at",
@@ -99,9 +104,6 @@ async def update_sn_asset(session: AsyncSession, *, asset_id: int, values: dict[
             validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
             if item_refs or validation_refs:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "SN_IDENTITY_IN_USE", "references": item_refs + validation_refs})
-            duplicate = await session.scalar(select(SnAsset.id).where(SnAsset.sn == next_sn, SnAsset.id != asset.id))
-            if duplicate:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SN_ALREADY_EXISTS")
         payload["sn"] = next_sn
     for key in ("parent_sn", "top_sn"):
         if key in payload and payload[key]:
@@ -258,12 +260,25 @@ async def import_sn_assets(
         for hierarchy_sn_field in ("parent_sn", "top_sn"):
             if data.get(hierarchy_sn_field):
                 data[hierarchy_sn_field] = data[hierarchy_sn_field].strip().upper()
-        row = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
+        if source_file_hash and data.get("source_row_no") is not None:
+            external_id = f"file:{source_file_hash}:{data['source_row_no']}"
+        else:
+            external_id = "row:" + hashlib.sha256(
+                item.model_dump_json(exclude_none=False).encode("utf-8")
+            ).hexdigest()
+        row = await session.scalar(
+            select(SnAsset).where(
+                SnAsset.source_system == "manual_import",
+                SnAsset.external_id == external_id,
+            )
+        )
         payload = {
             **data,
             "sn": sn,
             "source_file_name": source_file_name,
             "source_file_hash": source_file_hash,
+            "source_system": "manual_import",
+            "external_id": external_id,
             "imported_by_user_id": user_id,
             "imported_at": utcnow(),
         }
@@ -799,6 +814,7 @@ def parse_sn_assets_xlsx(content: bytes) -> tuple[list[SnAssetImportItem], str]:
         try:
             items.append(
                 SnAssetImportItem(
+                    ins_id=int(row["ins_id"]) if _string_value(row.get("ins_id")).strip() else None,
                     customer_code=_string_value(row.get("customer_code")).strip(),
                     customer_name=_string_value(row.get("customer_name")).strip(),
                     material_code=_string_value(row.get("material_code")).strip(),
@@ -974,6 +990,7 @@ def parse_sn_assets_csv(content: bytes) -> tuple[list[SnAssetImportItem], str]:
         try:
             items.append(
                 SnAssetImportItem(
+                    ins_id=int(row["ins_id"]) if (row.get("ins_id") or "").strip() else None,
                     customer_code=(row.get("customer_code") or "").strip(),
                     customer_name=(row.get("customer_name") or "").strip(),
                     material_code=(row.get("material_code") or "").strip(),
@@ -1047,6 +1064,7 @@ def sn_assets_template_csv() -> bytes:
     return csv_bytes(
         [
             {
+                "ins_id": 100001,
                 "sn": "SN202607070001",
                 "customer_code": "CUST001",
                 "customer_name": "示例客户",
@@ -1063,7 +1081,7 @@ def sn_assets_template_csv() -> bytes:
             }
         ],
         [
-            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "ins_id", "sn", "customer_code", "customer_name", "material_code", "material_name",
             "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
             "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
         ],
@@ -1098,6 +1116,7 @@ def sn_assets_template_xlsx() -> bytes:
     return xlsx_bytes(
         [
             {
+                "ins_id": 100001,
                 "sn": "SN202607070001",
                 "customer_code": "CUST001",
                 "customer_name": "示例客户",
@@ -1114,7 +1133,7 @@ def sn_assets_template_xlsx() -> bytes:
             }
         ],
         [
-            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "ins_id", "sn", "customer_code", "customer_name", "material_code", "material_name",
             "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
             "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
         ],

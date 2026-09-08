@@ -64,8 +64,9 @@ class SapSnSyncBatch(TimestampMixin, Base):
 class SapSnStaging(TimestampMixin, Base):
     __tablename__ = "sap_sn_staging"
     __table_args__ = (
-        UniqueConstraint("sync_batch_id", "sn", name="uk_sap_sn_staging_batch_sn"),
+        UniqueConstraint("sync_batch_id", "ins_id", name="uk_sap_sn_staging_batch_ins_id"),
         Index("idx_sap_sn_staging_batch", "sync_batch_id", "id"),
+        Index("idx_sap_sn_staging_batch_sn", "sync_batch_id", "sn"),
     )
 
     id: Mapped[int] = pk_column()
@@ -74,6 +75,7 @@ class SapSnStaging(TimestampMixin, Base):
         ForeignKey("sap_sn_sync_batches.id", name="fk_sap_sn_staging_batch", ondelete="CASCADE"),
         nullable=False,
     )
+    ins_id: Mapped[int] = mapped_column(nullable=False)
     sn: Mapped[str] = mapped_column(String(100), nullable=False)
     customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
     customer_name: Mapped[str | None] = mapped_column(String(255))

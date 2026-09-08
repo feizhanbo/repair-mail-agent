@@ -173,6 +173,7 @@ export default function MasterDataPage() {
 
   const snColumns: ColumnsType<SnAsset> = useMemo(
     () => [
+      { title: 'insID', dataIndex: 'ins_id', width: 100, render: (value?: number) => value ?? '-' },
       { title: 'SN', dataIndex: 'sn', width: 180 },
       { title: '客户代码', dataIndex: 'customer_code', width: 120 },
       { title: '客户名称', dataIndex: 'customer_name', ellipsis: true },
@@ -184,6 +185,8 @@ export default function MasterDataPage() {
       { title: '上级物料代码', dataIndex: 'parent_material_code', width: 150, render: (value?: string) => value || '-' },
       { title: 'Top 物料代码', dataIndex: 'top_material_code', width: 150, render: (value?: string) => value || '-' },
       { title: '状态', dataIndex: 'asset_status', width: 100, render: (value: string) => <StatusTag value={value === 'valid' ? 'pass' : 'warning'} /> },
+      { title: 'ExpDate', dataIndex: 'warranty_end_date', width: 120, render: (value?: string) => value || '-' },
+      { title: '来源', dataIndex: 'source_system', width: 110, render: (value?: string) => value || '-' },
       { title: '操作', width: 130, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openSnEditor(row)}>编辑</Button><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDelete('确认删除该 SN 资料？', () => api.snAssetDeletePreview(row.id), async () => { await api.deleteSnAsset(row.id); await queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); })}>删除</Button></Space> : null },
     ],
     [canManage, queryClient],

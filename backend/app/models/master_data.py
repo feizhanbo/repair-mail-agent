@@ -13,7 +13,9 @@ from app.models.base import Base, TimestampMixin, bool_column, datetime_column, 
 class SnAsset(TimestampMixin, Base):
     __tablename__ = "sn_assets"
     __table_args__ = (
-        UniqueConstraint("sn", name="uk_sn_assets_sn"),
+        UniqueConstraint("source_system", "ins_id", name="uk_sn_assets_source_ins_id"),
+        UniqueConstraint("source_system", "external_id", name="uk_sn_assets_external"),
+        Index("idx_sn_assets_sn", "sn"),
         Index("idx_sn_assets_customer_code", "customer_code"),
         Index("idx_sn_assets_customer_name", "customer_name"),
         Index("idx_sn_assets_material_code", "material_code"),
@@ -23,7 +25,6 @@ class SnAsset(TimestampMixin, Base):
         Index("idx_sn_assets_top_sn", "top_sn"),
         Index("idx_sn_assets_status", "asset_status"),
         Index("idx_sn_assets_source", "source_file_hash", "source_row_no"),
-        Index("idx_sn_assets_external", "source_system", "external_id"),
         Index("idx_sn_assets_source_updated", "source_system", "source_updated_at"),
     )
 
