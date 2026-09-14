@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+.relay-deps/
 dist/
 build/
 node_modules/
@@ -30,4 +31,11 @@ tunnel.py
 tmp/
 output/pdf/
 test-results/
+
+# 内部工作目录（计划/规范文档、测试脚本及产物）
+.trae/
+test/
+
+# 本地未入库 CJK 字体资源（15.7MiB，需分发时评估 Git LFS）
+backend/app/resources/fonts/
 

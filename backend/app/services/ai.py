@@ -1409,6 +1409,32 @@ async def parse_attachment_multimodal(
     return await parse_attachment(session, attachment)
 
 
+async def _resolve_email_sn_assets(
+    session: AsyncSession,
+    email: Email,
+) -> list[SnAsset]:
+    """Resolve valid SN master-data assets found in the email body.
+
+    The field-extraction prompt requires material_code/material_name to come
+    from SN master data instead of AI guessing.  Without an explicit master
+    snapshot in the prompt the model reports conservative low confidence, so
+    gold regression (and normal parsing) must pass the resolved assets along.
+    """
+    body = clean_email_body(email)
+    tokens = list(
+        dict.fromkeys(
+            [match.group(0).upper() for match in _BODY_TOKEN_PATTERN.finditer(body)]
+            + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
+        )
+    )
+    assets: list[SnAsset] = []
+    for token in tokens:
+        asset = await session.scalar(select(SnAsset).where(SnAsset.sn == token))
+        if asset is not None and asset.asset_status == "valid":
+            assets.append(asset)
+    return assets
+
+
 async def create_ai_parse_candidate(
     session: AsyncSession,
     *,
@@ -1424,6 +1450,19 @@ async def create_ai_parse_candidate(
         input_payload["rule_context"] = rule_context
     if multimodal_results:
         input_payload["multimodal_results"] = multimodal_results
+    if mode == "field_extract":
+        sn_assets = await _resolve_email_sn_assets(session, email)
+        if sn_assets:
+            input_payload["sn_master_data"] = [
+                {
+                    "sn": str(asset.sn),
+                    "material_code": str(asset.material_code or ""),
+                    "material_name": str(asset.material_name or ""),
+                    "customer_code": str(asset.customer_code or ""),
+                    "customer_name": str(asset.customer_name or ""),
+                }
+                for asset in sn_assets
+            ]
     messages = [
         {"role": "system", "content": REPAIR_FIELD_EXTRACT.system},
         {
