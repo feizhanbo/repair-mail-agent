@@ -45,6 +45,7 @@ def relay_configuration_status() -> dict[str, Any]:
             "RELAY_SQLSERVER_REQUEST_TABLE": settings.RELAY_SQLSERVER_REQUEST_TABLE,
             "RELAY_SQLSERVER_RESULT_TABLE": settings.RELAY_SQLSERVER_RESULT_TABLE,
             "RELAY_SQLSERVER_REQUEST_ID_COLUMN": settings.RELAY_SQLSERVER_REQUEST_ID_COLUMN,
+            "RELAY_SQLSERVER_CALL_ID_COLUMN": settings.RELAY_SQLSERVER_CALL_ID_COLUMN,
             "RELAY_SQLSERVER_RMA_COLUMN": settings.RELAY_SQLSERVER_RMA_COLUMN,
         }
         missing = [name for name, value in required.items() if not value]

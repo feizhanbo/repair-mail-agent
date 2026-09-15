@@ -135,9 +135,24 @@ def test_manifest_rejects_board_fixture_from_another_case(tmp_path: Path) -> Non
         tool.validate_manifest(manifest)
 
     assert any(
-        value.endswith("material_code_NOT_IN_EXPECTED_ITEMS")
+        value.endswith("material_fields_FORBIDDEN")
         for value in exc.value.details["errors"]
     )
+
+
+def test_manifest_rejects_non_list_board_expectations(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["messages"][0]["gold"]["expected_board_items"] = {
+        "sn": "SN-GOLD-001",
+        "board_name": "FOVI",
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool.validate_manifest(manifest)
+
+    assert "messages[0].expected_board_items_INVALID" in exc.value.details["errors"]
 
 
 def test_doctor_returns_stable_blocked_result_without_database_traceback(monkeypatch) -> None:
@@ -1499,3 +1514,49 @@ def test_assert_case_reads_contact_values_from_versioned_pdf_snapshot() -> None:
     }
 
     assert tool._assert_case(item, value, []) == []
+
+
+def test_assert_case_checks_board_and_material_as_distinct_expectations() -> None:
+    item = {
+        "message_id": "<original@accotest.com>",
+        "gold": {
+            "expected_intent": "new_repair",
+            "create_ticket": True,
+            "expected_final_status": "ready_for_export",
+            "expected_final_fields": {},
+            "missing_fields": [],
+            "expected_items": [
+                {"sn": "SN-1", "material_code": "MAT-1", "material_name": "Material 1"}
+            ],
+            "expected_board_items": [
+                {"sn": "SN-1", "board_name": "FOVI"}
+            ],
+            "expected_outbound_count": 0,
+            "send_mode": "none",
+        },
+    }
+    value = {
+        "email_detail": {
+            "email": {
+                "intent_type": "new_repair",
+                "handling_level": "auto_repair",
+                "persistence_tier": "business",
+            }
+        },
+        "ticket_detail": {
+            "ticket": {"current_status_code": "ready_for_export", "missing_fields": {}},
+            "items": [
+                {
+                    "sn": "SN-1",
+                    "board_name": "FOVI",
+                    "material_code": "MAT-1",
+                    "material_name": "Material 1",
+                }
+            ],
+            "reply_records": [],
+        },
+    }
+
+    assert tool._assert_case(item, value, []) == []
+    value["ticket_detail"]["items"][0]["board_name"] = "Material 1"
+    assert "TICKET_BOARD_ITEM_MISMATCH" in tool._assert_case(item, value, [])

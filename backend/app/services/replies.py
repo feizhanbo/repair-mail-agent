@@ -308,6 +308,18 @@ def _parse_template_date(value: Any) -> date | None:
     return None
 
 
+def _warranty_date_from_validation_check(check: dict[str, Any], field: str) -> date | None:
+    """Read both the legacy flat check and the resolved SN-master snapshot."""
+    direct = _parse_template_date(check.get(field))
+    if direct is not None:
+        return direct
+    resolution = check.get("master_resolution")
+    resolved_asset = resolution.get("resolved_asset") if isinstance(resolution, dict) else None
+    if not isinstance(resolved_asset, dict):
+        return None
+    return _parse_template_date(resolved_asset.get(field))
+
+
 def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
     email = (ticket.contact_email or "").strip().lower()
     customer = " ".join((ticket.customer_name or "").lower().split())
@@ -325,8 +337,8 @@ def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
     request_date = ticket.request_date
     warranty_flags: set[bool] = set()
     for check in checks:
-        warranty_start = _parse_template_date(check.get("warranty_start_date"))
-        warranty_end = _parse_template_date(check.get("warranty_end_date"))
+        warranty_start = _warranty_date_from_validation_check(check, "warranty_start_date")
+        warranty_end = _warranty_date_from_validation_check(check, "warranty_end_date")
         if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
             raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
         warranty_flags.add(request_date <= warranty_end)
@@ -2165,7 +2177,7 @@ async def execute_approved_reply_send(
     session: AsyncSession,
     *,
     reply_id: int,
-    user_id: int,
+    user_id: int | None,
 ) -> dict[str, Any]:
     reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
     if reply is None:

@@ -12,6 +12,7 @@ import pytest
 from app.models import ExportSap, JobRunLog, RepairTicket, RepairTicketItem, SnAsset
 from app.services import sap_rma
 from app.services import jobs
+from app.services import replies
 from app.config import settings
 from app.integrations.sap_middleware import ExternalRmaResult
 from app.integrations.sap_middleware.sqlserver import SqlServerSapMiddlewareAdapter
@@ -30,10 +31,35 @@ from app.services.sap_rma_mapping import (
 REQUEST_ID = "12345678-1234-4234-8234-1234567890ab"
 
 
+@pytest.mark.anyio
+async def test_automatic_smtp_job_allows_system_actor(monkeypatch) -> None:
+    job = JobRunLog(
+        job_name="smtp_send",
+        job_type="smtp_send",
+        status="running",
+        resource_type="email_outbox",
+        resource_id=106,
+        idempotency_key="smtp-outbox-106",
+        metadata_json={"user_id": None, "outbox_id": 106},
+    )
+    execute_send = AsyncMock(return_value={"status": "sent"})
+    monkeypatch.setattr(replies, "execute_approved_reply_send", execute_send)
+
+    result = await jobs._execute_job_command(SimpleNamespace(), job)
+
+    assert result == {"status": "sent"}
+    execute_send.assert_awaited_once()
+    assert execute_send.await_args.kwargs == {
+        "reply_id": 106,
+        "user_id": None,
+    }
+
+
 def _inputs():
     ticket = RepairTicket(
         id=1,
         ticket_no="T-1",
+        customer_scope="domestic",
         mailing_address="Shanghai",
         contact_phone="13800000000",
         contact_person="Alice",
@@ -75,7 +101,7 @@ def test_mapping_matrix_covers_all_63_real_rma1_fields() -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["RequestID", "internalSN", "itemCode", "customer", "BPBillAddr", "BPCellular", "insID"],
+    ["RequestID", "internalSN", "itemCode", "customer", "BPShipAddr", "BPBillAddr", "BPCellular", "insID"],
 )
 def test_every_required_rma1_field_blocks_submission_when_missing(field: str) -> None:
     ticket, item, asset = _inputs()
@@ -91,7 +117,10 @@ def test_every_required_rma1_field_blocks_submission_when_missing(field: str) ->
         asset.customer_code = ""
     elif field == "BPBillAddr":
         ticket.mailing_address = ""
+    elif field == "BPShipAddr":
+        ticket.customer_scope = None
     elif field == "BPCellular":
+        ticket.contact_person = ""
         ticket.contact_phone = ""
     elif field == "insID":
         asset.ins_id = None
@@ -125,7 +154,33 @@ def test_optional_fields_use_real_values_or_explicit_none() -> None:
     assert dto.sql_parameters["U_FailurePhenomena"] is None
     assert dto.sql_parameters["BPE_Mail"] is None
     assert dto.sql_parameters["insID"] == 9001
+    assert dto.sql_parameters["BPShipAddr"] == "国内"
+    assert dto.sql_parameters["BPCellular"] == "Alice13800000000"
+    assert dto.sql_parameters["NAME1"] is None
     assert set(dto.sql_parameters) == set(RMA1_REQUIRED_FIELDS) | set(RMA1_OPTIONAL_MAPPED_FIELDS)
+
+
+def test_new_business_mappings_are_exact_and_do_not_truncate_owner_name() -> None:
+    ticket, item, asset = _inputs()
+    dto = build_rma_submission(
+        request_id=REQUEST_ID,
+        ticket=ticket,
+        item=item,
+        asset=asset,
+        policy={"sap_owner_name": "Owner Zhang"},
+    )
+    assert dto.sql_parameters["BPShipAddr"] == "国内"
+    assert dto.sql_parameters["BPCellular"] == "Alice13800000000"
+    assert dto.sql_parameters["NAME1"] == "Owner Zhang"
+
+    with pytest.raises(RmaSubmissionValidationError, match="NAME1:max_length=16"):
+        build_rma_submission(
+            request_id=REQUEST_ID,
+            ticket=ticket,
+            item=item,
+            asset=asset,
+            policy={"sap_owner_name": "X" * 17},
+        )
 
 
 def test_request_id_must_be_canonical_uuid_v4_char36() -> None:
@@ -289,7 +344,7 @@ def test_rma2_query_uses_request_id_and_rma_number_not_u_status(monkeypatch) -> 
             return self
 
         def fetchall(self):
-            return [(str(request_id), "SN-1", "RMA-001", datetime(2026, 8, 28))]
+            return [(str(request_id), "SN-1", "RMA-001", datetime(2026, 8, 28), 321)]
 
     cursor = Cursor()
 
@@ -307,6 +362,8 @@ def test_rma2_query_uses_request_id_and_rma_number_not_u_status(monkeypatch) -> 
 
     assert "[RequestID]" in cursor.sql
     assert "[U_CustomerNum]" in cursor.sql
+    assert "[CallID]" in cursor.sql
     assert "U_Status" not in cursor.sql
     assert results[0].request_id == request_id
     assert results[0].rma_no == "RMA-001"
+    assert results[0].remote_call_id == "321"

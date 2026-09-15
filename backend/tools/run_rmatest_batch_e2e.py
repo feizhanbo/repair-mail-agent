@@ -403,13 +403,14 @@ def _temporary_master_rows(
                 raise BatchError(f"TEMPORARY_SN_CONFLICT:{sn}")
             sn_rows[sn] = normalized_row
         for row in gold.get("temporary_board_cards") or []:
-            material = str(row.get("material_code") or "").strip()
+            if "material_code" in row or "material_name" in row:
+                raise BatchError("TEMPORARY_BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN")
             board_code = str(row.get("board_code") or "").strip()
-            if not material:
-                raise BatchError("TEMPORARY_BOARD_CARD_REQUIRES_MATERIAL_CODE")
-            key = (material, board_code)
+            if not board_code:
+                raise BatchError("TEMPORARY_BOARD_CARD_REQUIRES_BOARD_CODE")
+            key = (board_code, str(row.get("board_name") or "").strip())
             if key in board_rows and board_rows[key] != row:
-                raise BatchError(f"TEMPORARY_BOARD_CARD_CONFLICT:{material}:{board_code}")
+                raise BatchError(f"TEMPORARY_BOARD_CARD_CONFLICT:{board_code}")
             board_rows[key] = row
         for row in gold.get("temporary_customer_policies") or []:
             policy_code = str(row.get("policy_code") or "").strip()
@@ -633,12 +634,13 @@ async def apply_temporary_master_data(
                 await session.flush()
                 created["sn_asset_ids"].append(asset.id)
         for row_no, row in enumerate(board_rows, 1):
-            material = str(row["material_code"]).strip()
             board_code = str(row.get("board_code") or "").strip()
             existing = await session.scalar(
                 select(BoardCard).where(
-                    BoardCard.material_code == material,
                     BoardCard.board_code == board_code,
+                    BoardCard.board_name == (str(row.get("board_name") or "").strip() or None),
+                    BoardCard.customer_scope == str(row.get("customer_scope") or "").strip(),
+                    BoardCard.route_type == str(row.get("route_type") or "").strip(),
                 )
             )
             if existing is not None:
@@ -667,7 +669,7 @@ async def apply_temporary_master_data(
                         )
                     )
                 ):
-                    raise BatchError(f"TEMPORARY_BOARD_CARD_ALREADY_EXISTS:{material}")
+                    raise BatchError(f"TEMPORARY_BOARD_CARD_ALREADY_EXISTS:{board_code}")
                 if existing_snapshot is None:
                     overridden_board_cards.append(
                         {
@@ -677,8 +679,6 @@ async def apply_temporary_master_data(
                             "return_location": existing.return_location,
                             "route_type": existing.route_type,
                             "customer_scope": existing.customer_scope,
-                            "material_code": existing.material_code,
-                            "material_name": existing.material_name,
                             "need_ship_to_beijing": existing.need_ship_to_beijing,
                             "shipping_address": existing.shipping_address,
                             "shipping_contact": existing.shipping_contact,
@@ -706,7 +706,7 @@ async def apply_temporary_master_data(
                 if missing:
                     raise BatchError(
                         "TEMPORARY_BOARD_CARD_FIELDS_REQUIRED:"
-                        + material
+                        + board_code
                         + ":"
                         + ",".join(missing)
                     )
@@ -715,7 +715,6 @@ async def apply_temporary_master_data(
                 existing.return_location = str(row["return_location"]).strip()
                 existing.route_type = str(row["route_type"]).strip()
                 existing.customer_scope = str(row["customer_scope"]).strip()
-                existing.material_name = str(row.get("material_name") or "").strip() or None
                 existing.need_ship_to_beijing = bool(row.get("need_ship_to_beijing", True))
                 existing.shipping_address = str(row["shipping_address"]).strip()
                 existing.shipping_contact = str(row["shipping_contact"]).strip()
@@ -744,7 +743,7 @@ async def apply_temporary_master_data(
             if missing:
                 raise BatchError(
                     "TEMPORARY_BOARD_CARD_FIELDS_REQUIRED:"
-                    + material
+                    + board_code
                     + ":"
                     + ",".join(missing)
                 )
@@ -754,8 +753,6 @@ async def apply_temporary_master_data(
                 return_location=str(row["return_location"]).strip(),
                 route_type=str(row["route_type"]).strip(),
                 customer_scope=str(row["customer_scope"]).strip(),
-                material_code=material,
-                material_name=str(row.get("material_name") or "").strip() or None,
                 need_ship_to_beijing=bool(row.get("need_ship_to_beijing", True)),
                 shipping_address=str(row.get("shipping_address") or "").strip() or None,
                 shipping_contact=str(row.get("shipping_contact") or "").strip() or None,
@@ -1026,7 +1023,7 @@ async def cleanup_temporary_master_data(
             )
         for snapshot in overridden_board_cards:
             card = await session.get(BoardCard, int(snapshot["id"]))
-            if card is None or card.material_code != snapshot.get("material_code"):
+            if card is None or card.board_code != snapshot.get("board_code"):
                 raise BatchError("TEMPORARY_BOARD_RESTORE_SCOPE_MISMATCH")
             if card.source_file_name != batch_id:
                 restored_fields = (
@@ -1035,8 +1032,6 @@ async def cleanup_temporary_master_data(
                     "return_location",
                     "route_type",
                     "customer_scope",
-                    "material_code",
-                    "material_name",
                     "need_ship_to_beijing",
                     "shipping_address",
                     "shipping_contact",
@@ -1061,8 +1056,6 @@ async def cleanup_temporary_master_data(
                 "return_location",
                 "route_type",
                 "customer_scope",
-                "material_code",
-                "material_name",
                 "need_ship_to_beijing",
                 "shipping_address",
                 "shipping_contact",

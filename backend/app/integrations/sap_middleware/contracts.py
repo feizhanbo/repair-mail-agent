@@ -63,6 +63,7 @@ class ExternalRmaResult:
     request_id: UUID
     sn: str | None
     rma_no: str | None
+    remote_call_id: str | None = None
     raw_data: dict[str, Any] = field(default_factory=dict)
 
 

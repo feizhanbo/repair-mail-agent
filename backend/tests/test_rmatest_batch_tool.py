@@ -112,7 +112,7 @@ def test_mail_gate_uses_persisted_runtime_config(monkeypatch) -> None:
         _mail_gate()
 
 
-def test_temporary_board_rows_keep_distinct_board_codes_for_same_material() -> None:
+def test_temporary_board_rows_keep_distinct_board_codes() -> None:
     manifest = {
         "messages": [
             {
@@ -120,8 +120,8 @@ def test_temporary_board_rows_keep_distinct_board_codes_for_same_material() -> N
                     "temporary_sn_assets": [],
                     "temporary_customer_policies": [],
                     "temporary_board_cards": [
-                        {"material_code": "ROUTE-X", "board_code": "FOVI"},
-                        {"material_code": "ROUTE-X", "board_code": "DIO"},
+                        {"board_code": "FOVI"},
+                        {"board_code": "DIO"},
                     ],
                 }
             }
@@ -131,6 +131,15 @@ def test_temporary_board_rows_keep_distinct_board_codes_for_same_material() -> N
     _, rows, _ = _temporary_master_rows(manifest)
 
     assert {row["board_code"] for row in rows} == {"FOVI", "DIO"}
+
+
+def test_temporary_board_rows_reject_material_aliases() -> None:
+    manifest = {
+        "messages": [{"gold": {"temporary_board_cards": [{"board_code": "FOVI", "material_code": "MAT"}]}}]
+    }
+
+    with pytest.raises(BatchError, match="TEMPORARY_BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN"):
+        _temporary_master_rows(manifest)
 
 
 def test_legacy_temporary_sn_row_gets_stable_test_ins_id() -> None:

@@ -154,6 +154,9 @@ class SqlServerSapMiddlewareAdapter:
                         raise SapSchemaMismatchError(f"RMA1_DATABASE_OWNED_FIELD_NOT_NULLABLE:{column}")
                 if settings.RELAY_SQLSERVER_RMA_COLUMN.casefold() not in result:
                     raise SapSchemaMismatchError("RMA2_RMA_COLUMN_MISSING")
+                call_id = settings.RELAY_SQLSERVER_CALL_ID_COLUMN.casefold()
+                if call_id not in result or result[call_id][0] not in {"int", "bigint"}:
+                    raise SapSchemaMismatchError("RMA2_CALL_ID_CONTRACT_MISMATCH")
                 definitions = [str(r[0] or "") for r in cursor.execute(
                     "SELECT OBJECT_DEFINITION(tr.object_id) FROM sys.triggers tr JOIN sys.tables t ON t.object_id=tr.parent_id "
                     "JOIN sys.schemas s ON s.schema_id=t.schema_id WHERE s.name=? AND t.name=? AND tr.is_disabled=0",
@@ -250,15 +253,17 @@ class SqlServerSapMiddlewareAdapter:
                     rows = cursor.execute(f"SELECT {key} FROM {table} WHERE {key} IN ({placeholders})", [str(v) for v in chunk]).fetchall()
                     found.extend(UUID(str(row[0])) for row in rows); continue
                 rma = _identifier(settings.RELAY_SQLSERVER_RMA_COLUMN)
+                call_id = _identifier(settings.RELAY_SQLSERVER_CALL_ID_COLUMN)
                 rows = cursor.execute(
-                    f"SELECT {key},[internalSN],{rma},[CREATEDATE] FROM {table} WHERE {key} IN ({placeholders})",
+                    f"SELECT {key},[internalSN],{rma},[CREATEDATE],{call_id} FROM {table} WHERE {key} IN ({placeholders})",
                     [str(v) for v in chunk],
                 ).fetchall()
                 for row in rows:
                     found.append(ExternalRmaResult(
                         request_id=UUID(str(row[0])), sn=str(row[1]).strip() if row[1] is not None else None,
                         rma_no=str(row[2]).strip() if row[2] is not None else None,
-                        raw_data={"RequestID": str(row[0]), "internalSN": row[1], "U_CustomerNum": row[2], "CREATEDATE": row[3]},
+                        remote_call_id=str(row[4]).strip() if row[4] is not None else None,
+                        raw_data={"RequestID": str(row[0]), "internalSN": row[1], "U_CustomerNum": row[2], "CREATEDATE": row[3], "callID": row[4]},
                     ))
         return found
 

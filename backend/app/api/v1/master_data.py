@@ -364,9 +364,6 @@ async def list_board_cards(
     board_name: str | None = None,
     customer_scope: str | None = None,
     return_location: str | None = None,
-    # Deprecated aliases kept for one compatibility release.
-    material_code: str | None = None,
-    material_name: str | None = None,
     status: str | None = None,
 ) -> dict:
     del current_user
@@ -375,8 +372,8 @@ async def list_board_cards(
         page=page_no,
         page_size=page_size,
         keyword=keyword,
-        board_code=board_code or material_code,
-        board_name=board_name or material_name,
+        board_code=board_code,
+        board_name=board_name,
         customer_scope=customer_scope,
         return_location=return_location,
         status=status,
@@ -434,15 +431,13 @@ async def export_board_cards(
     board_name: str | None = None,
     customer_scope: str | None = None,
     return_location: str | None = None,
-    material_code: str | None = None,
-    material_name: str | None = None,
     status: str | None = None,
 ) -> Response:
     content = await master_data_service.export_board_cards(
         session,
         keyword=keyword,
-        board_code=board_code or material_code,
-        board_name=board_name or material_name,
+        board_code=board_code,
+        board_name=board_name,
         customer_scope=customer_scope,
         return_location=return_location,
         status=status,
@@ -451,8 +446,8 @@ async def export_board_cards(
         session, user_id=current_user.id, operation_type="board_cards_exported",
         target_type="board_card_export", description="用户导出板卡主数据。",
         after_data={"filter_keys": sorted(key for key, value in {
-            "keyword": keyword, "board_code": board_code or material_code,
-            "board_name": board_name or material_name, "customer_scope": customer_scope,
+            "keyword": keyword, "board_code": board_code,
+            "board_name": board_name, "customer_scope": customer_scope,
             "return_location": return_location, "status": status,
         }.items() if value is not None)},
     )

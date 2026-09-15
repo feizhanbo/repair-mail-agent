@@ -123,6 +123,7 @@ class TestHttpSapMiddlewareAdapter:
                 request_id=UUID(str(row["RequestID"])),
                 sn=row.get("sn"),
                 rma_no=str(row["rma_no"]).strip() if row.get("rma_no") else None,
+                remote_call_id=str(row["remote_call_id"]).strip() if row.get("remote_call_id") else None,
                 raw_data=row,
             )
             for row in await self._query(request_ids)

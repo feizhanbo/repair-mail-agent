@@ -257,6 +257,8 @@ async def build_sn_validation_report(
                     resolved_assets.append(resolution.asset)
                 else:
                     item.sn_asset_id = None
+                    item.material_code = None
+                    item.material_name = None
                     resolution_errors[f"{prefix}.master_resolution"] = resolution.status
             else:
                 item.sn_asset_id = None

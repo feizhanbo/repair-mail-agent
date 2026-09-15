@@ -559,7 +559,7 @@ export type SapExportLine = {
   request_id: string;
   status: string;
   attempt_count: number;
-  /** Legacy audit-only CallID; new submissions never populate it. */
+  /** oscl_print CallID; used as the generated RMA PDF Part No. */
   remote_call_id?: string | null;
   rma_no?: string | null;
   last_error_code?: string | null;

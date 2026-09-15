@@ -18,8 +18,9 @@ from app.services.rma_pdf import (
     rma_pdf_snapshot,
     validate_rma_template_integrity,
     _latest_export_rows_by_item,
+    build_rma_pdf_data,
 )
-from app.models import ExportSap
+from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 _CODE39_DECODE = {
@@ -113,6 +114,76 @@ def test_latest_export_row_per_item_prevents_duplicate_cost_after_reexport() -> 
     values["items"][0]["quantity"] = 2
     with pytest.raises(ValueError, match="RMA_ITEM_QUANTITY_SN_CONFLICT"):
         RmaPdfData.model_validate(values)
+
+
+class _ScalarRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _PdfDataSession:
+    def __init__(self, ticket, query_rows):
+        self.ticket = ticket
+        self.query_rows = list(query_rows)
+
+    async def get(self, _model, _identity):
+        return self.ticket
+
+    async def execute(self, _statement):
+        return _ScalarRows(self.query_rows.pop(0))
+
+
+@pytest.mark.anyio
+async def test_pdf_part_no_comes_from_oscl_print_call_id() -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="T1",
+        current_status_code="ready_for_export",
+        customer_code="C1",
+        customer_name="Customer",
+        mailing_address="Address",
+        contact_person="Alice",
+        contact_phone="13800000000",
+        contact_email="a@example.com",
+        request_date=date(2026, 7, 10),
+        missing_fields=[],
+        conflict_fields=[],
+    )
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        sn="SN-001",
+        material_code="SAP-MAT-001",
+        material_name="Material name",
+        quantity=1,
+        validation_status="pass",
+    )
+    rma = TicketRma(ticket_id=1, rma_no="2026071012")
+    export = ExportSap(
+        id=3,
+        ticket_id=1,
+        ticket_item_id=2,
+        rma_no="2026071012",
+        status="rma_received",
+        remote_call_id="987654",
+        currency="CNY",
+        repair_fee=Decimal("0"),
+    )
+
+    data = await build_rma_pdf_data(
+        _PdfDataSession(ticket, [[item], [rma], [export]]),
+        ticket_id=1,
+    )
+
+    assert data.items[0].part_no == "987654"
+    assert data.items[0].part_no != item.material_code
 
 
 def test_three_sn_unit_prices_sum_to_rma_repair_total() -> None:

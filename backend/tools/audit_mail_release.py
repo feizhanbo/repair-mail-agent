@@ -20,7 +20,7 @@ DEPRECATED_RECEIPT_COLUMNS = (
     "device_received_idempotency_key",
     "device_receipt_ack_status",
 )
-REQUIRED_REVISION = "a4v9w0x1y2z3"
+REQUIRED_REVISION = "b5w0x1y2z3a4"
 
 
 def _sha256(path: Path) -> str:
@@ -111,7 +111,6 @@ async def audit(expected_database: str, backup: Path | None) -> dict[str, Any]:
                 "SELECT a.id, a.sn, a.customer_code, a.material_code "
                 "FROM sn_assets a WHERE a.asset_status='valid' AND a.sn IS NOT NULL "
                 "AND a.customer_code IS NOT NULL AND a.material_code IS NOT NULL "
-                "AND EXISTS (SELECT 1 FROM board_cards b WHERE b.material_code=a.material_code AND b.status='active') "
                 "ORDER BY a.id LIMIT 1"
             ),
         )

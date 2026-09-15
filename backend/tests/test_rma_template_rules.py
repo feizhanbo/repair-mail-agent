@@ -56,6 +56,30 @@ def test_domestic_and_overseas_replies_use_separate_body_template_versions() -> 
     )
 
 
+def test_rma_reply_reads_warranty_from_resolved_sn_master_snapshot() -> None:
+    template_type, version = replies._rma_reply_template_type(
+        _ticket(
+            language_code="zh-CN",
+            sn_validation_snapshot={
+                "checks": [
+                    {
+                        "master_resolution": {
+                            "status": "RESOLVED",
+                            "resolved_asset": {
+                                "warranty_start_date": "2026-01-01",
+                                "warranty_end_date": "2026-12-31",
+                            },
+                        }
+                    }
+                ]
+            },
+        )
+    )
+
+    assert template_type == "rma_authorization_domestic_in_warranty"
+    assert version == "domestic_in_warranty_v1"
+
+
 def test_domestic_rma_templates_and_miya_signature_match_approved_copy() -> None:
     rma = next(
         item for item in REPLY_TEMPLATES

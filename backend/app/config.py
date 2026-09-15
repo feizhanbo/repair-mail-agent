@@ -177,7 +177,7 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
     RELAY_SQLSERVER_RESULT_TABLE: str = "oscl_print"
     RELAY_SQLSERVER_REQUEST_ID_COLUMN: str = "RequestID"
-    # Legacy audit-only configuration. New submissions and result queries never use CallID.
+    # oscl_print CallID is persisted locally and printed as the PDF Part No.
     RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
     RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
     RELAY_SQLSERVER_BATCH_SIZE: int = 500

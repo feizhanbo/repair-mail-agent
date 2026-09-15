@@ -23,6 +23,7 @@ from app.models import (
     TicketRelayExport,
     TicketRma,
     TicketRmaItem,
+    User,
 )
 from app.services.common import model_to_dict, utcnow
 from app.services.business_notifications import notify_ticket_once
@@ -192,6 +193,7 @@ async def ensure_export_lines(
     if not items:
         raise ValueError("SAP_EXPORT_ITEMS_REQUIRED")
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
+    owner = await session.get(User, ticket.assigned_user_id) if ticket.assigned_user_id else None
     requested_on = ticket.request_date or utcnow().date()
     prepared: list[tuple[RepairTicketItem, Any, dict[str, Any], str]] = []
 
@@ -217,6 +219,7 @@ async def ensure_export_lines(
         policy = dict(ticket.policy_snapshot or {})
         policy["charge_status"] = ticket.charge_status
         policy["customer_scope"] = ticket.customer_scope
+        policy["sap_owner_name"] = owner.real_name if owner is not None else None
         # RMA rendering consumes these compatibility keys, but SAP payload
         # fields below always come from the customer's mailing information.
         policy["shipping_route"] = item.return_location
@@ -797,6 +800,20 @@ async def poll_export_batch(
                 reason=str(exc),
             )
         line.rma_no = rma_no
+        remote_call_id = str(result.remote_call_id or "").strip()
+        if not remote_call_id.isdecimal():
+            line.status = "manual_review"
+            line.last_error_code = "RMA2_CALL_ID_MISSING_OR_INVALID"
+            export.status = "manual_review"
+            export.error_code = line.last_error_code
+            ticket.relay_export_status = "failed"
+            return await _move_to_manual(
+                session,
+                ticket=ticket,
+                task_type="sap_rma_call_id_invalid",
+                reason=line.last_error_code,
+            )
+        line.remote_call_id = remote_call_id
         line.rma_received_at = now
         line.status = "rma_received"
         line.last_error_code = None
@@ -828,6 +845,20 @@ async def poll_export_batch(
             "next_poll_seconds": settings.RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS,
         }
 
+    call_ids = [line.remote_call_id for line in lines]
+    if len(call_ids) != len(set(call_ids)):
+        export.status = "manual_review"
+        export.error_code = "RMA2_CALL_ID_DUPLICATED"
+        ticket.relay_export_status = "failed"
+        for line in lines:
+            line.status = "manual_review"
+            line.last_error_code = export.error_code
+        return await _move_to_manual(
+            session,
+            ticket=ticket,
+            task_type="sap_rma_call_id_duplicated",
+            reason=export.error_code,
+        )
     distinct_rmas = sorted({line.rma_no for line in lines if line.rma_no})
     existing_rmas: dict[str, TicketRma | None] = {}
     business_date = ticket.request_date or min(

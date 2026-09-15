@@ -412,6 +412,7 @@ def inventory(suite_id: str, message_ids: list[str]) -> dict[str, Any]:
             "expected_fields": {},
             "expected_final_fields": {},
             "expected_items": [],
+            "expected_board_items": [],
             "missing_fields": [],
             "create_ticket": None,
             "expected_final_status": None,
@@ -519,18 +520,20 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
         ):
             if not isinstance(gold.get(key), expected_type):
                 errors.append(f"{prefix}.{key}_INVALID")
-        expected_material_codes = {
-            str(row.get("material_code") or "").strip()
-            for row in gold.get("expected_items") or []
-            if str(row.get("material_code") or "").strip()
-        }
+        if "expected_board_items" in gold and not isinstance(
+            gold.get("expected_board_items"), list
+        ):
+            errors.append(f"{prefix}.expected_board_items_INVALID")
         for board_index, board in enumerate(
             gold.get("temporary_board_cards") or []
         ):
-            material_code = str(board.get("material_code") or "").strip()
-            if material_code not in expected_material_codes:
+            if "material_code" in board or "material_name" in board:
                 errors.append(
-                    f"{prefix}.temporary_board_cards[{board_index}].material_code_NOT_IN_EXPECTED_ITEMS"
+                    f"{prefix}.temporary_board_cards[{board_index}].material_fields_FORBIDDEN"
+                )
+            if not str(board.get("board_code") or "").strip():
+                errors.append(
+                    f"{prefix}.temporary_board_cards[{board_index}].board_code_REQUIRED"
                 )
         if gold.get("create_ticket") and not gold.get("expected_final_status"):
             errors.append(f"{prefix}.expected_final_status_REQUIRED")
@@ -1961,6 +1964,12 @@ def _assert_case(item: dict[str, Any], value: dict[str, Any], outbound: list[dic
         for expected_item in gold.get("expected_items") or []:
             if not any(all(row.get(key) == expected for key, expected in expected_item.items()) for row in actual_items):
                 issues.append("TICKET_ITEM_MISMATCH")
+        for expected_item in gold.get("expected_board_items") or []:
+            if not any(
+                all(row.get(key) == expected for key, expected in expected_item.items())
+                for row in actual_items
+            ):
+                issues.append("TICKET_BOARD_ITEM_MISMATCH")
         fixed_rma = gold.get("fixed_rma_no")
         if fixed_rma and fixed_rma not in {row.get("rma_no") for row in ticket_detail.get("rma_records") or []}:
             issues.append("FIXED_RMA_MISMATCH")
@@ -2153,6 +2162,13 @@ def _classification_issues(
                         for row in actual.get("items") or []
                     ):
                         codes.append("ITEM_FIELD_MISMATCH")
+                        break
+                for expected_item in gold.get("expected_board_items") or []:
+                    if not any(
+                        all(row.get(key) == expected for key, expected in expected_item.items())
+                        for row in actual.get("items") or []
+                    ):
+                        codes.append("BOARD_ITEM_FIELD_MISMATCH")
                         break
         if codes:
             issues.append(

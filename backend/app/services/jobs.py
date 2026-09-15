@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
+import traceback
 from datetime import timedelta
 from typing import Any
 
@@ -245,7 +247,7 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
     if job.job_type == "smtp_send":
         from app.services.replies import execute_approved_reply_send
 
-        if job.resource_id is None or user_id is None:
+        if job.resource_id is None:
             raise ValueError("JOB_RESOURCE_REQUIRED")
         return await execute_approved_reply_send(session, reply_id=job.resource_id, user_id=user_id)
     if job.job_type == "relay_ticket_export":
@@ -465,12 +467,27 @@ async def execute_claimed_job(session: AsyncSession, job: JobRunLog) -> JobRunLo
             exc, exc.__class__.__name__.upper()
         ) or "JOB_FAILED"
         original = getattr(exc, "orig", None)
-        diagnostic = exc.__class__.__name__
+        diagnostic = f"JOBS_EXCEPTION_V3:{exc.__class__.__name__}"
         if original is not None:
             diagnostic = f"{diagnostic}:{original.__class__.__name__}"
             original_args = getattr(original, "args", ())
             if original_args and isinstance(original_args[0], int):
                 diagnostic = f"{diagnostic}:vendor_code={original_args[0]}"
+                if original_args[0] == 1054 and len(original_args) > 1:
+                    unknown_column_detail = str(original_args[1])[:300]
+                    match = re.search(r"Unknown column '([^']+)'", unknown_column_detail)
+                    if match:
+                        diagnostic = f"{diagnostic}:column={match.group(1)}"
+                    else:
+                        diagnostic = f"{diagnostic}:detail={unknown_column_detail}"
+        statement = re.sub(r"\s+", " ", str(getattr(exc, "statement", "") or "")).strip()
+        if statement:
+            diagnostic = f"{diagnostic}:statement={statement[:1000]}"
+        frames = traceback.extract_tb(exc.__traceback__)[-6:]
+        if frames:
+            diagnostic = f"{diagnostic}:frames=" + ">".join(
+                f"{frame.name}@{frame.lineno}" for frame in frames
+            )
         await session.rollback()
         recovered_job = await session.get(JobRunLog, job_id, with_for_update=True)
         if recovered_job is None:

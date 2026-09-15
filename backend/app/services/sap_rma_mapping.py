@@ -11,10 +11,11 @@ from app.services.sn_master_resolution import ResolvedAssetSnapshot
 
 
 RMA1_REQUIRED_FIELDS = (
-    "RequestID", "internalSN", "itemCode", "customer", "BPBillAddr", "BPCellular", "insID"
+    "RequestID", "internalSN", "itemCode", "customer", "BPShipAddr", "BPBillAddr",
+    "BPCellular", "insID"
 )
 RMA1_OPTIONAL_MAPPED_FIELDS = (
-    "itemName", "custmrName", "U_expdate", "U_BXDate", "U_FailurePhenomena",
+    "NAME1", "itemName", "custmrName", "U_expdate", "U_BXDate", "U_FailurePhenomena",
     "BPE_Mail", "U_cur", "U_DeliveryPaid", "U_WSPrice",
 )
 RMA1_NULL_FIELDS = (
@@ -25,8 +26,8 @@ RMA1_NULL_FIELDS = (
     "U_Upgradesoft", "U_ISUP", "U_gongshi", "U_ysdate", "U_gzfl", "U_GZCODE",
 )
 RMA1_UNKNOWN_FIELDS = (
-    "NAME1", "U_TEST", "U_BXName", "descrption", "U_FailureData", "U_Selftest",
-    "U_Calibration", "BPShipAddr", "BPPhone1", "TEST", "u_memo", "U_Comments",
+    "U_TEST", "U_BXName", "descrption", "U_FailureData", "U_Selftest",
+    "U_Calibration", "BPPhone1", "TEST", "u_memo", "U_Comments",
     "contctCode", "U_RepairPaid", "U_detail", "U_FailDataName", "U_MEMO3", "U_fmemo", "U_acccustomer",
 )
 RMA1_DATABASE_OWNED_FIELDS = ("callID", "U_ModVersion")
@@ -45,7 +46,8 @@ RMA1_ALL_FIELDS = (
 )
 
 _MAX_LENGTHS = {
-    "RequestID": 36, "internalSN": 36, "itemCode": 100, "customer": 15,
+    "RequestID": 36, "NAME1": 16, "internalSN": 36, "itemCode": 100, "customer": 15,
+    "BPShipAddr": 254,
     "BPBillAddr": 254, "BPCellular": 50, "itemName": 200, "custmrName": 200,
     "U_FailurePhenomena": None, "contctCode": 245, "BPE_Mail": 100,
     "U_cur": 10, "U_DeliveryPaid": 50, "U_RepairPaid": 50,
@@ -95,13 +97,18 @@ def build_rma_submission(
         repair_price = Decimal(str(repair_price)) if repair_price not in (None, "") else None
     except (InvalidOperation, ValueError) as exc:
         raise RmaSubmissionValidationError(invalid=["U_WSPrice:type=decimal"]) from exc
+    scope_labels = {"domestic": "国内", "overseas": "海外"}
+    contact_person = str(_clean(ticket.contact_person) or "")
+    contact_phone = str(_clean(ticket.contact_phone) or "")
     values: dict[str, Any] = {
         "RequestID": str(parsed_id),
+        "NAME1": _clean(policy.get("sap_owner_name")),
         "internalSN": _clean(asset.sn),
         "itemCode": _clean(asset.material_code),
         "customer": _clean(asset.customer_code),
+        "BPShipAddr": scope_labels.get(str(ticket.customer_scope or "").strip()),
         "BPBillAddr": _clean(ticket.mailing_address),
-        "BPCellular": _clean(ticket.contact_phone),
+        "BPCellular": f"{contact_person}{contact_phone}",
         "insID": asset.ins_id,
         "itemName": _clean(asset.material_name),
         "custmrName": _clean(asset.customer_name),

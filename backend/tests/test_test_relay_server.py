@@ -21,8 +21,8 @@ def test_call_ids_are_unique_across_relay_database_instances(tmp_path) -> None:
     first_result = first.create(payload)
     second_result = second.create(payload)
 
-    assert first_result["remote_record_key"].startswith("TESTCALL-")
-    assert second_result["remote_record_key"].startswith("TESTCALL-")
+    assert first_result["remote_record_key"].isdecimal()
+    assert second_result["remote_record_key"].isdecimal()
     assert first_result["remote_record_key"] != second_result["remote_record_key"]
     assert first.create(payload) == {
         "status": "succeeded",

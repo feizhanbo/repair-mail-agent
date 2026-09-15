@@ -478,10 +478,13 @@ async def build_rma_pdf_data(
             raise RmaPdfError("RMA_ITEM_FIELDS_MISSING")
         if item.quantity != 1:
             raise RmaPdfError("RMA_ITEM_QUANTITY_SN_CONFLICT")
+        part_no = str(export_by_item[item.id].remote_call_id or "").strip()
+        if not part_no.isdecimal():
+            raise RmaPdfError("RMA_EXPORT_CALL_ID_MISSING_OR_INVALID")
         result_items.append(
             RmaItemData(
                 no=index,
-                part_no=item.material_code,
+                part_no=part_no,
                 part_description=item.material_name,
                 quantity=1,
                 part_serial_no=item.sn,

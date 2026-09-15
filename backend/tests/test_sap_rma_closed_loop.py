@@ -25,7 +25,14 @@ from app.services.sap_rma_mapping import build_rma_submission
 
 
 def test_sap_protocol_translates_business_rmb_to_cny() -> None:
-    ticket = RepairTicket(id=1, ticket_no="T1", mailing_address="Address", contact_phone="13800000000")
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="T1",
+        customer_scope="domestic",
+        mailing_address="Address",
+        contact_person="Alice",
+        contact_phone="13800000000",
+    )
     item = RepairTicketItem(id=2, ticket_id=1, line_no=1, sn="SN-RMB", sn_asset_id=3)
     asset = SnAsset(id=3, ins_id=9, sn="SN-RMB", customer_code="C1", customer_name="Customer", material_code="M1")
     dto = build_rma_submission(
@@ -168,8 +175,9 @@ class _ResultAdapter:
                 request_id=value,
                 sn=None,
                 rma_no=self.mapping.get(str(value)),
+                remote_call_id=str(1000 + index),
             )
-            for value in request_ids
+            for index, value in enumerate(request_ids, start=1)
             if str(value) in self.mapping
         ]
 
@@ -535,7 +543,7 @@ def test_free_and_special_price_overlap_requires_manual_review() -> None:
     assert result["error_code"] == "CUSTOMER_POLICY_CONFLICT"
 
 
-def test_sqlserver_three_table_contract_requires_request_id_but_not_call_id(
+def test_sqlserver_three_table_contract_requires_request_id_and_call_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_ENABLED", True)
@@ -550,7 +558,7 @@ def test_sqlserver_three_table_contract_requires_request_id_but_not_call_id(
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_REQUEST_TABLE", "oscl_rma")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RESULT_TABLE", "oscl_print")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_REQUEST_ID_COLUMN", "RequestID")
-    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "")
+    monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_CALL_ID_COLUMN", "CallID")
     monkeypatch.setattr(external_relay.settings, "RELAY_SQLSERVER_RMA_COLUMN", "U_CustomerNum")
 
     result = external_relay.relay_configuration_status()

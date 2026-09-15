@@ -104,10 +104,10 @@ class TicketReturnRouteManualRequest(BaseModel):
 
 
 class TicketItemUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: int | None = None
     line_no: int | None = Field(default=None, ge=1)
-    material_code: str | None = Field(default=None, max_length=100)
-    material_name: str | None = Field(default=None, max_length=255)
     board_code: str | None = Field(default=None, max_length=100)
     board_name: str | None = Field(default=None, max_length=255)
     sn: str | None = Field(default=None, max_length=100)
@@ -218,14 +218,13 @@ class SnAssetUpdateRequest(SnAssetImportItem):
 
 
 class BoardCardImportItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     board_code: str | None = Field(default=None, max_length=100)
     board_name: str | None = Field(default=None, max_length=255)
     return_location: Literal["beijing", "tianjin"] | None = None
     route_type: Literal["board_rule", "scope_default"] = "board_rule"
     customer_scope: Literal["domestic", "overseas"] = "domestic"
-    # Deprecated compatibility aliases.
-    material_code: str | None = Field(default=None, max_length=100)
-    material_name: str | None = Field(default=None, max_length=255)
     need_ship_to_beijing: bool | None = None
     shipping_address: str | None = Field(default=None, max_length=500)
     shipping_contact: str | None = Field(default=None, max_length=100)

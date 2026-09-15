@@ -273,25 +273,7 @@ async def resolve_item_return_route(
         else:
             message = "OVERSEAS_DEFAULT_ROUTE_MISSING_OR_DUPLICATED"
     elif scope == "domestic":
-        material_code = str(item.material_code or "").strip()
-        if material_code:
-            material_matches = list(
-                (
-                    await session.execute(
-                        select(BoardCard).where(
-                            BoardCard.customer_scope == "domestic",
-                            BoardCard.route_type == "board_rule",
-                            BoardCard.status == "active",
-                            BoardCard.material_code == material_code,
-                        )
-                    )
-                ).scalars()
-            )
-            if len(material_matches) == 1:
-                row, source = material_matches[0], "domestic_material_match"
-            elif len(material_matches) > 1:
-                message = "MATERIAL_CODE_ROUTE_DUPLICATED"
-        if row is None and message is None and board_code:
+        if board_code:
             matches = list(
                 (
                     await session.execute(

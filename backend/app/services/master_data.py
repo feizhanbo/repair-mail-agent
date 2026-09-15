@@ -84,7 +84,7 @@ SN_ASSET_MUTABLE_FIELDS = {
 }
 BOARD_CARD_MUTABLE_FIELDS = {
     "board_code", "board_name", "return_location", "route_type", "customer_scope",
-    "material_code", "material_name", "need_ship_to_beijing", "shipping_address",
+    "need_ship_to_beijing", "shipping_address",
     "shipping_contact", "shipping_phone", "postal_code", "status",
 }
 
@@ -148,10 +148,8 @@ async def update_board_card(session: AsyncSession, *, card_id: int, values: dict
     payload = {key: value for key, value in values.items() if key in BOARD_CARD_MUTABLE_FIELDS}
     if "board_code" in payload:
         payload["board_code"] = normalize_board_code(payload["board_code"])
-        payload["material_code"] = payload["board_code"]
     if "board_name" in payload:
         payload["board_name"] = normalize_board_name(payload["board_name"])
-        payload["material_name"] = payload["board_name"]
     if "return_location" in payload:
         payload["need_ship_to_beijing"] = payload["return_location"] == "beijing"
     for key, value in payload.items():
@@ -379,12 +377,8 @@ async def import_board_cards(
     active_routes: dict[str, set[str]] = {}
     for item in items:
         data = item.model_dump()
-        board_code = normalize_board_code(
-            data.get("board_code") or data.get("material_code")
-        )
-        board_name = normalize_board_name(
-            data.get("board_name") or data.get("material_name")
-        ) or None
+        board_code = normalize_board_code(data.get("board_code"))
+        board_name = normalize_board_name(data.get("board_name")) or None
         if not board_code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -402,8 +396,6 @@ async def import_board_cards(
             "return_location": return_location,
             "route_type": route_type,
             "customer_scope": customer_scope,
-            "material_code": board_code,
-            "material_name": board_name,
             "need_ship_to_beijing": return_location == "beijing",
         }
         normalized_items.append(normalized)
@@ -849,21 +841,17 @@ def parse_board_cards_xlsx(content: bytes) -> tuple[list[BoardCardImportItem], s
     errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=2):
         try:
+            if "material_code" in row or "material_name" in row:
+                raise ValueError("BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN")
             items.append(
                 BoardCardImportItem(
-                    board_code=_string_value(
-                        row.get("board_code") or row.get("material_code")
-                    ).strip(),
-                    board_name=_string_value(
-                        row.get("board_name") or row.get("material_name")
-                    ).strip() or None,
+                    board_code=_string_value(row.get("board_code")).strip(),
+                    board_name=_string_value(row.get("board_name")).strip() or None,
                     return_location=_string_value(row.get("return_location")).strip() or None,
                     route_type=_string_value(row.get("route_type") or "board_rule").strip(),
                     customer_scope=_string_value(
                         row.get("customer_scope") or "domestic"
                     ).strip(),
-                    material_code=_string_value(row.get("material_code")).strip() or None,
-                    material_name=_string_value(row.get("material_name")).strip() or None,
                     need_ship_to_beijing=(
                         _bool_value(_string_value(row.get("need_ship_to_beijing")))
                         if row.get("need_ship_to_beijing") is not None
@@ -1021,15 +1009,15 @@ def parse_board_cards_csv(content: bytes) -> tuple[list[BoardCardImportItem], st
     errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=2):
         try:
+            if "material_code" in row or "material_name" in row:
+                raise ValueError("BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN")
             items.append(
                 BoardCardImportItem(
-                    board_code=(row.get("board_code") or row.get("material_code") or "").strip(),
-                    board_name=(row.get("board_name") or row.get("material_name") or "").strip() or None,
+                    board_code=(row.get("board_code") or "").strip(),
+                    board_name=(row.get("board_name") or "").strip() or None,
                     return_location=(row.get("return_location") or "").strip() or None,
                     route_type=(row.get("route_type") or "board_rule").strip(),
                     customer_scope=(row.get("customer_scope") or "domestic").strip(),
-                    material_code=(row.get("material_code") or "").strip() or None,
-                    material_name=(row.get("material_name") or "").strip() or None,
                     need_ship_to_beijing=(
                         _bool_value(row.get("need_ship_to_beijing"))
                         if row.get("need_ship_to_beijing") not in {None, ""}

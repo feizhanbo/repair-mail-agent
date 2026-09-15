@@ -35,6 +35,7 @@ from app.services.audit import log_operation
 from app.services.business_rules import FOLLOWUP_REPLY_TYPES, required_missing_for_ticket
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
+from app.services.ticket_safety import build_sn_validation_report
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 TICKET_FIELDS = (
@@ -146,8 +147,6 @@ ITEM_FIELDS = (
 
 ITEM_WRITE_FIELDS = {
     "line_no",
-    "material_code",
-    "material_name",
     "board_code",
     "board_name",
     "sn",
@@ -999,11 +998,32 @@ async def upsert_ticket_items(
                 )
             )
             item_changes[field] = {"old": to_plain(old_value), "new": to_plain(value)}
+        if "sn" in item_changes:
+            for material_field in ("material_code", "material_name"):
+                old_material = getattr(item, material_field)
+                if old_material is None:
+                    continue
+                setattr(item, material_field, None)
+                session.add(
+                    FieldAuditLog(
+                        ticket_id=ticket.id,
+                        ticket_item_id=item.id,
+                        field_name=material_field,
+                        old_value=_audit_value(old_material),
+                        new_value=None,
+                        source_type="system",
+                        reason="SN changed; stale SN-master material cleared.",
+                        operator_user_id=user_id,
+                    )
+                )
+                item_changes[material_field] = {
+                    "old": to_plain(old_material), "new": None
+                }
         if len(item_changes) > 1:
             changed.append(item_changes)
     if changed:
         ticket.version += 1
-        sn_fields = {"sn", "material_code", "material_name"}
+        sn_fields = {"sn"}
         await _invalidate_export_snapshot(
             session,
             ticket=ticket,
@@ -1374,8 +1394,6 @@ async def _create_items_from_parse_result(
                 enrichments = {
                     "board_code": payload.get("board_code") or payload.get("board_model"),
                     "board_name": payload.get("board_name"),
-                    "material_code": payload.get("material_code"),
-                    "material_name": payload.get("material_name"),
                     "failure_description": payload.get("failure_description") or ticket.problem_description,
                     "failure_information": payload.get("failure_information"),
                     "data_info": payload.get("data_info"),
@@ -1418,8 +1436,6 @@ async def _create_items_from_parse_result(
                 or placeholder.board_code
             )
             placeholder.board_name = payload.get("board_name") or placeholder.board_name
-            placeholder.material_code = payload.get("material_code") or placeholder.material_code
-            placeholder.material_name = payload.get("material_name") or placeholder.material_name
             placeholder.quantity = payload.get("quantity") or placeholder.quantity or 1
             placeholder.failure_description = payload.get("failure_description") or placeholder.failure_description or ticket.problem_description
             placeholder.failure_information = payload.get("failure_information") or placeholder.failure_information
@@ -1450,8 +1466,6 @@ async def _create_items_from_parse_result(
             line_no=line_no,
             board_code=payload.get("board_code") or payload.get("board_model"),
             board_name=payload.get("board_name"),
-            material_code=payload.get("material_code"),
-            material_name=payload.get("material_name"),
             sn=sn or None,
             quantity=payload.get("quantity") or 1,
             failure_description=payload.get("failure_description") or ticket.problem_description,
@@ -1593,6 +1607,16 @@ async def apply_parse_result(
     )
     if parse_result.intent_type in AUTO_INTENTS:
         await session.flush()
+        # Resolve SAP material fields from SN master data as soon as parser items
+        # are accepted.  This SN-only stage is deliberately independent of the
+        # complete export gate: a ticket may still need customer information,
+        # but board fields from the email must never stand in for material data.
+        await build_sn_validation_report(
+            session,
+            ticket_id=ticket.id,
+            user_id=user_id,
+            persist=True,
+        )
         current_items = (
             await session.execute(
                 select(RepairTicketItem)

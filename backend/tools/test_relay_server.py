@@ -57,9 +57,9 @@ class TestRelayStore:
 
     def __init__(self, path: Path):
         self.path = path.resolve()
-        self.call_id_namespace = hashlib.sha256(
+        self.call_id_namespace = int(hashlib.sha256(
             str(self.path).casefold().encode("utf-8")
-        ).hexdigest()[:10].upper()
+        ).hexdigest()[:12], 16) % 1_000_000_000
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -151,7 +151,7 @@ class TestRelayStore:
                 "idempotent_reuse": True,
             }
         record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
-        call_id = f"TESTCALL-{self.call_id_namespace}-{record_id:08d}"
+        call_id = f"{self.call_id_namespace:09d}{record_id:09d}"
         scenario = self._setting(db, "default_scenario", "normal")
         delay = int(self._setting(db, "default_delay_seconds", "0"))
         ticket_key = str(payload.ticket_id or payload.relay_export_id or request_id)
@@ -225,6 +225,7 @@ class TestRelayStore:
                         "RequestID": row["request_id"],
                         "sn": row["sn"],
                         "rma_no": rma_no,
+                        "remote_call_id": row["call_id"],
                     }
                 )
             return result

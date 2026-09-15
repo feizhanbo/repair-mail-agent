@@ -28,7 +28,7 @@ from app.schemas.business import BoardCardImportItem
 from app.services.master_data import import_board_cards, parse_board_cards_file
 
 
-EXPECTED_REVISION = "a4v9w0x1y2z3"
+EXPECTED_REVISION = "b5w0x1y2z3a4"
 OVERSEAS_DEFAULT_CODE = "*"
 OVERSEAS_DEFAULT_NAME = "OVERSEAS_DEFAULT_BEIJING"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -162,8 +162,8 @@ def _business_keys(
     seen: set[tuple[str, str | None, str, str]] = set()
     for item in items:
         key = (
-            normalize_board_code(item.board_code or item.material_code),
-            normalize_board_name(item.board_name or item.material_name) or None,
+            normalize_board_code(item.board_code),
+            normalize_board_name(item.board_name) or None,
             item.customer_scope,
             item.route_type,
         )

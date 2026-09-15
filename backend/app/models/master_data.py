@@ -62,7 +62,6 @@ class BoardCard(TimestampMixin, Base):
         Index("idx_board_cards_board_name", "board_name"),
         Index("idx_board_cards_route", "customer_scope", "route_type", "status"),
         Index("idx_board_cards_location", "return_location", "status"),
-        Index("idx_board_cards_material_name", "material_name"),
         Index("idx_board_cards_ship_to_beijing", "need_ship_to_beijing"),
         Index("idx_board_cards_status", "status"),
         Index("idx_board_cards_source", "source_file_hash", "source_row_no"),
@@ -74,10 +73,6 @@ class BoardCard(TimestampMixin, Base):
     return_location: Mapped[str] = mapped_column(String(20), nullable=False)
     route_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="board_rule")
     customer_scope: Mapped[str] = mapped_column(String(20), nullable=False, server_default="domestic")
-    # Compatibility columns. New business logic must use the explicit board/route
-    # fields above; these columns remain for one migration window.
-    material_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    material_name: Mapped[str | None] = mapped_column(String(255))
     need_ship_to_beijing: Mapped[bool] = bool_column(False)
     shipping_address: Mapped[str | None] = mapped_column(String(500))
     shipping_contact: Mapped[str | None] = mapped_column(String(100))
