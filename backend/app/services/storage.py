@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import exists, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Email, EmailAttachment, JobRunLog, OssObject, ReplyRecord, TicketRma
 from app.services.common import utcnow
+
+
+logger = logging.getLogger(__name__)
 
 
 class StorageConfigurationError(RuntimeError):
@@ -355,3 +359,144 @@ async def find_orphan_oss_objects(
         .limit(max(1, min(limit, 1000)))
     )
     return list((await session.execute(statement)).scalars().all())
+
+
+async def count_oss_object_references(
+    session: AsyncSession,
+    oss_object_id: int,
+) -> dict[str, int]:
+    """统计 6 张引用表对 oss_object_id 的引用计数。
+
+    返回的 dict 中键 ``_total`` 为所有引用数的总和，其余键为各表单独的引用数。
+    """
+    emails = await session.scalar(
+        select(func.count()).select_from(Email).where(Email.raw_eml_oss_object_id == oss_object_id)
+    )
+    email_attachments = await session.scalar(
+        select(func.count()).select_from(EmailAttachment).where(EmailAttachment.oss_object_id == oss_object_id)
+    )
+    reply_records = await session.scalar(
+        select(func.count()).select_from(ReplyRecord).where(ReplyRecord.rma_pdf_oss_object_id == oss_object_id)
+    )
+    ticket_rmas = await session.scalar(
+        select(func.count()).select_from(TicketRma).where(TicketRma.pdf_oss_object_id == oss_object_id)
+    )
+    job_run_logs_input = await session.scalar(
+        select(func.count()).select_from(JobRunLog).where(JobRunLog.input_oss_object_id == oss_object_id)
+    )
+    job_run_logs_output = await session.scalar(
+        select(func.count()).select_from(JobRunLog).where(JobRunLog.output_oss_object_id == oss_object_id)
+    )
+
+    references = {
+        "emails": int(emails or 0),
+        "email_attachments": int(email_attachments or 0),
+        "reply_records": int(reply_records or 0),
+        "ticket_rmas": int(ticket_rmas or 0),
+        "job_run_logs_input": int(job_run_logs_input or 0),
+        "job_run_logs_output": int(job_run_logs_output or 0),
+    }
+    references["_total"] = sum(v for k, v in references.items() if k != "_total")
+    return references
+
+
+async def delete_oss_object(
+    session: AsyncSession,
+    oss_object_id: int,
+    *,
+    hard_delete_oss: bool = False,
+    force: bool = False,
+) -> dict:
+    """删除单个 OssObject 记录。
+
+    - 不会自动 commit 事务，事务边界由调用方控制。
+    - 当 ``hard_delete_oss=True`` 时尝试删除 OSS 中的实际对象；失败只记录 ``oss_error`` 不抛异常（best-effort）。
+    - 引用数 > 0 且 ``force=False`` 时拒绝删除。
+    """
+    oss_object = await session.scalar(select(OssObject).where(OssObject.id == oss_object_id))
+    if oss_object is None:
+        return {"deleted": False, "reason": "not_found", "oss_object_id": oss_object_id}
+
+    references = await count_oss_object_references(session, oss_object_id)
+    total_refs = references.get("_total", 0)
+
+    if total_refs > 0 and not force:
+        return {
+            "deleted": False,
+            "reason": "in_use",
+            "reference_count": total_refs,
+            "references": references,
+            "oss_object_id": oss_object_id,
+        }
+
+    oss_error: str | None = None
+    oss_deleted = False
+    if hard_delete_oss:
+        if not _oss_configured():
+            oss_error = "oss_disabled"
+        else:
+            try:
+                async with _oss_semaphore:
+                    await asyncio.to_thread(
+                        _build_bucket(
+                            endpoint=oss_object.endpoint or settings.OSS_ENDPOINT,
+                            bucket_name=oss_object.bucket,
+                        ).delete_object,
+                        oss_object.object_key,
+                    )
+                oss_deleted = True
+            except Exception as exc:
+                oss_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "OSS delete_object failed for oss_object_id=%s object_key=%s: %s",
+                    oss_object_id,
+                    oss_object.object_key,
+                    oss_error,
+                )
+
+    await session.execute(delete(OssObject).where(OssObject.id == oss_object_id))
+
+    return {
+        "deleted": True,
+        "oss_deleted": oss_deleted,
+        "oss_error": oss_error,
+        "oss_object_id": oss_object_id,
+        "bucket": oss_object.bucket,
+        "object_key": oss_object.object_key,
+    }
+
+
+async def delete_oss_objects_batch(
+    session: AsyncSession,
+    oss_object_ids,
+    *,
+    hard_delete_oss: bool = False,
+    force: bool = False,
+) -> list[dict]:
+    """批量删除多个 OssObject 记录。
+
+    逐个调用 :func:`delete_oss_object`，部分失败不阻断整体，结果聚合到 list 返回。
+    """
+    results: list[dict] = []
+    for oss_object_id in oss_object_ids:
+        try:
+            result = await delete_oss_object(
+                session,
+                oss_object_id,
+                hard_delete_oss=hard_delete_oss,
+                force=force,
+            )
+        except Exception as exc:
+            result = {
+                "deleted": False,
+                "reason": "error",
+                "oss_object_id": oss_object_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            logger.warning(
+                "delete_oss_object raised for oss_object_id=%s: %s",
+                oss_object_id,
+                result["error"],
+            )
+        results.append(result)
+    return results
