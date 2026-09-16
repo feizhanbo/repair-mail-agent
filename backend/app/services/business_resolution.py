@@ -20,6 +20,7 @@ from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.services.audit import log_operation
 from app.services.common import to_plain, utcnow
 from app.services.customer_policies import resolve_customer_policy
+from app.services.sn_master_resolution import RESOLVED, resolved_asset_from_snapshot
 from app.services.workflow import OPEN_TASK_STATUSES, create_manual_task_if_missing
 
 
@@ -61,18 +62,12 @@ async def resolve_and_snapshot_ticket_policy(
             )
         ).scalars()
     )
-    assets: list[SnAsset] = []
+    assets: list[Any] = []
     errors: list[str] = []
     for item in items:
-        asset = (
-            await session.get(SnAsset, item.sn_asset_id)
-            if item.sn_asset_id is not None
-            else None
-        )
-        if asset is None and item.sn:
-            asset = await session.scalar(
-                select(SnAsset).where(SnAsset.sn == item.sn.strip().upper())
-            )
+        asset = resolved_asset_from_snapshot(item.sn_master_resolution_snapshot)
+        if item.sn_master_resolution_status != RESOLVED:
+            asset = None
         if asset is None:
             errors.append(f"SN_ASSET_MISSING:{item.line_no}")
         else:
@@ -155,7 +150,7 @@ async def resolve_and_snapshot_ticket_policy(
     ticket.policy_snapshot = snapshot
     has_special_rma_rules = bool(
         str(snapshot.get("policy_type") or "") == "special_out_of_warranty"
-        or str(snapshot.get("currency") or "CNY").upper() != "CNY"
+        or str(snapshot.get("currency") or "RMB").upper() not in {"RMB", "CNY"}
         or str(snapshot.get("reply_salutation") or "").strip()
         or snapshot.get("hide_company_name")
         or snapshot.get("force_manual_review")
@@ -322,7 +317,7 @@ async def resolve_item_return_route(
                 message = "BOARD_CODE_NOT_FOUND"
             if row is not None:
                 source = "domestic_board_match"
-        elif board_name:
+        elif row is None and message is None and board_name:
             matches = list(
                 (
                     await session.execute(
@@ -340,7 +335,7 @@ async def resolve_item_return_route(
                 if len(matches) == 1
                 else "BOARD_NAME_NOT_UNIQUE_OR_NOT_FOUND"
             )
-        else:
+        elif row is None and message is None:
             message = "BOARD_INFORMATION_REQUIRED"
     else:
         message = "CUSTOMER_SCOPE_UNRESOLVED"

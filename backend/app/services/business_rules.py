@@ -7,6 +7,7 @@ from typing import Any
 NEW_REPAIR_REQUIRED_FIELDS: tuple[str, ...] = (
     "customer_name",
     "contact_person",
+    "contact_phone",
     "contact_email",
     "request_date",
     "mailing_address",
@@ -16,6 +17,7 @@ NEW_REPAIR_REQUIRED_FIELDS: tuple[str, ...] = (
 CUSTOMER_REQUIRED_FIELD_MESSAGES: dict[str, str] = {
     "customer_name": "缺少客户名称。",
     "contact_person": "缺少联系人。",
+    "contact_phone": "缺少联系电话。",
     "contact_email": "缺少可用于回复客户的邮箱地址。",
     "request_date": "缺少报修日期。",
     "mailing_address": "缺少设备维修后的寄回地址。",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -11,15 +13,30 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 class Settings(BaseSettings):
     APP_ENV: str = "dev"
     APP_NAME: str = "repair-mail-agent"
+    APP_VERSION: str = "0.1.0"
+    COMMIT_SHA: str = "unknown"
     LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "json"
+    LOG_STDOUT_ENABLED: bool = True
+    LOG_FILE_ENABLED: bool = False
+    LOG_DIR: str = str(BACKEND_DIR / "logs" / "runtime")
+    LOG_ROTATION_WHEN: str = "midnight"
+    LOG_RETENTION_DAYS: int = 30
+    LOG_MAX_MESSAGE_LENGTH: int = 8192
+    LOG_INCLUDE_TRACEBACK: bool = True
+    HTTP_ACCESS_LOG_ENABLED: bool = True
+    SLOW_REQUEST_THRESHOLD_MS: int = 3000
+    SLOW_DB_THRESHOLD_MS: int = 1000
+    SLOW_EXTERNAL_THRESHOLD_MS: int = 5000
+    TRUSTED_PROXY_CIDRS: list[str] = []
     CORS_ALLOWED_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     TRUSTED_HOSTS: list[str] = ["localhost", "127.0.0.1", "testserver"]
     API_DOCS_ENABLED: bool = False
 
-    DB_NAME: str = "repair_system_test"
     DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_test"
     DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
     DB_SMOKE_DATABASE_URL: str = ""
+    DESTRUCTIVE_TEST_DATABASE_ALLOWLIST: list[str] = ["repair_system_test", "AIRMA_test"]
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -33,15 +50,38 @@ class Settings(BaseSettings):
     IMAP_FETCH_ENABLED: bool = True
     IMAP_FOLDER: str = "INBOX"
     IMAP_FETCH_LIMIT: int = 10
+    IMAP_INITIAL_SYNC_START_AT: datetime | None = None
+    IMAP_INITIAL_BATCH_SIZE: int = 50
+    IMAP_INCREMENTAL_LIMIT: int = 20
+    IMAP_FETCH_BATCH_SIZE: int = 10
     IMAP_UNSEEN_ONLY: bool = True
     IMAP_ARCHIVE_TO_OSS: bool = True
     IMAP_MAX_RETRIES: int = 5
+    MAIL_PRECLASSIFICATION_MIN_CONFIDENCE: float = 0.7
+    MAIL_PRECLASSIFICATION_ATTACHMENT_MAX_BYTES: int = 2 * 1024 * 1024
+    MAIL_PRECLASSIFICATION_MAX_ATTACHMENTS: int = 3
+    MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS: int = 6000
+    MAIL_PRECLASSIFICATION_BODY_CHARS: int = 12000
+    MAIL_PRECLASSIFICATION_ATTACHMENT_TEXT_CHARS: int = 8000
+    # 链路 smoke 测试开关：非空时强制邮件分类最终 intent（例如 "new_repair"），
+    # 仅用于链路连通性验证，仍走完整 classify_mail 代码路径；默认空=关闭。
+    MAIL_INTENT_FORCE: str = ""
     AUTO_FOLLOWUP_INTERVAL_MINUTES: int = 5
 
     SMTP_HOST: str = "smtp.example.com"
     SMTP_PORT: int = 587
     SMTP_USER: str = "repair@example.com"
     SMTP_PASSWORD: str = ""
+    SMTP_MAX_CONNECTIONS: int = 2
+    SMTP_MESSAGES_PER_CONNECTION: int = 20
+    SMTP_CONNECTION_MAX_AGE_SECONDS: int = 600
+    SMTP_IDLE_TIMEOUT_SECONDS: int = 60
+    SMTP_CONNECT_TIMEOUT_SECONDS: int = 20
+    SMTP_SEND_TIMEOUT_SECONDS: int = 60
+    SMTP_RETRY_LIMIT: int = 3
+    SMTP_RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 300]
+    SMTP_RATE_LIMIT_PER_MINUTE: int = 60
+    SMTP_SENT_FOLDER: str = "Sent"
 
     OSS_ENDPOINT: str = "https://oss-cn-shanghai.aliyuncs.com"
     OSS_BUCKET: str = "acco-repair-mail-file"
@@ -50,7 +90,7 @@ class Settings(BaseSettings):
 
     AI_PROVIDER: str = "deepseek"
     AI_API_KEY: str = ""
-    AI_MODEL: str = "deepseek-v4-flash"
+    AI_MODEL: str = "deepseek-chat"
     AI_BASE_URL: str = "https://api.deepseek.com"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_RETRIES: int = 2
@@ -60,6 +100,8 @@ class Settings(BaseSettings):
     AI_FULL_LOG_ENABLED: bool = True
     AI_FULL_LOG_RETENTION_DAYS: int = 30
     AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")
+    LLM_ROUTES_FILE: str = str(BACKEND_DIR / "config" / "llm_routes.yaml")
+    SYSTEM_SENDER_ADDRESSES: list[str] = []
     MAIL_PRECHECK_IRRELEVANT_MIN_CONFIDENCE: float = 0.85
     ATTACHMENT_MAX_AUTO_PARSE_BYTES: int = 50 * 1024 * 1024
     ATTACHMENT_TEXT_MAX_CHARS: int = 20000
@@ -114,41 +156,30 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_ENCRYPT: bool = True
     RELAY_SQLSERVER_TRUST_SERVER_CERTIFICATE: bool = False
     RELAY_SQLSERVER_SN_SCHEMA: str = "dbo"
-    RELAY_SQLSERVER_SN_TABLE: str = ""
+    RELAY_SQLSERVER_SN_TABLE: str = "oins_rma"
     RELAY_SQLSERVER_SN_PRIMARY_KEY: str = ""
     RELAY_SQLSERVER_SN_UPDATED_AT_COLUMN: str = ""
     RELAY_SQLSERVER_SN_COLUMN_MAP: dict[str, str] = {
-        "sn": "sn",
-        "customer_code": "customer_code",
-        "customer_name": "customer_name",
-        "material_code": "material_code",
-        "material_name": "material_name",
-        "asset_status": "asset_status",
-    }
-    RELAY_SQLSERVER_RESULT_MODE: str = "table"
-    RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
-    RELAY_SQLSERVER_RESULT_TARGET: str = ""
-    RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN: str = "SourceRequestID"
-    # Legacy audit-only configuration. New submissions and result queries never use CallID.
-    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
-    RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
-    RELAY_SQLSERVER_RESULT_COLUMN_MAP: dict[str, str] = {
+        "ins_id": "insID",
         "sn": "internalSN",
         "customer_code": "customer",
         "customer_name": "custmrName",
-        "material_code": "itemCode",
-        "material_name": "itemName",
-        "email_subject": "subject",
-        "contact_person": "BPContact",
-        "contact_phone": "Telephone",
-        "problem_description": "U_FailurePhenomena",
-        "repair_requested_at": "U_BXDate",
-        "mailing_address": "BPShipAddr",
-        "currency": "U_cur",
-        "shipping_fee": "U_DeliveryPaid",
-        "repair_fee": "U_WSPrice",
-        "charge_status": "U_RepairPaid",
+        "material_code": "ITEMCODE",
+        "material_name": "ITEMNAME",
+        "parent_material_code": "U_FatherItem",
+        "parent_sn": "U_FatherSerialNum",
+        "top_material_code": "U_topitemcode",
+        "top_sn": "U_TOPSN",
+        "warranty_end_date": "ExpDate",
     }
+    RELAY_SQLSERVER_REQUEST_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_REQUEST_TABLE: str = "oscl_rma"
+    RELAY_SQLSERVER_RESULT_SCHEMA: str = "dbo"
+    RELAY_SQLSERVER_RESULT_TABLE: str = "oscl_print"
+    RELAY_SQLSERVER_REQUEST_ID_COLUMN: str = "RequestID"
+    # oscl_print CallID is persisted locally and printed as the PDF Part No.
+    RELAY_SQLSERVER_CALL_ID_COLUMN: str = "CallID"
+    RELAY_SQLSERVER_RMA_COLUMN: str = "U_CustomerNum"
     RELAY_SQLSERVER_BATCH_SIZE: int = 500
     RELAY_SQLSERVER_SYNC_INTERVAL_MINUTES: int = 5
     RELAY_SQLSERVER_FULL_SYNC_HOUR: int = 2
@@ -167,6 +198,8 @@ class Settings(BaseSettings):
 
     EMAIL_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
+    MAIL_WORKER_ENABLED: bool = True
+    MAIL_SCHEDULER_IN_API: bool = False
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
     ASYNC_JOB_STALE_SECONDS: int = 900
@@ -193,8 +226,6 @@ class Settings(BaseSettings):
     RMA_PDF_DEFAULT_DELIVERY_FEE: str = "one-way charge/单次收费"
     RMA_PDF_DEFAULT_REPAIR_FEE: str = "free of charge/免费"
     RMA_PDF_DEFAULT_TOTAL_COST: str = "0"
-    RMA_PDF_MAILING_CONTACT_PERSON: str = ""
-    RMA_PDF_MAILING_CONTACT_PHONE: str = ""
     RMA_PDF_TYPICAL_MAX_BYTES: int = 500_000
     RMA_PDF_MAX_BYTES: int = 2_000_000
     RMA_DEFAULT_BEIJING_COMPANY: str = "北京华峰测控技术股份有限公司"
@@ -245,6 +276,11 @@ class Settings(BaseSettings):
         if insecure:
             raise ValueError(f"insecure production settings: {', '.join(insecure)}")
         return self
+
+    @property
+    def database_name(self) -> str:
+        """Canonical database name; DATABASE_URL is the only runtime source."""
+        return str(make_url(self.DATABASE_URL).database or "")
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 

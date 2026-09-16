@@ -34,9 +34,11 @@ from app.services.email_flow_trace import build_email_flow_trace
 from app.services.email_preview import build_attachment_preview, build_email_preview
 from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
 from app.services.mail_precheck import precheck_email_payload
+from app.services.mail_ingress import persist_missing_message_id_anomaly, process_preclassified_ingress
 from app.services.common import utcnow
 from app.services.master_data import EXCEL_MEDIA_TYPE, xlsx_bytes
 from app.services.jobs import enqueue_job, recover_stale_jobs, serialize_job
+from app.services.runtime_config import load_runtime_config
 from app.services.storage import StorageUploadError, generate_presigned_url_for_object
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,20 @@ async def _archive_or_raise_http(
         raise HTTPException(status_code=http_status, detail=exc.code) from exc
 
 
+async def _route_ingress_or_raise_http(session: AsyncSession, **kwargs) -> dict:
+    try:
+        return await process_preclassified_ingress(session, **kwargs)
+    except EmailArchivalError as exc:
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+        if exc.stage == "validate":
+            http_status = (
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                if "TOO_LARGE" in exc.code or exc.code == "TOO_MANY_ATTACHMENTS"
+                else status.HTTP_400_BAD_REQUEST
+            )
+        raise HTTPException(status_code=http_status, detail=exc.code) from exc
+
+
 async def _record_precheck_skip(
     session: AsyncSession,
     *,
@@ -184,7 +200,6 @@ async def list_emails(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -200,7 +215,6 @@ async def list_emails(
         page_size=page_size,
         parse_status=parse_status,
         intent_type=intent_type,
-        intent_subtype=intent_subtype,
         handling_level=handling_level,
         keyword=keyword,
         subject=subject,
@@ -212,13 +226,12 @@ async def list_emails(
     return page(items, total=total, page_no=page_no, page_size=page_size)
 
 
-@router.get("/export")
+@router.get("/export", deprecated=True, description="Compatibility API; hidden from the current mail-center UI.")
 async def export_emails(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     parse_status: str | None = None,
     intent_type: str | None = None,
-    intent_subtype: str | None = None,
     handling_level: str | None = None,
     keyword: str | None = None,
     subject: str | None = None,
@@ -227,12 +240,10 @@ async def export_emails(
     received_start: date | None = None,
     received_end: date | None = None,
 ) -> Response:
-    del current_user
     rows = await email_service.export_emails(
         session,
         parse_status=parse_status,
         intent_type=intent_type,
-        intent_subtype=intent_subtype,
         handling_level=handling_level,
         keyword=keyword,
         subject=subject,
@@ -248,7 +259,6 @@ async def export_emails(
         "from_address",
         "to_addresses",
         "intent_type",
-        "intent_subtype",
         "handling_level",
         "classification_version",
         "classification_confidence",
@@ -261,6 +271,16 @@ async def export_emails(
         "latest_missing_fields",
         "latest_conflict_fields",
     ]
+    await log_operation(
+        session, user_id=current_user.id, operation_type="emails_exported",
+        target_type="email_export", description="用户导出邮件业务数据。",
+        after_data={"row_count": len(rows), "filter_keys": sorted(key for key, value in {
+            "parse_status": parse_status, "intent_type": intent_type, "handling_level": handling_level,
+            "keyword": keyword, "subject": subject, "from_address": from_address,
+            "message_id": message_id, "received_start": received_start, "received_end": received_end,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=await asyncio.to_thread(xlsx_bytes, rows, fieldnames),
         media_type=EXCEL_MEDIA_TYPE,
@@ -272,7 +292,6 @@ async def export_emails(
 async def get_classification_catalog(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    del current_user
     return ok(classification_catalog())
 
 
@@ -293,7 +312,6 @@ async def raw_eml_download_url(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     expires_seconds: int = Query(3600, ge=60, le=86400),
 ) -> dict:
-    del current_user
     email = await session.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
@@ -305,6 +323,12 @@ async def raw_eml_download_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
     except StorageUploadError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
+    await log_operation(
+        session, user_id=current_user.id, operation_type="raw_email_download_url_created",
+        target_type="email", target_id=email.id, email_id=email.id,
+        after_data={"oss_object_id": email.raw_eml_oss_object_id, "expires_seconds": expires_seconds},
+    )
+    await session.commit()
     return ok(
         {
             "object_id": email.raw_eml_oss_object_id,
@@ -322,7 +346,6 @@ async def attachment_download_url(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     expires_seconds: int = Query(3600, ge=60, le=86400),
 ) -> dict:
-    del current_user
     attachment = await session.get(EmailAttachment, attachment_id)
     if attachment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ATTACHMENT_NOT_FOUND")
@@ -334,6 +357,12 @@ async def attachment_download_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OSS_OBJECT_NOT_FOUND") from exc
     except StorageUploadError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OSS_OBJECT_NOT_READY") from exc
+    await log_operation(
+        session, user_id=current_user.id, operation_type="attachment_download_url_created",
+        target_type="email_attachment", target_id=attachment.id, email_id=attachment.email_id,
+        after_data={"oss_object_id": attachment.oss_object_id, "expires_seconds": expires_seconds},
+    )
+    await session.commit()
     return ok(
         {
             "attachment_id": attachment.id,
@@ -372,6 +401,7 @@ async def fetch_imap_status(
 ) -> dict:
     if not ({"admin", "operator"} & set(current_user.roles)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
+    await load_runtime_config(session)
     latest = await session.scalar(
         select(JobRunLog).where(JobRunLog.job_type == "imap_fetch").order_by(JobRunLog.created_at.desc()).limit(1)
     )
@@ -446,7 +476,17 @@ async def get_email(
     return ok(await email_service.get_email_detail(session, email_id))
 
 
-@router.post("/ingest")
+@router.get("/{email_id}/linked-tickets")
+async def linked_tickets(
+    email_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    del current_user
+    return ok(await email_service.get_linked_tickets(session, email_id))
+
+
+@router.post("/ingest", deprecated=True, description="Compatibility JSON ingest API; hidden from the current mail-center UI.")
 async def ingest_email(
     payload: EmailIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -461,6 +501,11 @@ async def ingest_email(
     payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+                source="manual_ingest", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id)
@@ -469,26 +514,16 @@ async def ingest_email(
         await session.commit()
         return ok(result, "email skipped by precheck")
 
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=raw_eml,
-        raw_file_name="ingest.eml",
-        attachment_blobs=attachment_blobs,
-        source="manual_ingest",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        rule_analysis=precheck.rule_analysis,
+    result = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs, source="manual_ingest", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok(result, "email ingested")
+    return ok(result, "email classified and routed")
 
 
-@router.post("/ingest/jobs")
+@router.post("/ingest/jobs", deprecated=True, description="Compatibility JSON ingest job API; hidden from the current mail-center UI.")
 async def ingest_email_job(
     payload: EmailIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -503,6 +538,11 @@ async def ingest_email_job(
     payload.raw_eml_sha256 = _sha256_bytes(raw_eml)
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+                source="manual_ingest_job", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="manual_ingest_job", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)
@@ -510,40 +550,20 @@ async def ingest_email_job(
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok({"ingest": result, "job": None}, "email skipped by precheck")
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=raw_eml,
-        raw_file_name="ingest.eml",
-        attachment_blobs=attachment_blobs,
-        source="manual_ingest_job",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=False,
-        rule_analysis=precheck.rule_analysis,
-    )
-    email_id = int(result["email"]["id"])
-    job = await enqueue_job(
-        session,
-        job_type="email_parse",
-        resource_type="email",
-        resource_id=email_id,
-        idempotency_key=f"email_parse:{email_id}:initial",
-        metadata={
-            "user_id": current_user.id,
-            "reason": "initial asynchronous parse",
-            "rule_parse_result_id": result["rule_parse_result_id"],
-        },
+    routed = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=raw_eml, raw_file_name="ingest.eml",
+        attachment_blobs=attachment_blobs, source="manual_ingest_job", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok({"ingest": result, "job": serialize_job(job)}, "email archived and parse queued")
+    return ok(routed, "email classified and routed")
 
 
-@router.post("/ingest-eml")
+@router.post(
+    "/ingest-eml",
+    deprecated=True,
+    description="Compatibility EML ingest API; hidden from the current mail-center UI.",
+)
 async def ingest_eml(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -566,6 +586,11 @@ async def ingest_eml(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+                source="eml_upload", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=auto_parse)
@@ -574,27 +599,20 @@ async def ingest_eml(
         await session.commit()
         return ok(result, "eml skipped by precheck")
 
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=content,
-        raw_file_name=file.filename or "ingest.eml",
-        attachment_blobs=blobs,
-        source="eml_upload",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=auto_parse,
-        rule_analysis=precheck.rule_analysis,
+    result = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs, source="eml_upload", precheck=precheck,
+        user_id=current_user.id, auto_parse=auto_parse,
     )
     await session.commit()
-    return ok(result, "eml ingested")
+    return ok(result, "email classified and routed")
 
 
-@router.post("/ingest-eml/jobs")
+@router.post(
+    "/ingest-eml/jobs",
+    deprecated=True,
+    description="Compatibility asynchronous EML ingest API; hidden from the current mail-center UI.",
+)
 async def ingest_eml_job(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -616,6 +634,11 @@ async def ingest_eml_job(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     precheck = await precheck_email_payload(session, payload)
     if not precheck.accepted:
+        if precheck.status == "missing_message_id":
+            await persist_missing_message_id_anomaly(
+                session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+                source="eml_upload_job", user_id=current_user.id,
+            )
         await _record_precheck_skip(session, user_id=current_user.id, source="eml_upload_job", precheck=precheck)
         if precheck.status == "duplicate_message_skipped":
             result = await email_service.ingest_email(session, payload=payload, user_id=current_user.id, auto_parse=False)
@@ -623,37 +646,13 @@ async def ingest_eml_job(
             result = {"skipped": True, "precheck": precheck.to_dict()}
         await session.commit()
         return ok({"ingest": result, "job": None}, "eml skipped by precheck")
-    await _archive_or_raise_http(
-        session,
-        payload=payload,
-        raw_eml=content,
-        raw_file_name=file.filename or "ingest.eml",
-        attachment_blobs=blobs,
-        source="eml_upload_job",
-        user_id=current_user.id,
-    )
-    result = await email_service.ingest_email(
-        session,
-        payload=payload,
-        user_id=current_user.id,
-        auto_parse=False,
-        rule_analysis=precheck.rule_analysis,
-    )
-    email_id = int(result["email"]["id"])
-    job = await enqueue_job(
-        session,
-        job_type="email_parse",
-        resource_type="email",
-        resource_id=email_id,
-        idempotency_key=f"email_parse:{email_id}:initial",
-        metadata={
-            "user_id": current_user.id,
-            "reason": "initial asynchronous EML parse",
-            "rule_parse_result_id": result["rule_parse_result_id"],
-        },
+    routed = await _route_ingress_or_raise_http(
+        session, payload=payload, raw_eml=content, raw_file_name=file.filename or "ingest.eml",
+        attachment_blobs=blobs, source="eml_upload_job", precheck=precheck,
+        user_id=current_user.id, auto_parse=True,
     )
     await session.commit()
-    return ok({"ingest": result, "job": serialize_job(job)}, "eml archived and parse queued")
+    return ok(routed, "email classified and routed")
 
 
 @router.post("/fetch-now", deprecated=True)
@@ -802,7 +801,6 @@ async def delete_attachment(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
 ) -> dict:
     try:
@@ -810,7 +808,7 @@ async def delete_attachment(
             session,
             attachment_id=attachment_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除附件",
             confirmation_token=confirmation_token,
         )
         if result["oss_status"] == "pending":
@@ -838,7 +836,6 @@ async def delete_email(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
     force_local_cleanup: bool = False,
 ) -> dict:
@@ -847,7 +844,7 @@ async def delete_email(
             session,
             email_id=email_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除邮件",
             confirmation_token=confirmation_token,
             force_local_cleanup=force_local_cleanup,
         )

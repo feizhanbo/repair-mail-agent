@@ -22,7 +22,7 @@ def test_new_repair_missing_fields_use_business_required_matrix() -> None:
         reported_missing={"contact_phone": "缺少电话", "customer_code": "缺少客户编码"},
     )
 
-    assert missing == {}
+    assert set(missing) == {"contact_phone"}
 
 
 def test_non_business_intents_never_create_customer_missing_fields() -> None:
@@ -47,7 +47,7 @@ def test_followup_reply_types_include_legacy_and_current_names() -> None:
     assert is_followup_reply_type("rma_authorization") is False
 
 
-def test_ticket_required_matrix_requires_sn_but_not_phone_or_customer_code() -> None:
+def test_ticket_required_matrix_requires_sn_and_phone_but_not_customer_code() -> None:
     ticket = SimpleNamespace(
         customer_name="测试客户",
         contact_person="测试联系人",
@@ -59,4 +59,4 @@ def test_ticket_required_matrix_requires_sn_but_not_phone_or_customer_code() -> 
         customer_code=None,
     )
 
-    assert required_missing_for_ticket(ticket, []) == {"sn": "缺少设备 SN，无法校验资产。"}
+    assert set(required_missing_for_ticket(ticket, [])) == {"sn", "contact_phone"}

@@ -57,7 +57,6 @@ export default function AppLayout() {
   }
 
   const canAdmin = hasRole(user?.roles, 'admin');
-  const canSupervise = hasAnyRole(user?.roles, ['admin']);
   const canOperate = hasAnyRole(user?.roles, ['admin', 'operator']);
   const toggleCollapsed = () => {
     const next = !collapsed;
@@ -73,7 +72,7 @@ export default function AppLayout() {
     ...(canAdmin ? [{ key: '/db-browser', icon: <DatabaseOutlined />, label: '数据库浏览' }] : []),
     ...baseMenuItems.slice(4),
     ...(canOperate ? [{ key: '/ai-logs', icon: <RobotOutlined />, label: 'AI 日志' }] : []),
-    ...(canSupervise ? [{ key: '/system', icon: <SettingOutlined />, label: '系统配置' }] : []),
+    ...(canOperate ? [{ key: '/system', icon: <SettingOutlined />, label: '系统配置' }] : []),
   ];
 
   return (

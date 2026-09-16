@@ -130,7 +130,7 @@ def test_all_three_switch_combinations_keep_ordinary_and_followup_independent(
     assert replies._reply_can_auto_send(followup) is followup_enabled
 
 
-def test_seed_closes_only_after_rma_send_and_archive_verification() -> None:
+def test_seed_closes_rma_sent_only_after_issue_and_archive_evidence() -> None:
     direct_close_rules = [
         transition
         for transition in seed_data.WORKFLOW_TRANSITIONS
@@ -242,7 +242,10 @@ async def test_uncertain_followup_count_changes_only_after_confirmed_sent(monkey
         followup_count=0,
         max_followup_count=3,
     )
-    session = SimpleNamespace(get=AsyncMock(side_effect=[reply, ticket]))
+    session = SimpleNamespace(
+        get=AsyncMock(side_effect=[reply, ticket]),
+        scalar=AsyncMock(return_value=None),
+    )
     transition = AsyncMock()
     monkeypatch.setattr(replies, "transition_ticket", transition)
     monkeypatch.setattr(replies, "log_operation", AsyncMock())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import re
@@ -13,29 +14,22 @@ from typing import Any, Iterator
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 SCENARIOS = {"normal", "delayed", "partial", "invalid_rma", "multi_rma", "timeout", "late"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class RelayRecord(BaseModel):
-    source_request_id: str | None = Field(default=None, min_length=8, max_length=128)
-    submission_key: str | None = Field(default=None, min_length=8, max_length=128)
+    request_id: str = Field(alias="RequestID", min_length=36, max_length=36)
     ticket_id: int | None = None
     ticket_item_id: int | None = None
     relay_export_id: int | None = None
     sn: str = Field(min_length=1, max_length=100)
-    model_config = {"extra": "allow"}
-
-    @model_validator(mode="after")
-    def require_source_request_id(self) -> "RelayRecord":
-        value = self.source_request_id or self.submission_key
-        if not value:
-            raise ValueError("SOURCE_REQUEST_ID_REQUIRED")
-        self.source_request_id = value
-        return self
+    model_config = {"extra": "allow", "populate_by_name": True}
 
 
 class RelayBatch(BaseModel):
@@ -43,7 +37,7 @@ class RelayBatch(BaseModel):
 
 
 class RelayQuery(BaseModel):
-    source_request_ids: list[str] = Field(min_length=1)
+    request_ids: list[str] = Field(alias="RequestIDs", min_length=1)
 
 
 class RelayControl(BaseModel):
@@ -63,9 +57,9 @@ class TestRelayStore:
 
     def __init__(self, path: Path):
         self.path = path.resolve()
-        self.call_id_namespace = hashlib.sha256(
+        self.call_id_namespace = int(hashlib.sha256(
             str(self.path).casefold().encode("utf-8")
-        ).hexdigest()[:10].upper()
+        ).hexdigest()[:12], 16) % 1_000_000_000
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -107,12 +101,14 @@ class TestRelayStore:
                 """
             )
             columns = {str(row[1]) for row in db.execute("PRAGMA table_info(records)").fetchall()}
-            if "source_request_id" not in columns:
-                db.execute("ALTER TABLE records ADD COLUMN source_request_id TEXT")
-                db.execute("UPDATE records SET source_request_id = submission_key WHERE source_request_id IS NULL")
+            if "request_id" not in columns:
+                db.execute("ALTER TABLE records ADD COLUMN request_id TEXT")
+                if "source_request_id" in columns:
+                    db.execute("UPDATE records SET request_id = source_request_id WHERE request_id IS NULL")
+                else:
+                    db.execute("UPDATE records SET request_id = submission_key WHERE request_id IS NULL")
             db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uk_records_source_request_id "
-                "ON records(source_request_id)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS uk_records_request_id ON records(request_id)"
             )
 
     @staticmethod
@@ -143,22 +139,22 @@ class TestRelayStore:
         return rma_no
 
     def _create_in_db(self, db: sqlite3.Connection, payload: RelayRecord) -> dict[str, Any]:
-        source_request_id = str(payload.source_request_id)
+        request_id = str(payload.request_id)
         existing = db.execute(
-            "SELECT call_id FROM records WHERE source_request_id = ?", (source_request_id,)
+            "SELECT call_id FROM records WHERE request_id = ?", (request_id,)
         ).fetchone()
         if existing:
             return {
                 "status": "succeeded",
-                "source_request_id": source_request_id,
+                "RequestID": request_id,
                 "remote_record_key": str(existing["call_id"]),
                 "idempotent_reuse": True,
             }
         record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
-        call_id = f"TESTCALL-{self.call_id_namespace}-{record_id:08d}"
+        call_id = f"{self.call_id_namespace:09d}{record_id:09d}"
         scenario = self._setting(db, "default_scenario", "normal")
         delay = int(self._setting(db, "default_delay_seconds", "0"))
-        ticket_key = str(payload.ticket_id or payload.relay_export_id or source_request_id)
+        ticket_key = str(payload.ticket_id or payload.relay_export_id or request_id)
         if scenario == "multi_rma":
             ticket_key = f"{ticket_key}:{payload.ticket_item_id or payload.sn}"
         rma_no = self._next_rma(db, ticket_key)
@@ -173,14 +169,14 @@ class TestRelayStore:
         db.execute(
             """
                 INSERT INTO records(
-                    id, submission_key, source_request_id, call_id, ticket_id, ticket_item_id, sn,
+                    id, submission_key, request_id, call_id, ticket_id, ticket_item_id, sn,
                     payload_json, scenario, rma_no, available_at, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record_id,
-                source_request_id,
-                source_request_id,
+                request_id,
+                request_id,
                 call_id,
                 payload.ticket_id,
                 payload.ticket_item_id,
@@ -194,7 +190,7 @@ class TestRelayStore:
         )
         return {
             "status": "succeeded",
-            "source_request_id": source_request_id,
+            "RequestID": request_id,
             "remote_record_key": call_id,
             "idempotent_reuse": False,
         }
@@ -208,14 +204,14 @@ class TestRelayStore:
             rows = [self._create_in_db(db, item) for item in payload.items]
             return {"status": "succeeded", "items": rows}
 
-    def query(self, source_request_ids: list[str]) -> list[dict[str, Any]]:
-        if not source_request_ids:
+    def query(self, request_ids: list[str]) -> list[dict[str, Any]]:
+        if not request_ids:
             return []
         with self.connection() as db:
-            placeholders = ",".join("?" for _ in source_request_ids)
+            placeholders = ",".join("?" for _ in request_ids)
             rows = db.execute(
-                f"SELECT * FROM records WHERE source_request_id IN ({placeholders})",
-                source_request_ids,
+                f"SELECT * FROM records WHERE request_id IN ({placeholders})",
+                request_ids,
             ).fetchall()
             result: list[dict[str, Any]] = []
             for row in rows:
@@ -226,9 +222,10 @@ class TestRelayStore:
                         rma_no = row["rma_no"]
                 result.append(
                     {
-                        "source_request_id": row["source_request_id"],
+                        "RequestID": row["request_id"],
                         "sn": row["sn"],
                         "rma_no": rma_no,
+                        "remote_call_id": row["call_id"],
                     }
                 )
             return result
@@ -317,7 +314,7 @@ def create_app(*, database: Path, token: str) -> FastAPI:
 
     @app.post("/records/query")
     def query_records(payload: RelayQuery, _: None = Depends(authorize)) -> dict[str, Any]:
-        return {"items": store.query(payload.source_request_ids)}
+        return {"items": store.query(payload.request_ids)}
 
     @app.get("/records/{call_id}")
     def get_record(call_id: str, _: None = Depends(authorize)) -> dict[str, Any]:
@@ -355,11 +352,22 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--database", type=Path, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token")
     args = parser.parse_args()
     if args.host not in LOOPBACK_HOSTS:
         raise SystemExit("TEST_RELAY_LOOPBACK_BIND_REQUIRED")
-    uvicorn.run(create_app(database=args.database, token=args.token), host=args.host, port=args.port)
+    token = (
+        args.token
+        or os.environ.get("TEST_RELAY_TOKEN")
+        or dotenv_values(PROJECT_ROOT / ".env").get("TEST_RELAY_TOKEN")
+    )
+    if not token:
+        raise SystemExit("TEST_RELAY_TOKEN_REQUIRED")
+    uvicorn.run(
+        create_app(database=args.database, token=str(token)),
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":

@@ -7,14 +7,35 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Email, EmailAttachment, ManualReviewTask
+from app.core.email_classification import AUTO_INTENTS, HandlingLevel
+from app.models import (
+    Email,
+    EmailAttachment,
+    MailFetchRecord,
+    ManualReviewTask,
+    RepairTicketItem,
+    SnAsset,
+)
 from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
 from app.services.emails import reparse_email
+from app.services.eml import attachment_blobs_from_eml_bytes, payload_from_eml_bytes
+from app.services.attachment_precheck import filter_decorative_attachments
+from app.services import emails as email_service
+from app.services.jobs import enqueue_job
+from app.services.storage import download_oss_object_bytes, upload_bytes_to_oss
 from app.services.replies import create_reply_draft
 from app.services.tickets import get_ticket, get_ticket_detail
 from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.notifications import resolve_notifications_for_target
+from app.services.sn_master_resolution import (
+    MANUAL,
+    MASTER_DATA_AMBIGUOUS,
+    RESOLVED,
+    asset_snapshot,
+    normalize_sn,
+    resolve_assets,
+)
 from app.services.workflow import OPEN_TASK_STATUSES, transition_ticket
 
 TASK_FIELDS = (
@@ -38,6 +59,97 @@ TASK_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+async def _apply_manual_sn_master_selections(
+    session: AsyncSession,
+    *,
+    ticket_id: int,
+    result_payload: dict[str, Any] | None,
+) -> None:
+    raw = (result_payload or {}).get("sn_master_selections")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="SN_MASTER_SELECTIONS_REQUIRED",
+        )
+    selections: dict[int, int] = {}
+    try:
+        for row in raw:
+            selections[int(row["ticket_item_id"])] = int(row["sn_asset_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="SN_MASTER_SELECTION_INVALID",
+        ) from exc
+
+    items = list(
+        (
+            await session.execute(
+                select(RepairTicketItem).where(RepairTicketItem.ticket_id == ticket_id)
+            )
+        ).scalars().all()
+    )
+    ambiguous = {
+        item.id: item
+        for item in items
+        if item.sn_master_resolution_status == MASTER_DATA_AMBIGUOUS
+    }
+    if not ambiguous or set(selections) != set(ambiguous):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SN_MASTER_SELECTION_SET_MISMATCH",
+        )
+    for item_id, item in ambiguous.items():
+        snapshot = dict(item.sn_master_resolution_snapshot or {})
+        candidate_ids = {int(value) for value in snapshot.get("candidate_ids", [])}
+        selected_id = selections[item_id]
+        if selected_id not in candidate_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="SN_MASTER_SELECTION_NOT_A_CANDIDATE",
+            )
+        asset = await session.get(SnAsset, selected_id)
+        if (
+            asset is None
+            or asset.asset_status != "valid"
+            or normalize_sn(asset.sn) != normalize_sn(item.sn)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="SN_MASTER_SELECTION_STALE",
+            )
+        current_rows = list(
+            (
+                await session.execute(
+                    select(SnAsset).where(SnAsset.sn == normalize_sn(item.sn))
+                )
+            ).scalars().all()
+        )
+        current_resolution = resolve_assets(item.sn or "", current_rows)
+        if (
+            current_resolution.status != MASTER_DATA_AMBIGUOUS
+            or selected_id not in {row.id for row in current_resolution.candidates}
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="SN_MASTER_SELECTION_STALE",
+            )
+        snapshot.update(
+            {
+                "status": RESOLVED,
+                "method": MANUAL,
+                "reason": "MANUAL_CANDIDATE_SELECTION",
+                "resolved_asset": asset_snapshot(asset),
+            }
+        )
+        item.sn_asset_id = asset.id
+        item.sn_master_resolution_status = RESOLVED
+        item.sn_master_resolution_method = MANUAL
+        item.sn_master_resolution_snapshot = snapshot
+        item.sn_master_resolved_at = utcnow()
+        item.material_code = asset.material_code
+        item.material_name = asset.material_name
 
 
 def serialize_task(task: ManualReviewTask) -> dict[str, Any]:
@@ -238,6 +350,7 @@ async def resolve_task(
     next_action: str,
     resolution_type: str | None = None,
     result_payload: dict[str, Any] | None = None,
+    target_first_intent: str | None = None,
 ) -> dict[str, Any]:
     task = await get_task(session, task_id)
     if task.status in {"resolved", "closed"}:
@@ -245,7 +358,78 @@ async def resolve_task(
     ticket = await get_ticket(session, task.ticket_id) if task.ticket_id else None
     followup_result: dict[str, Any] | None = None
     reparse_result: dict[str, Any] | None = None
-    if next_action == "finish_external_handling":
+    if next_action == "promote_to_first":
+        if task.email_id is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_LEVEL_TASK_REQUIRED")
+        if target_first_intent not in AUTO_INTENTS:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="TARGET_FIRST_INTENT_REQUIRED")
+        email = await session.get(Email, task.email_id, with_for_update=True)
+        if email is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+        if email.persistence_tier == "business" and email.classification_locked:
+            reparse_result = {"status": "already_promoted", "email_id": email.id}
+        else:
+            if email.raw_eml_oss_object_id is None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RAW_EML_REQUIRED_FOR_PROMOTION")
+            raw = await download_oss_object_bytes(session, oss_object_id=email.raw_eml_oss_object_id)
+            payload = payload_from_eml_bytes(raw, mailbox_account=email.mailbox_account, folder_name=email.folder_name)
+            blobs = attachment_blobs_from_eml_bytes(raw)
+            blobs, _ = filter_decorative_attachments(payload, blobs)
+            attachments = (await session.execute(
+                select(EmailAttachment).where(EmailAttachment.email_id == email.id).order_by(EmailAttachment.id)
+            )).scalars().all()
+            if len(attachments) != len(blobs):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="PROMOTION_ATTACHMENT_COUNT_MISMATCH")
+            for attachment, blob in zip(attachments, blobs, strict=True):
+                if attachment.oss_object_id is None:
+                    oss_object = await upload_bytes_to_oss(
+                        session,
+                        content=blob["content"],
+                        original_file_name=blob.get("file_name"),
+                        content_type=blob.get("content_type"),
+                        source_type="email_attachment",
+                        user_id=user_id,
+                    )
+                    attachment.oss_object_id = oss_object.id
+                attachment.parse_status = "pending"
+            thread = await email_service._find_thread_for_email(
+                session,
+                message_id=email.message_id,
+                in_reply_to=email.in_reply_to,
+                references_header=email.references_header,
+                normalized_subject=email.normalized_subject,
+                from_domain=email.from_domain,
+            )
+            email.thread_id = thread.id
+            thread.latest_email_id = email.id
+            thread.email_count = int(thread.email_count or 0) + 1
+            thread.thread_version = int(thread.thread_version or 0) + 1
+            fetch_record = await session.scalar(
+                select(MailFetchRecord).where(MailFetchRecord.email_id == email.id).order_by(MailFetchRecord.id.desc())
+            )
+            if fetch_record is not None:
+                fetch_record.thread_id = thread.id
+                fetch_record.processing_stage = "first_promoted"
+            email.persistence_tier = "business"
+            email.classification_locked = True
+            email.intent_type = target_first_intent
+            email.handling_level = str(HandlingLevel.AUTO_REPAIR)
+            email.classification_version = "manual-promotion-v1"
+            email.classification_confidence = 1
+            email.classification_reason_code = "MANUAL_PROMOTE_TO_FIRST"
+            email.parse_status = "pending"
+            email.processing_stage = "promoted_first"
+            email.retryable = True
+            await enqueue_job(
+                session,
+                job_type="email_parse",
+                resource_type="email",
+                resource_id=email.id,
+                idempotency_key=f"email_parse:{email.id}:manual-promotion",
+                metadata={"user_id": user_id, "reason": "UNKNOWN manual promotion", "mode": "field_extract"},
+            )
+            reparse_result = {"status": "promoted", "email_id": email.id, "intent_type": target_first_intent}
+    elif next_action == "finish_external_handling":
         if ticket is not None and ticket.ticket_category == "manual_business":
             await transition_ticket(
                 session,
@@ -271,6 +455,15 @@ async def resolve_task(
     elif ticket is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_LEVEL_TASK_ACTION_INVALID")
     elif next_action == "transition_ready_for_export":
+        if (
+            task.task_type == "sn_master_resolution_failed"
+            and (result_payload or {}).get("sn_master_selections")
+        ):
+            await _apply_manual_sn_master_selections(
+                session,
+                ticket_id=ticket.id,
+                result_payload=result_payload,
+            )
         safety_result = await validate_and_mark_ready_for_export(
             session,
             ticket_id=ticket.id,

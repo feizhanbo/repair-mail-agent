@@ -13,9 +13,11 @@ from app.models import (
     RepairTicketItem,
     SnAsset,
     TicketRelayExport,
+    User,
 )
 from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.services import business_resolution, customer_policies, sap_rma
+from app.services.sn_master_resolution import asset_snapshot
 
 
 class ScalarRows:
@@ -79,8 +81,6 @@ def board(
         return_location=location,
         route_type=route_type,
         customer_scope=scope,
-        material_code=code,
-        material_name=name,
         need_ship_to_beijing=location == "beijing",
         shipping_address=f"{location} address",
         shipping_contact="Receiver",
@@ -109,7 +109,7 @@ async def test_overseas_route_does_not_require_board_fields() -> None:
 
 
 @pytest.mark.anyio
-async def test_domestic_route_uses_board_code_not_sap_material_code() -> None:
+async def test_domestic_route_never_uses_sap_material_code_as_board_code() -> None:
     ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
     item = RepairTicketItem(
         id=2,
@@ -127,6 +127,27 @@ async def test_domestic_route_uses_board_code_not_sap_material_code() -> None:
 
     assert result["status"] == "needs_manual"
     assert result["message"] == "BOARD_INFORMATION_REQUIRED"
+
+
+@pytest.mark.anyio
+async def test_domestic_route_uses_board_code_when_material_code_is_different() -> None:
+    ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        material_code="SAP-MATERIAL-001",
+        board_code="BOARD-ROUTE-001",
+    )
+
+    result = await business_resolution.resolve_item_return_route(
+        QueueSession(execute_rows=[[board("BOARD-ROUTE-001", "tianjin")]]),
+        ticket=ticket,
+        item=item,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["route_source"] == "domestic_board_match"
 
 
 @pytest.mark.anyio
@@ -244,6 +265,7 @@ async def test_policy_resolution_confirms_customer_and_snapshots_scope() -> None
     )
     asset = SnAsset(
         id=3,
+        ins_id=3001,
         sn="SN0001",
         customer_code="CM001",
         customer_name="Acme(上海)有限公司",
@@ -252,6 +274,9 @@ async def test_policy_resolution_confirms_customer_and_snapshots_scope() -> None
         asset_status="valid",
         warranty_end_date=date(2025, 1, 1),
     )
+    item.sn_master_resolution_status = "RESOLVED"
+    item.sn_master_resolution_method = "LATEST_DATE"
+    item.sn_master_resolution_snapshot = {"resolved_asset": asset_snapshot(asset)}
     policy = CustomerServicePolicy(
         id=4,
         policy_code="P1",
@@ -315,6 +340,7 @@ async def test_unresolved_policy_clears_stale_decision_and_marks_manual(
     )
     asset = SnAsset(
         id=3,
+        ins_id=3001,
         sn="SN0001",
         customer_code="CM001",
         customer_name="Acme",
@@ -322,6 +348,9 @@ async def test_unresolved_policy_clears_stale_decision_and_marks_manual(
         material_name="Material",
         asset_status="valid",
     )
+    item.sn_master_resolution_status = "RESOLVED"
+    item.sn_master_resolution_method = "LATEST_DATE"
+    item.sn_master_resolution_snapshot = {"resolved_asset": asset_snapshot(asset)}
 
     result = await business_resolution.resolve_and_snapshot_ticket_policy(
         QueueSession(
@@ -345,6 +374,7 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
         id=1,
         ticket_no="T1",
         version=2,
+        assigned_user_id=9,
         customer_code="CM001",
         customer_name="Acme",
         customer_scope="domestic",
@@ -368,6 +398,7 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
         ticket_id=1,
         line_no=1,
         sn="SN0001",
+        sn_asset_id=10,
         material_code="MAT1",
         material_name="Material",
         return_location="tianjin",
@@ -385,7 +416,24 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
         payload_hash="a" * 64,
         payload_snapshot={},
     )
-    session = QueueSession(execute_rows=[[], [item]])
+    asset = SnAsset(
+        id=10,
+        ins_id=1001,
+        sn="SN0001",
+        customer_code="CM001",
+        customer_name="Acme",
+        material_code="MAT1",
+        material_name="Material",
+        asset_status="valid",
+    )
+    item.sn_master_resolution_status = "RESOLVED"
+    item.sn_master_resolution_method = "LATEST_DATE"
+    item.sn_master_resolution_snapshot = {"resolved_asset": asset_snapshot(asset)}
+    owner = User(id=9, username="owner", real_name="系统负责人", password_hash="x")
+    session = QueueSession(
+        execute_rows=[[], [item]],
+        get_values={(SnAsset, 10): asset, (User, 9): owner},
+    )
 
     rows = await sap_rma.ensure_export_lines(
         session,
@@ -399,7 +447,81 @@ async def test_sap_export_uses_customer_mailing_fields_and_keeps_return_snapshot
     assert row.contact_person == "Customer Contact"
     assert row.contact_phone == "13800000000"
     assert row.charge_status == "chargeable"
+    assert row.policy_snapshot["sap_owner_name"] == "系统负责人"
     assert row.policy_snapshot["shipping_address"] == "Repair return address"
+
+
+@pytest.mark.anyio
+async def test_sap_submission_uses_export_frozen_master_snapshot() -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="T1",
+        customer_scope="domestic",
+        request_date=date(2026, 7, 31),
+        mailing_address="Customer mailing address",
+        contact_person="Customer Contact",
+        contact_phone="13800000000",
+        contact_email="customer@example.com",
+    )
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        sn="SN0001",
+        sn_asset_id=10,
+        failure_description="Failure",
+    )
+    frozen = SnAsset(
+        id=10,
+        ins_id=1001,
+        sn="SN0001",
+        customer_code="CM001",
+        customer_name="Frozen customer",
+        material_code="Z.SM.XA",
+        material_name="Frozen material",
+        asset_status="valid",
+        warranty_end_date=date(2027, 1, 1),
+    )
+    changed = SnAsset(
+        id=11,
+        ins_id=1002,
+        sn="SN0001",
+        customer_code="CM999",
+        customer_name="Changed customer",
+        material_code="Z.SM.XAB",
+        material_name="Changed material",
+        asset_status="valid",
+        warranty_end_date=date(2028, 1, 1),
+    )
+    item.sn_master_resolution_snapshot = {"resolved_asset": asset_snapshot(changed)}
+    line = ExportSap(
+        id=3,
+        ticket_id=1,
+        ticket_item_id=2,
+        ticket_version=1,
+        request_id="01234567-89ab-4def-8123-456789abcdef",
+        payload_hash="a" * 64,
+        policy_snapshot={
+            "currency": "CNY",
+            "shipping_fee_text": "0",
+            "repair_price": "0",
+            "sn_master_resolution_snapshot": {"resolved_asset": asset_snapshot(frozen)},
+        },
+        status="pending",
+        sn="SN0001",
+        customer_code="CM001",
+        material_code="Z.SM.XA",
+    )
+
+    result = await sap_rma._submission_items(
+        QueueSession(get_values={(RepairTicketItem, 2): item}),
+        ticket=ticket,
+        lines=[line],
+    )
+
+    assert result[0].payload["insID"] == 1001
+    assert result[0].payload["customer"] == "CM001"
+    assert result[0].payload["itemCode"] == "Z.SM.XA"
 
 
 @pytest.mark.parametrize(

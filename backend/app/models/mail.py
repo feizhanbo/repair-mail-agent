@@ -85,10 +85,10 @@ class Email(TimestampMixin, Base):
         Index("idx_emails_fetch_job", "fetch_job_run_id"),
         Index("idx_emails_direction_status_time", "mail_direction", "parse_status", "received_at"),
         Index("idx_emails_intent", "intent_type"),
-        Index("idx_emails_intent_subtype", "intent_subtype"),
         Index("idx_emails_handling_intent", "handling_level", "intent_type"),
         Index("idx_emails_from_domain", "from_domain"),
         Index("idx_emails_processing_trace", "processing_trace_id"),
+        Index("idx_emails_persistence_tier", "persistence_tier"),
         UniqueConstraint("source_content_sha256", name="uk_emails_source_content_sha256"),
     )
 
@@ -97,6 +97,8 @@ class Email(TimestampMixin, Base):
     thread_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_threads.id", name="fk_emails_thread"))
     raw_eml_oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_emails_raw_eml_oss"))
     processing_trace_id: Mapped[str | None] = mapped_column(String(100))
+    persistence_tier: Mapped[str] = mapped_column(String(20), nullable=False, server_default="business")
+    classification_locked: Mapped[bool] = bool_column(False)
     source_content_sha256: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     mail_direction: Mapped[str] = mapped_column(String(20), nullable=False, server_default="inbound")
     mailbox_account: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -121,7 +123,6 @@ class Email(TimestampMixin, Base):
     parse_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
     processing_stage: Mapped[str] = mapped_column(String(50), nullable=False, server_default="fetched")
     intent_type: Mapped[str | None] = mapped_column(String(50))
-    intent_subtype: Mapped[str | None] = mapped_column(String(50))
     handling_level: Mapped[str | None] = mapped_column(String(30))
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
@@ -199,6 +200,13 @@ class EmailAttachment(CreatedAtMixin, Base):
     oss_object_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("oss_objects.id", name="fk_email_attachments_oss"))
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str | None] = mapped_column(String(255))
+    original_content_type: Mapped[str | None] = mapped_column(String(255))
+    detected_content_type: Mapped[str | None] = mapped_column(String(255))
+    content_disposition: Mapped[str | None] = mapped_column(String(30))
+    resource_role: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="regular_attachment"
+    )
+    file_extension: Mapped[str | None] = mapped_column(String(30))
     file_size: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True))
     file_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     is_inline: Mapped[bool] = bool_column(False)

@@ -4,8 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "q4l9g0b1c2d3"
-EXPECTED_BUSINESS_TABLE_COUNT = 37
+EXPECTED_REVISION = "b5w0x1y2z3a4"
+EXPECTED_BUSINESS_TABLE_COUNT = 41
 
 EXPECTED = {
     "export_sap": {
@@ -13,7 +13,7 @@ EXPECTED = {
             "ticket_id",
             "ticket_item_id",
             "relay_export_id",
-            "source_request_id",
+            "RequestID",
             "payload_hash",
             "remote_call_id",
             "rma_no",
@@ -24,7 +24,7 @@ EXPECTED = {
             "charge_status",
         },
         "unique": {
-            "uk_export_sap_source_request_id",
+            "uk_export_sap_request_id",
             "uk_export_sap_remote_call_id",
             "uk_export_sap_item_snapshot",
         },
@@ -61,7 +61,6 @@ EXPECTED = {
             "return_location",
             "route_type",
             "customer_scope",
-            "material_code",
             "need_ship_to_beijing",
         },
         "unique": set(),
@@ -93,6 +92,10 @@ EXPECTED = {
             "return_phone",
             "return_route_status",
             "return_route_snapshot",
+            "sn_master_resolution_status",
+            "sn_master_resolution_method",
+            "sn_master_resolution_snapshot",
+            "sn_master_resolved_at",
         },
         "unique": {"uk_ticket_items_line"},
         "foreign_keys": {
@@ -143,16 +146,37 @@ EXPECTED = {
         "unique": {"uk_sap_sn_sync_batches_no"},
         "foreign_keys": {"fk_sap_sn_sync_batches_approved_by"},
     },
+    "sn_assets": {
+        "columns": {
+            "ins_id",
+            "sn",
+            "customer_code",
+            "customer_name",
+            "material_code",
+            "material_name",
+            "parent_sn",
+            "top_sn",
+            "parent_material_code",
+            "top_material_code",
+            "warranty_end_date",
+            "source_system",
+            "external_id",
+            "source_row_hash",
+        },
+        "unique": {"uk_sn_assets_source_ins_id", "uk_sn_assets_external"},
+        "foreign_keys": {"fk_sn_assets_imported_by"},
+    },
     "sap_sn_staging": {
         "columns": {
             "sync_batch_id",
+            "ins_id",
             "sn",
             "customer_code",
             "material_code",
             "values_json",
             "row_hash",
         },
-        "unique": {"uk_sap_sn_staging_batch_sn"},
+        "unique": {"uk_sap_sn_staging_batch_ins_id"},
         "foreign_keys": {"fk_sap_sn_staging_batch"},
     },
 }

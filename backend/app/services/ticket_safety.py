@@ -30,6 +30,14 @@ from app.services.common import utcnow
 from app.services.sap_sn_sync import sn_snapshot_freshness
 from app.services.external_relay import relay_configured
 from app.services.jobs import enqueue_job
+from app.services.sn_master_resolution import (
+    MASTER_DATA_AMBIGUOUS,
+    MASTER_DATA_UNRESOLVED,
+    MANUAL,
+    RESOLVED,
+    ResolutionResult,
+    resolve_assets,
+)
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 
@@ -101,15 +109,11 @@ def _sn_input_snapshot(ticket: RepairTicket, items: list[RepairTicketItem]) -> d
     return {
         "ticket_id": ticket.id,
         "ticket_version": ticket.version,
-        "customer_code": _clean_text(ticket.customer_code),
-        "customer_name": _clean_text(ticket.customer_name),
         "items": [
             {
                 "id": item.id,
                 "line_no": item.line_no,
                 "sn": _clean_text(item.sn).upper(),
-                "material_code": _clean_text(item.material_code),
-                "material_name": _clean_text(item.material_name),
             }
             for item in items
         ],
@@ -130,35 +134,6 @@ async def build_sn_validation_report(
 ) -> dict[str, Any]:
     """Validate SN evidence only. This stage never marks a ticket exportable."""
     ticket, items = await _ticket_and_items(session, ticket_id)
-    if persist:
-        normalized_sns = [_clean_text(item.sn).upper() for item in items if _clean_text(item.sn)]
-        assets = list(
-            (
-                await session.execute(select(SnAsset).where(SnAsset.sn.in_(normalized_sns)))
-            ).scalars().all()
-        ) if normalized_sns else []
-        customer_codes = {asset.customer_code for asset in assets if asset.customer_code}
-        customer_names = {asset.customer_name for asset in assets if asset.customer_name}
-        assets_by_sn = {_clean_text(asset.sn).upper(): asset for asset in assets if _clean_text(asset.sn)}
-        normalized_names = {_normalized_customer_name(name) for name in customer_names}
-        if (
-            not ticket.customer_code
-            and ticket.customer_name
-            and len(customer_codes) == 1
-            and _normalized_customer_name(ticket.customer_name) in normalized_names
-        ):
-            ticket.customer_code = next(iter(customer_codes))
-        # SN validation hashes the post-enrichment state. Otherwise filling
-        # material data during the same validation immediately makes the
-        # freshly stored hash stale when the full safety report recomputes it.
-        for item in items:
-            asset = assets_by_sn.get(_clean_text(item.sn).upper())
-            if asset is None:
-                continue
-            if not item.material_code:
-                item.material_code = asset.material_code
-            if not item.material_name:
-                item.material_name = asset.material_name
     input_snapshot = _sn_input_snapshot(ticket, items)
     input_hash = _stable_hash(input_snapshot)
 
@@ -175,11 +150,24 @@ async def build_sn_validation_report(
             "snapshot": ticket.sn_validation_snapshot,
             "input_hash": input_hash,
             "reused": True,
+            "master_resolution_errors": ticket.sn_validation_snapshot.get(
+                "master_resolution_errors", {}
+            ),
         }
 
     errors: dict[str, str] = {}
     checks: list[dict[str, Any]] = []
     normalized_sns = [_clean_text(item.sn).upper() for item in items if _clean_text(item.sn)]
+    assets = list(
+        (
+            await session.execute(select(SnAsset).where(SnAsset.sn.in_(normalized_sns)))
+        ).scalars().all()
+    ) if normalized_sns else []
+    assets_by_sn: dict[str, list[SnAsset]] = {}
+    for row in assets:
+        assets_by_sn.setdefault(_clean_text(row.sn).upper(), []).append(row)
+    resolved_assets: list[SnAsset] = []
+    resolution_errors: dict[str, str] = {}
     duplicate_sns = {sn for sn, count in Counter(normalized_sns).items() if count > 1}
     if not items:
         errors["items"] = "at_least_one_item_required"
@@ -190,7 +178,7 @@ async def build_sn_validation_report(
         settings.RELAY_SQLSERVER_ENABLED
         and settings.RELAY_ADAPTER.strip().lower() == "sqlserver"
     )
-    source_system = "sqlserver_snapshot+local_sn_assets" if sqlserver_live else "local_sn_assets"
+    source_system = "sqlserver+local_sn_assets" if sqlserver_live else "local_sn_assets"
     if sqlserver_live:
         freshness = await sn_snapshot_freshness(session)
         if not freshness["fresh"]:
@@ -205,7 +193,8 @@ async def build_sn_validation_report(
             "source": source_system,
             "status": "failed",
         }
-        asset: SnAsset | None = None
+        resolution: ResolutionResult | None = None
+        asset_rows: list[SnAsset] = []
         if not normalized_sn:
             errors[f"{prefix}.sn"] = "required"
         elif not _SN_PATTERN.fullmatch(normalized_sn):
@@ -213,29 +202,38 @@ async def build_sn_validation_report(
         elif normalized_sn in duplicate_sns:
             errors[f"{prefix}.sn"] = "duplicate_sn"
         else:
-            asset = await session.scalar(select(SnAsset).where(SnAsset.sn == normalized_sn))
-            if asset is None:
+            asset_rows = assets_by_sn.get(normalized_sn, [])
+            if not asset_rows:
                 errors[f"{prefix}.sn"] = "sn_not_found"
             else:
+                resolution = resolve_assets(normalized_sn, asset_rows)
+                previous_snapshot = item.sn_master_resolution_snapshot or {}
+                previous_asset = previous_snapshot.get("resolved_asset") or {}
+                if (
+                    resolution.status == MASTER_DATA_AMBIGUOUS
+                    and item.sn_master_resolution_status == RESOLVED
+                    and item.sn_master_resolution_method == MANUAL
+                    and previous_asset.get("id") in {row.id for row in resolution.candidates}
+                ):
+                    selected = next(
+                        row for row in resolution.candidates if row.id == previous_asset["id"]
+                    )
+                    resolution = ResolutionResult(
+                        normalized_sn,
+                        RESOLVED,
+                        selected,
+                        MANUAL,
+                        "MANUAL_CANDIDATE_SELECTION",
+                        resolution.candidates,
+                        resolution.all_records,
+                    )
                 check.update(
                     {
-                        "asset_id": asset.id,
-                        "asset_status": asset.asset_status,
-                        "asset_customer_code": asset.customer_code,
-                        "asset_customer_name": asset.customer_name,
-                        "asset_material_code": asset.material_code,
-                        "asset_material_name": asset.material_name,
-                        "warranty_start_date": asset.warranty_start_date.isoformat() if asset.warranty_start_date else None,
-                        "warranty_end_date": asset.warranty_end_date.isoformat() if asset.warranty_end_date else None,
-                        "asset_source_system": asset.source_system,
+                        "record_count": len(asset_rows),
+                        "valid_record_count": sum(row.asset_status == "valid" for row in asset_rows),
+                        "master_resolution": resolution.snapshot(),
                     }
                 )
-                if asset.asset_status != "valid":
-                    errors[f"{prefix}.sn"] = "sn_not_valid"
-                if ticket.customer_code and asset.customer_code != ticket.customer_code:
-                    errors[f"{prefix}.customer"] = "sn_customer_mismatch"
-                if item.material_code and asset.material_code != item.material_code:
-                    errors[f"{prefix}.material"] = "sn_material_mismatch"
 
         item_errors = {key: value for key, value in errors.items() if key.startswith(prefix)}
         passed = not item_errors
@@ -246,23 +244,41 @@ async def build_sn_validation_report(
         if persist:
             item.sn = normalized_sn or item.sn
             item.validation_status = "pass" if passed else "failed"
-            item.validation_message = "SN core safety validation passed" if passed else "; ".join(item_errors.values())[:500]
-            if asset is not None:
-                item.sn_asset_id = asset.id
-                if not item.material_code:
-                    item.material_code = asset.material_code
-                if not item.material_name:
-                    item.material_name = asset.material_name
+            item.validation_message = "SN exists in master data" if passed else "; ".join(item_errors.values())[:500]
+            if resolution is not None:
+                item.sn_master_resolution_status = resolution.status
+                item.sn_master_resolution_method = resolution.method
+                item.sn_master_resolution_snapshot = resolution.snapshot()
+                item.sn_master_resolved_at = utcnow() if resolution.status == RESOLVED else None
+                if resolution.asset is not None:
+                    item.sn_asset_id = resolution.asset.id
+                    item.material_code = resolution.asset.material_code
+                    item.material_name = resolution.asset.material_name
+                    resolved_assets.append(resolution.asset)
+                else:
+                    item.sn_asset_id = None
+                    item.material_code = None
+                    item.material_name = None
+                    resolution_errors[f"{prefix}.master_resolution"] = resolution.status
+            else:
+                item.sn_asset_id = None
+                item.sn_master_resolution_status = "pending"
+                item.sn_master_resolution_method = None
+                item.sn_master_resolution_snapshot = None
+                item.sn_master_resolved_at = None
             session.add(
                 SnValidationResult(
                     ticket_id=ticket.id,
                     ticket_item_id=item.id,
                     sn=normalized_sn,
-                    matched_sn_asset_id=asset.id if asset else None,
-                    check_exists=asset is not None,
-                    check_valid=asset.asset_status == "valid" if asset else False,
-                    check_customer_match=(not ticket.customer_code or ticket.customer_code == asset.customer_code) if asset else False,
-                    check_material_match=(not item.material_code or item.material_code == asset.material_code) if asset else False,
+                    matched_sn_asset_id=resolution.asset.id if resolution and resolution.asset else None,
+                    check_exists=bool(asset_rows),
+                    check_valid=any(row.asset_status == "valid" for row in asset_rows),
+                    check_customer_match=(
+                        not ticket.customer_code
+                        or ticket.customer_code == resolution.asset.customer_code
+                    ) if resolution and resolution.asset else None,
+                    check_material_match=True if resolution and resolution.asset else None,
                     need_ship_to_beijing=None,
                     result_status="pass" if passed else "failed",
                     result_message=item.validation_message,
@@ -274,6 +290,14 @@ async def build_sn_validation_report(
                 )
             )
 
+    if persist and resolved_assets:
+        customer_codes = {row.customer_code for row in resolved_assets if row.customer_code}
+        customer_names = {row.customer_name for row in resolved_assets if row.customer_name}
+        if len(customer_codes) == 1:
+            ticket.customer_code = next(iter(customer_codes))
+        if len(customer_names) == 1:
+            ticket.customer_name = next(iter(customer_names))
+
     snapshot = {
         "ticket_id": ticket.id,
         "ticket_version": ticket.version,
@@ -281,6 +305,7 @@ async def build_sn_validation_report(
         "input_hash": input_hash,
         "source": source_system,
         "checks": checks,
+        "master_resolution_errors": resolution_errors,
     }
     passed = not errors
     if persist:
@@ -302,6 +327,7 @@ async def build_sn_validation_report(
         "snapshot": snapshot,
         "input_hash": input_hash,
         "reused": False,
+        "master_resolution_errors": resolution_errors,
     }
 
 
@@ -329,6 +355,36 @@ async def _ensure_sn_failure_task(
             session,
             ticket=ticket,
             task_type="sn_validation_failed",
+            trigger_reason=reason,
+            priority="high",
+            assigned_user_id=ticket.assigned_user_id,
+        )
+
+
+async def _ensure_master_resolution_task(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    user_id: int | None,
+    errors: dict[str, str],
+) -> None:
+    reason = "; ".join(f"{key}:{value}" for key, value in errors.items())[:500]
+    if ticket.current_status_code not in {"manual_review", "closed"}:
+        await transition_ticket(
+            session,
+            ticket=ticket,
+            to_status_code="manual_review",
+            trigger_event="manual_review_required",
+            user_id=user_id,
+            reason=reason,
+            manual_task_type="sn_master_resolution_failed",
+            manual_task_priority="high",
+        )
+    elif ticket.current_status_code == "manual_review":
+        await create_manual_task_if_missing(
+            session,
+            ticket=ticket,
+            task_type="sn_master_resolution_failed",
             trigger_reason=reason,
             priority="high",
             assigned_user_id=ticket.assigned_user_id,
@@ -432,6 +488,10 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
         errors["items"] = "maximum_300_items"
     for item in items:
         prefix = f"items.{item.line_no}"
+        if item.sn_master_resolution_status != RESOLVED or not item.sn_asset_id:
+            errors[f"{prefix}.master_resolution"] = (
+                item.sn_master_resolution_status or MASTER_DATA_UNRESOLVED
+            )
         if not item.material_code:
             errors[f"{prefix}.material_code"] = "required"
         if not item.material_name:
@@ -464,6 +524,10 @@ async def build_safety_report(session: AsyncSession, *, ticket_id: int) -> dict[
                 "remarks": item.remarks,
                 "accessories": item.accessories,
                 "validation_status": item.validation_status,
+                "sn_asset_id": item.sn_asset_id,
+                "sn_master_resolution_status": item.sn_master_resolution_status,
+                "sn_master_resolution_method": item.sn_master_resolution_method,
+                "sn_master_resolution_snapshot": item.sn_master_resolution_snapshot,
             }
         )
 
@@ -533,6 +597,20 @@ async def validate_and_mark_ready_for_export(
     sn_result = await validate_ticket_sn_core(session, ticket_id=ticket.id, user_id=user_id)
     if sn_result["status"] != "passed":
         return {"ticket_id": ticket.id, "status": "sn_validation_failed", "sn_result": sn_result, "jobs": []}
+    resolution_errors = sn_result["report"].get("master_resolution_errors", {})
+    if resolution_errors:
+        await _ensure_master_resolution_task(
+            session,
+            ticket=ticket,
+            user_id=user_id,
+            errors=resolution_errors,
+        )
+        return {
+            "ticket_id": ticket.id,
+            "status": "master_resolution_failed",
+            "sn_result": sn_result,
+            "jobs": [],
+        }
 
     policy_result = await resolve_and_snapshot_ticket_policy(
         session,

@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup, Comment
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Email
+from app.resources.signature_logo import ACCO_TEST_LOGO_CONTENT_ID, ACCO_TEST_LOGO_PNG
 from app.services.storage import (
     StorageConfigurationError,
     StorageUploadError,
@@ -223,18 +224,25 @@ def render_reply_history_from_eml(
     raw_hash = hashlib.sha256(raw_eml).hexdigest()
     mapping: dict[str, str] = {}
     resources: list[RelatedResource] = []
+    recovered_known_cids: list[str] = []
     for index, original_cid in enumerate(sorted(referenced_cids), start=1):
         matches = cid_index.get(original_cid, [])
         if not matches:
-            raise ReplyRenderError("REPLY_PARENT_CID_MISSING")
-        if len(matches) != 1:
-            raise ReplyRenderError("REPLY_PARENT_CID_CONFLICT")
-        part = matches[0]
-        content = _part_bytes(part)
+            if original_cid == _normalize_cid(ACCO_TEST_LOGO_CONTENT_ID):
+                content = ACCO_TEST_LOGO_PNG
+                maintype, subtype = "image", "png"
+                recovered_known_cids.append(original_cid)
+            else:
+                raise ReplyRenderError("REPLY_PARENT_CID_MISSING")
+        else:
+            if len(matches) != 1:
+                raise ReplyRenderError("REPLY_PARENT_CID_CONFLICT")
+            part = matches[0]
+            content = _part_bytes(part)
+            maintype, subtype = (part.get_content_type().split("/", 1) + ["octet-stream"])[:2]
         content_hash = hashlib.sha256(content).hexdigest()
         new_cid = f"history-{parent_email_id}-{raw_hash[:12]}-{index}@rma.accotest.com"
         mapping[original_cid] = new_cid
-        maintype, subtype = (part.get_content_type().split("/", 1) + ["octet-stream"])[:2]
         resources.append(
             RelatedResource(
                 content=content,
@@ -268,6 +276,7 @@ def render_reply_history_from_eml(
         "raw_eml_sha256": raw_hash,
         "plain_sha256": hashlib.sha256(plain.encode("utf-8")).hexdigest(),
         "html_sha256": hashlib.sha256(html_body.encode("utf-8")).hexdigest(),
+        "recovered_known_cids": recovered_known_cids,
         "resources": [
             {
                 "content_id": resource.content_id,

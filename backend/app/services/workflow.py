@@ -337,36 +337,13 @@ async def transition_ticket(
                 detail="RMA_SMTP_EVIDENCE_REQUIRED",
             )
     if to_status_code == "closed":
-        gates = (metadata or {}).get("closure_gates")
-        required_gates = {
-            "rma_received",
-            "pdf_validated",
-            "smtp_sent",
-            "message_id_saved",
-            "pdf_archived",
-            "outbound_archived",
-        }
-        if (
-            trigger_event != "rma_issued_and_archived"
-            or not isinstance(gates, dict)
-            or any(gates.get(key) is not True for key in required_gates)
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="RMA_ISSUE_CLOSURE_GATES_REQUIRED",
-            )
-        missing_facts = await _rma_closure_missing_facts(
-            session,
-            ticket=ticket,
-            metadata=metadata or {},
-        )
+        if from_status_code != "rma_sent" or trigger_event != "rma_issued_and_archived":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RMA_ARCHIVE_CLOSURE_REQUIRED")
+        missing_facts = await _rma_closure_missing_facts(session, ticket=ticket, metadata=metadata or {})
         if missing_facts:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "RMA_ISSUE_CLOSURE_FACTS_REQUIRED",
-                    "missing_facts": missing_facts,
-                },
+                detail={"code": "RMA_CLOSURE_EVIDENCE_INCOMPLETE", "missing_facts": missing_facts},
             )
     if from_status_code == "manual_review" and to_status_code != "manual_review":
         blocker_query = select(ManualReviewTask.id).where(

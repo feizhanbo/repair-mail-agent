@@ -18,7 +18,6 @@ from app.core.email_classification import (
 from app.models import Email, ManualReviewTask, RepairTicket
 from app.services.emails import _contextual_intent
 from app.services import manual_review
-from app.services import routing, tickets
 from app.services.parser import classify_email
 from app.services.workflow import transition_ticket
 
@@ -139,49 +138,39 @@ async def test_email_level_unknown_task_can_finish_without_ticket(monkeypatch: p
 
 
 @pytest.mark.anyio
-async def test_second_sidecar_ticket_preserves_first_thread_pointer(monkeypatch: pytest.MonkeyPatch) -> None:
-    added: list[object] = []
+async def test_promote_to_first_requires_explicit_first_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = ManualReviewTask(id=13, ticket_id=None, email_id=34, task_type="unknown_mail_classification", status="claimed")
+    monkeypatch.setattr(manual_review, "get_task", AsyncMock(return_value=task))
+    with pytest.raises(HTTPException) as caught:
+        await manual_review.resolve_task(
+            SimpleNamespace(), task_id=13, user_id=5, resolution="晋升", next_action="promote_to_first"
+        )
+    assert caught.value.detail == "TARGET_FIRST_INTENT_REQUIRED"
 
-    class FakeSession:
-        scalar = AsyncMock(return_value=None)
-        get = AsyncMock(return_value=None)
 
-        def add(self, value: object) -> None:
-            added.append(value)
-
-        async def flush(self) -> None:
-            for value in added:
-                if isinstance(value, RepairTicket) and value.id is None:
-                    value.id = 200
-
-    monkeypatch.setattr(tickets, "_next_ticket_no", AsyncMock(return_value="MANUAL-2026081101"))
-    monkeypatch.setattr(routing, "choose_system_owner", AsyncMock(return_value=(8, "zh-CN", "test-owner")))
-    monkeypatch.setattr(tickets, "create_manual_task_if_missing", AsyncMock())
-    monkeypatch.setattr(tickets, "log_operation", AsyncMock())
-
-    email = _email("Re: 报修", "请确认 SN ABC123 是否过保？", reply=True)
-    email.id = 31
-    email.thread_id = 9
-    parse_result = SimpleNamespace(
-        id=41,
-        handling_level="manual_rma_business",
-        intent_type="warranty_status_inquiry",
-        confidence_score=0.96,
-        conflict_fields={},
-        ticket_id=None,
-        apply_status="pending",
+@pytest.mark.anyio
+async def test_promote_to_first_is_idempotent_after_locked_business_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = ManualReviewTask(id=14, ticket_id=None, email_id=35, task_type="unknown_mail_classification", status="claimed")
+    email = Email(
+        id=35,
+        persistence_tier="business",
+        classification_locked=True,
+        mailbox_account="rma@example.com",
+        message_id="<promoted@example.com>",
+        from_address="customer@example.com",
     )
-
-    sidecar = await tickets.create_manual_business_ticket_from_email(
-        FakeSession(),
-        email=email,
-        parse_result=parse_result,
-        reason="SECOND 保修状态确认",
+    session = SimpleNamespace(get=AsyncMock(return_value=email), flush=AsyncMock())
+    monkeypatch.setattr(manual_review, "get_task", AsyncMock(return_value=task))
+    monkeypatch.setattr(manual_review, "log_operation", AsyncMock())
+    monkeypatch.setattr(manual_review, "resolve_notifications_for_target", AsyncMock())
+    monkeypatch.setattr(manual_review, "download_oss_object_bytes", AsyncMock(side_effect=AssertionError("must not download again")))
+    result = await manual_review.resolve_task(
+        session,
+        task_id=14,
+        user_id=5,
+        resolution="重复提交",
+        next_action="promote_to_first",
+        target_first_intent="new_repair",
     )
-
-    assert sidecar.ticket_category == "manual_business"
-    assert sidecar.current_status_code == "manual_review"
-    assert sidecar.thread_id == 9
-    assert sidecar.rma_required is False
-    assert parse_result.ticket_id == 200
-    assert not any(value.__class__.__name__ == "EmailThread" for value in added)
+    assert result["reparse_result"]["status"] == "already_promoted"
+    assert task.status == "resolved"

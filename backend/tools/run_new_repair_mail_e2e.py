@@ -258,8 +258,8 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
     ticket = detail.get("ticket") or {}
     if email.get("intent_type") != "new_repair":
         raise E2EFailure("Complete fixture was not classified as new_repair")
-    if ticket.get("current_status_code") != "closed":
-        raise E2EFailure("Complete ticket is not closed after RMA issue archival")
+    if ticket.get("current_status_code") != "rma_sent":
+        raise E2EFailure("Complete ticket is not rma_sent after RMA reply delivery")
     sent_rmas = [
         row
         for row in detail.get("rma_records") or []
@@ -308,7 +308,6 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
         "message_id_saved",
         "pdf_archived",
         "outbound_archived",
-        "closed",
     }
     missing_issue_facts = sorted(
         fact for fact in required_issue_facts if issue_summary.get(fact) is not True
@@ -324,12 +323,12 @@ def validate_complete_path(value: dict[str, Any]) -> dict[str, Any]:
         for row in status_logs
     ):
         raise E2EFailure("Complete ticket lacks the rma_sent transition evidence")
-    if not any(
+    if any(
         row.get("to_status_code") == "closed"
         and row.get("trigger_event") == "rma_issued_and_archived"
         for row in status_logs
     ):
-        raise E2EFailure("Complete ticket lacks the archival close transition evidence")
+        raise E2EFailure("Complete ticket was prematurely closed after RMA archival")
     return {"ticket": ticket, "thread": detail.get("thread") or {}, "reply": reply}
 
 
@@ -422,7 +421,7 @@ def run() -> int:
         complete_value = wait_for_ticket(
             client,
             complete_email_id,
-            expected_status="closed",
+        expected_status="rma_sent",
             expected_reply_type="rma_authorization",
         )
         complete = validate_complete_path(complete_value)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import smtplib
 
 import pytest
 
@@ -224,3 +225,47 @@ def test_send_reply_requires_every_recipient_to_be_whitelisted(
     assert ok is False
     assert message_id is None
     assert error == "SMTP_TEST_ENVELOPE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("smtp_code", "expected"),
+    [(451, "SMTP_REJECTED_RETRYABLE"), (550, "SMTP_REJECTED_TERMINAL")],
+)
+def test_send_reply_classifies_smtp_response_codes(
+    monkeypatch: pytest.MonkeyPatch, smtp_code: int, expected: str
+) -> None:
+    _configure_smtp(monkeypatch, port=465)
+
+    class RejectingPool:
+        def send_message(self, _message):
+            raise smtplib.SMTPDataError(smtp_code, b"test rejection")
+
+    monkeypatch.setattr(replies, "smtp_connection_pool", lambda: RejectingPool())
+
+    ok, message_id, error = replies._send_reply_via_smtp(_reply())
+
+    assert ok is False
+    assert message_id is None
+    assert error == expected
+
+
+def test_send_reply_treats_cc_only_refusal_as_accepted_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_smtp(monkeypatch, port=465)
+    reply = _reply()
+    reply.cc_addresses = "observer@example.com"
+    monkeypatch.setattr(replies, "_rma_envelope_valid", lambda _reply: True)
+    monkeypatch.setattr(replies, "_recipient_in_whitelist", lambda *_args: True)
+
+    class PartialPool:
+        def send_message(self, _message):
+            return {"observer@example.com": (550, b"mailbox unavailable")}
+
+    monkeypatch.setattr(replies, "smtp_connection_pool", lambda: PartialPool())
+
+    ok, message_id, error = replies._send_reply_via_smtp(reply)
+
+    assert ok is True
+    assert message_id is not None
+    assert error == "SMTP_CC_PARTIAL_ACCEPTED"

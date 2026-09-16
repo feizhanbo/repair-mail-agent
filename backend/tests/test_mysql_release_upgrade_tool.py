@@ -110,9 +110,10 @@ def test_upgrade_step_timeout_is_reported_and_process_is_killed(
 def test_schema_audit_constants_match_release_head_and_models() -> None:
     from app.models import Base
 
-    assert check_sap_schema.EXPECTED_REVISION == "q4l9g0b1c2d3"
+    assert check_sap_schema.EXPECTED_REVISION == "b5w0x1y2z3a4"
     assert check_sap_schema.EXPECTED_BUSINESS_TABLE_COUNT == len(Base.metadata.tables)
     assert audit_mail_release.REQUIRED_REVISION == check_sap_schema.EXPECTED_REVISION
+    assert audit_mail_release.settings.database_name
 
 
 def test_release_audit_rejects_stale_revision_and_invalid_close_route() -> None:
@@ -120,11 +121,11 @@ def test_release_audit_rejects_stale_revision_and_invalid_close_route() -> None:
         "database": {"matches_expected": True, "is_current": False},
         "schema": {
             "uid_validity_present": True,
-            "receipt_columns_complete": True,
+            "receipt_columns_removed": True,
             "uid_validity_unique_constraint_present": True,
-            "device_received_foreign_key": [{"constraint_name": "fk"}],
+            "device_received_foreign_key": [],
         },
-        "only_rma_issued_and_archived_enabled": False,
+        "rma_closure_route_valid": False,
         "backup": {"exists": True},
     }
 
@@ -141,6 +142,8 @@ def test_full_migration_chain_can_render_offline_sql() -> None:
         cwd=backend_dir,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )

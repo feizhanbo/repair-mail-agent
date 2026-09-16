@@ -9,10 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import BACKEND_DIR, settings
 
-TARGET_DB_NAME = "repair_system_test"
-
-
-def _parse_url(url: str) -> tuple[str, str, str, str, int | None]:
+def _parse_url(url: str) -> tuple[str, str, str, str, int | None, str]:
     parsed = urlparse(url)
     return (
         parsed.scheme,
@@ -20,6 +17,7 @@ def _parse_url(url: str) -> tuple[str, str, str, str, int | None]:
         parsed.password or "",
         parsed.hostname or "",
         parsed.port,
+        parsed.path.lstrip("/"),
     )
 
 
@@ -63,13 +61,15 @@ async def _run_subprocess(cmd: str, cwd: str, env: dict[str, str]) -> None:
 
 
 async def _main() -> None:
-    scheme, user, password, host, port = _parse_url(settings.DATABASE_URL)
+    scheme, user, password, host, port, target_db_name = _parse_url(settings.DATABASE_URL)
+    if not target_db_name:
+        raise SystemExit("DATABASE_URL must include a database name")
     nodb_url = _build_url(scheme, user, password, host, port)
-    test_db_url = _build_url(scheme, user, password, host, port, TARGET_DB_NAME)
+    test_db_url = settings.DATABASE_URL
 
-    print(f"Creating database {TARGET_DB_NAME}...")
+    print(f"Creating database {target_db_name}...")
     try:
-        await _create_database_if_not_exists(nodb_url, TARGET_DB_NAME)
+        await _create_database_if_not_exists(nodb_url, target_db_name)
     except Exception as exc:
         print(f"Failed to create database: {exc}")
         raise SystemExit(1) from exc
@@ -92,7 +92,7 @@ async def _main() -> None:
         print(f"Seed failed: {exc}")
         raise SystemExit(1) from exc
 
-    print(f"Done. {TARGET_DB_NAME} is ready.")
+    print(f"Done. {target_db_name} is ready.")
 
 
 if __name__ == "__main__":

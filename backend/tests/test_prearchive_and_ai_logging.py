@@ -192,7 +192,7 @@ def test_engineering_archive_ai_input_contains_only_classification_metadata() ->
         },
     )
 
-    payload = ai._email_input(email, [attachment], "classification_and_extract")
+    payload = ai._email_input(email, [attachment], "field_extract")
     item = payload["attachments"][0]
 
     assert item["file_name"] == "self-check.zip"

@@ -4,7 +4,9 @@ import hashlib
 import io
 import json
 import math
+import logging
 import re
+import time
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -21,6 +23,7 @@ from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 TEMPLATE_VERSION = "rma_authorization_v3_2_reference"
+logger = logging.getLogger(__name__)
 TEMPLATE_SHA256 = "8e7a2c5b7bc448a785d3698300acf0e2554a9d953e779cccafbce307e80853a0"
 LEGACY_TEMPLATE_VERSIONS = {"v1", "rma_authorization_v1", "rma_authorization_zh_v1"}
 CODE39_PATTERN = re.compile(r"^[0-9A-Z\-. $/+%]+$")
@@ -412,6 +415,7 @@ async def build_rma_pdf_data(
         "customer_name": ticket.customer_name,
         "mailing_address": ticket.mailing_address,
         "contact_person": ticket.contact_person,
+        "contact_phone": ticket.contact_phone,
         "contact_email": ticket.contact_email,
         "request_date": ticket.request_date,
     }
@@ -461,6 +465,7 @@ async def build_rma_pdf_data(
     if len(currencies) != 1:
         raise RmaPdfError("RMA_CURRENCY_CONFLICT")
     currency = next(iter(currencies))
+    display_currency = "RMB" if currency == "CNY" else currency
     total_cost = sum((row.repair_fee or Decimal("0")) for row in selected_export_rows)
     normalized_sns = [(item.sn or "").strip().casefold() for item in items]
     if len(normalized_sns) != len(set(normalized_sns)):
@@ -473,10 +478,13 @@ async def build_rma_pdf_data(
             raise RmaPdfError("RMA_ITEM_FIELDS_MISSING")
         if item.quantity != 1:
             raise RmaPdfError("RMA_ITEM_QUANTITY_SN_CONFLICT")
+        part_no = str(export_by_item[item.id].remote_call_id or "").strip()
+        if not part_no.isdecimal():
+            raise RmaPdfError("RMA_EXPORT_CALL_ID_MISSING_OR_INVALID")
         result_items.append(
             RmaItemData(
                 no=index,
-                part_no=item.material_code,
+                part_no=part_no,
                 part_description=item.material_name,
                 quantity=1,
                 part_serial_no=item.sn,
@@ -491,17 +499,17 @@ async def build_rma_pdf_data(
         return RmaPdfData(
             rma_no=resolved_rma_no,
             request_date=ticket.request_date,
-            currency=currency,
+            currency=display_currency,
             customer_code=ticket.customer_code,
             customer_name=ticket.customer_name,
             mailing_address=ticket.mailing_address,
-            mailing_contact_person=settings.RMA_PDF_MAILING_CONTACT_PERSON,
-            mailing_contact_phone=settings.RMA_PDF_MAILING_CONTACT_PHONE,
+            mailing_contact_person=ticket.contact_person,
+            mailing_contact_phone=ticket.contact_phone,
             delivery_fee_paid_by_customer=settings.RMA_PDF_DEFAULT_DELIVERY_FEE,
             repair_fee_paid_by_customer=(
                 settings.RMA_PDF_DEFAULT_REPAIR_FEE
                 if total_cost == 0
-                else f"{total_cost:.2f} {currency}"
+                else f"{total_cost:.2f} {display_currency}"
             ),
             total_cost=total_cost,
             items=result_items,
@@ -575,6 +583,19 @@ def _continuation_footer_resource(template: fitz.Document, table: dict[str, Any]
     scale = float(table.get("footer_dpi", 300)) / 72.0
     pixmap = template[1].get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
     return pixmap.tobytes("png")
+
+
+def _clear_locked_blank_regions(
+    document: fitz.Document, layout: dict[str, Any]
+) -> None:
+    """Remove template placeholder glyphs from fields that must stay empty."""
+    for raw in (layout.get("blank_regions") or {}).values():
+        page_index = int(raw["page"])
+        if page_index < 0 or page_index >= document.page_count:
+            raise RmaPdfError("RMA_TEMPLATE_INTEGRITY_FAILED")
+        page = document[page_index]
+        page.add_redact_annot(fitz.Rect(*raw["rect"]), fill=(1, 1, 1))
+        page.apply_redactions(images=0, graphics=0)
 
 
 def _draw_first_page_extension(page: fitz.Page, row_count: int, table: dict[str, Any]) -> None:
@@ -659,6 +680,11 @@ def render_rma_pdf(
     layout_path: str | Path | None = None,
     test_only: bool = False,
 ) -> bytes:
+    started = time.monotonic()
+    logger.info(
+        "RMA PDF render started",
+        extra={"event": "rma_pdf_started", "rma_no": data.rma_no, "item_count": len(data.items), "template_version": TEMPLATE_VERSION},
+    )
     rma_pdf_page_count(len(data.items))
     validate_rma_template_integrity(template_path, layout_path=layout_path)
     layout = _load_layout(layout_path)
@@ -678,6 +704,7 @@ def render_rma_pdf(
         document.insert_pdf(template, from_page=1, to_page=1)
         if document.page_count != rma_pdf_page_count(len(data.items)):
             raise RmaPdfError("RMA_PAGINATION_FAILED")
+        _clear_locked_blank_regions(document, layout)
 
         writer = _FixedBoxTextWriter(_subset_cjk_font(_resolve_cjk_font_path(), _dynamic_text(data)))
         for page in document:
@@ -729,10 +756,26 @@ def render_rma_pdf(
         result = document.tobytes(garbage=4, deflate=True, clean=True)
         if len(result) > settings.RMA_PDF_MAX_BYTES:
             raise RmaPdfError("RMA_PDF_TOO_LARGE")
+        logger.info(
+            "RMA PDF render completed",
+            extra={
+                "event": "rma_pdf_completed", "rma_no": data.rma_no, "item_count": len(data.items),
+                "template_version": TEMPLATE_VERSION, "file_size": len(result),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         return result
-    except RmaPdfError:
+    except RmaPdfError as exc:
+        logger.exception(
+            "RMA PDF render failed",
+            extra={"event": "rma_pdf_failed", "rma_no": data.rma_no, "error_code": str(exc), "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
         raise
     except Exception as exc:
+        logger.exception(
+            "RMA PDF render failed",
+            extra={"event": "rma_pdf_failed", "rma_no": data.rma_no, "error_code": "RMA_PDF_RENDER_FAILED", "duration_ms": int((time.monotonic() - started) * 1000)},
+        )
         raise RmaPdfError("RMA_PDF_RENDER_FAILED") from exc
     finally:
         document.close()

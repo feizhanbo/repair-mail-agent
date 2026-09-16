@@ -5,7 +5,9 @@ import base64
 import csv
 import io
 import json
+import logging
 import re
+import time
 import zipfile
 from html import unescape
 from pathlib import PurePath
@@ -18,8 +20,9 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.ai.prompts import ATTACHMENT_TEXT, ATTACHMENT_VISUAL
 from app.integrations.ai_provider import AiProviderError
-from app.integrations.qwen_provider import QwenProvider
+from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
 from app.models import EmailAttachment
 from app.services.attachment_precheck import (
     ARCHIVE_CONTENT_TYPES,
@@ -28,11 +31,15 @@ from app.services.attachment_precheck import (
 )
 from app.services.common import utcnow
 from app.services.logging_safety import safe_error_code
-from app.services.storage import download_oss_object_bytes, generate_presigned_url_for_object
+from app.services.storage import (
+    StorageConfigurationError, StorageUploadError, download_oss_object_bytes,
+    generate_presigned_url_for_object,
+)
 
 
 SUPPORTED_ATTACHMENT_TYPES = {"docx", "xlsx", "csv", "txt", "prc", "html", "image", "pdf"}
 _file_parse_semaphore = asyncio.Semaphore(max(1, settings.FILE_PARSE_CONCURRENCY))
+logger = logging.getLogger(__name__)
 
 
 class AttachmentParseJson(BaseModel):
@@ -104,19 +111,8 @@ def attachment_type(attachment: EmailAttachment) -> str | None:
 
 
 def _qwen_configured(*, visual: bool = False) -> bool:
-    return (
-        settings.MULTIMODAL_PROVIDER.lower() == "qwen"
-        and bool(settings.QWEN_API_KEY)
-        and bool(settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL)
-    )
-
-
-def _qwen_provider(*, visual: bool = False) -> QwenProvider:
-    return QwenProvider(
-        api_key=settings.QWEN_API_KEY,
-        base_url=settings.QWEN_BASE_URL,
-        model=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
-        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+    return llm_task_configured(
+        LlmTask.ATTACHMENT_VISUAL_PARSE if visual else LlmTask.ATTACHMENT_TEXT_PARSE
     )
 
 
@@ -225,7 +221,9 @@ def _extract_docx(content: bytes) -> str:
     return "\n".join(paragraphs)
 
 
-def _extract_xlsx(content: bytes) -> str:
+def _extract_xlsx(
+    content: bytes, *, max_sheets: int = 10, max_rows: int = 200, max_columns: int = 40
+) -> str:
     _validate_zip_archive(content)
     try:
         from openpyxl import load_workbook  # type: ignore
@@ -236,13 +234,13 @@ def _extract_xlsx(content: bytes) -> str:
     except Exception as exc:
         raise ValueError("XLSX_TEXT_EXTRACT_FAILED") from exc
     blocks: list[str] = []
-    for sheet in workbook.worksheets[:10]:
+    for sheet in workbook.worksheets[:max_sheets]:
         blocks.append(f"# sheet: {sheet.title}")
         for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-            if row_index > 200:
-                blocks.append("... truncated after 200 rows ...")
+            if row_index > max_rows:
+                blocks.append(f"... truncated after {max_rows} rows ...")
                 break
-            values = ["" if value is None else str(value) for value in row[:40]]
+            values = ["" if value is None else str(value) for value in row[:max_columns]]
             if any(value.strip() for value in values):
                 blocks.append(" | ".join(values))
     return "\n".join(blocks)
@@ -350,11 +348,19 @@ async def _invoke_qwen(
     if not _qwen_configured(visual=visual):
         raise AiProviderError("QWEN_VL_NOT_CONFIGURED" if visual else "QWEN_TEXT_NOT_CONFIGURED")
 
-    max_attempts = max(1, min(3, settings.AI_MAX_RETRIES + 1))
+    max_attempts = 1
     last_error: AiProviderError | None = None
     for attempt in range(1, max_attempts + 1):
+        logger.info(
+            "Attachment AI call started",
+            extra={
+                "event": "ai_call_started", "call_type": call_type,
+                "attachment_id": attachment.id, "email_id": attachment.email_id,
+                "attempt": attempt,
+            },
+        )
         try:
-            completion = await invoke(_qwen_provider(visual=visual))
+            completion = await invoke()
             if hasattr(session, "add"):
                 from app.services.ai import persist_ai_log
 
@@ -371,9 +377,14 @@ async def _invoke_qwen(
                     output_summary=f"attachment_type={completion.parsed.file_type}; warnings={len(completion.parsed.warnings)}",
                     email_id=attachment.email_id,
                     attachment_id=attachment.id,
-                    provider_name="qwen",
-                    model_name=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
-                    attempt_count=attempt,
+                    provider_name=getattr(completion, "provider_name", None) or "unknown",
+                    model_name=getattr(completion, "model_name", None) or "unknown",
+                    prompt_version=(ATTACHMENT_VISUAL if visual else ATTACHMENT_TEXT).version,
+                    prompt_hash=(ATTACHMENT_VISUAL if visual else ATTACHMENT_TEXT).content_hash,
+                    route_name=getattr(completion, "route_name", None),
+                    route_attempt=int(getattr(completion, "route_attempt", 1)),
+                    fallback_used=bool(getattr(completion, "fallback_used", False)),
+                    attempt_count=int(getattr(completion, "route_attempt", attempt)),
                 )
             return completion.parsed
         except AiProviderError as exc:
@@ -398,9 +409,14 @@ async def _invoke_qwen(
                     output_summary=error_code,
                     email_id=attachment.email_id,
                     attachment_id=attachment.id,
-                    provider_name="qwen",
-                    model_name=settings.QWEN_VL_MODEL if visual else settings.QWEN_MODEL,
-                    attempt_count=attempt,
+                    provider_name=str(getattr(exc, "route_name", "unknown")),
+                    model_name=str(getattr(exc, "model_name", "unknown")),
+                    prompt_version=(ATTACHMENT_VISUAL if visual else ATTACHMENT_TEXT).version,
+                    prompt_hash=(ATTACHMENT_VISUAL if visual else ATTACHMENT_TEXT).content_hash,
+                    route_name=getattr(exc, "route_name", None),
+                    route_attempt=int(getattr(exc, "route_attempt", attempt)),
+                    fallback_used=int(getattr(exc, "route_attempt", attempt)) > 1,
+                    attempt_count=int(getattr(exc, "route_attempt", attempt)),
                     error_message=error_code,
                 )
             if attempt >= max_attempts or not _qwen_retryable(exc):
@@ -432,7 +448,7 @@ async def _qwen_text_parse(
     messages = [
             {
                 "role": "system",
-                "content": "你是维修邮件附件解析助手，只输出 JSON，不编造附件中没有的信息。",
+                "content": ATTACHMENT_TEXT.system,
             },
             {"role": "user", "content": prompt},
         ]
@@ -442,7 +458,8 @@ async def _qwen_text_parse(
         call_type="attachment_text_parse",
         visual=False,
         input_payload={"file_type": file_type, "text": text, "truncated": truncated},
-        invoke=lambda provider: provider.chat_json(
+        invoke=lambda: invoke_structured(
+            task=LlmTask.ATTACHMENT_TEXT_PARSE,
             messages=messages,
             response_model=AttachmentParseJson,
             temperature=0.1,
@@ -467,7 +484,7 @@ async def _qwen_visual_parse(
     if not _qwen_configured(visual=True):
         raise AiProviderError("QWEN_API_KEY_NOT_CONFIGURED")
     prompt = (
-        "请识别并提取图片或 PDF 附件中的维修报修相关信息。只能输出 JSON，字段固定为 "
+        f"{ATTACHMENT_VISUAL.system}\n请识别并提取图片或 PDF 附件中的维修报修相关信息。只能输出 JSON，字段固定为 "
         "file_type, summary, key_points, extracted_fields, extracted_items, raw_text, warnings, truncated。"
         f"文件名：{file_name}；文件类型：{file_type}；是否截断：{truncated}。"
     )
@@ -477,9 +494,20 @@ async def _qwen_visual_parse(
         call_type="attachment_visual_parse",
         visual=True,
         input_payload={"file_type": file_type, "visual_count": len(urls), "truncated": truncated},
-        invoke=lambda provider: provider.vl_chat(
-            image_urls=urls,
-            prompt=prompt,
+        invoke=lambda: invoke_structured(
+            task=LlmTask.ATTACHMENT_VISUAL_PARSE,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        *[
+                            {"type": "image_url", "image_url": {"url": url}}
+                            for url in urls
+                        ],
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
             response_model=AttachmentParseJson,
             temperature=0.1,
         ),
@@ -519,7 +547,7 @@ def _mark_attachment(
     return attachment.extracted_json
 
 
-async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
+async def _parse_attachment_impl(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
     archive_format, warnings = detect_archive_format(
         file_name=attachment.file_name,
         content_type=attachment.content_type,
@@ -661,11 +689,93 @@ async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -
         parsed = await _qwen_text_parse(session, attachment=attachment, file_type=file_type, file_name=attachment.file_name, text=text, warnings=warnings, truncated=truncated)
         return _mark_attachment(attachment, status="parsed", parsed=parsed, text=parsed.raw_text or text)
     except AiProviderError as exc:
+        logger.exception(
+            "Attachment AI parse failed; applying fallback",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type,
+                "error_code": safe_error_code(exc, "ATTACHMENT_AI_FAILED"),
+            },
+        )
         parsed = _fallback_json(file_type, text, warnings=[*warnings, str(exc)], truncated=truncated)
         if file_type in {"txt", "prc"} and text.strip():
             parsed.warnings.append("QWEN_FAILED_LOCAL_TEXT_FALLBACK")
             return _mark_attachment(attachment, status="parsed", parsed=parsed, text=text)
         return _mark_attachment(attachment, status="needs_manual_review", parsed=parsed, text=text or None, error=str(exc))
+    except (StorageConfigurationError, StorageUploadError) as exc:
+        error_code = safe_error_code(exc, "ATTACHMENT_STORAGE_UNAVAILABLE")
+        logger.exception(
+            "Attachment storage unavailable; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
+        parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
+        return _mark_attachment(
+            attachment, status="needs_manual_review", parsed=parsed, text=text or None,
+            error=f"INFRASTRUCTURE:{error_code}",
+        )
+    except ValueError as exc:
+        error_code = safe_error_code(exc, "ATTACHMENT_FILE_PARSE_FAILED")
+        logger.exception(
+            "Attachment content parse failed; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
+        parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
+        return _mark_attachment(
+            attachment, status="needs_manual_review", parsed=parsed, text=text or None,
+            error=f"FILE_CONTENT:{error_code}",
+        )
     except Exception as exc:
-        parsed = _fallback_json(file_type, text, warnings=[*warnings, exc.__class__.__name__], truncated=truncated)
-        return _mark_attachment(attachment, status="needs_manual_review", parsed=parsed, text=text or None, error=exc.__class__.__name__)
+        error_code = safe_error_code(exc, "ATTACHMENT_INFRASTRUCTURE_ERROR")
+        logger.exception(
+            "Attachment infrastructure failure; sending to manual review",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": file_type, "error_code": error_code,
+            },
+        )
+        parsed = _fallback_json(file_type, text, warnings=[*warnings, error_code], truncated=truncated)
+        return _mark_attachment(
+            attachment, status="needs_manual_review", parsed=parsed, text=text or None,
+            error=f"INFRASTRUCTURE:{error_code}",
+        )
+
+
+async def parse_attachment(session: AsyncSession, attachment: EmailAttachment) -> dict[str, Any] | None:
+    started = time.monotonic()
+    logger.info(
+        "Attachment parse started",
+        extra={
+            "event": "attachment_parse_started", "attachment_id": attachment.id,
+            "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+            "object_size": attachment.file_size,
+        },
+    )
+    try:
+        result = await _parse_attachment_impl(session, attachment)
+    except Exception as exc:
+        logger.exception(
+            "Attachment parse failed",
+            extra={
+                "event": "attachment_parse_failed", "attachment_id": attachment.id,
+                "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": safe_error_code(exc, "ATTACHMENT_PARSE_FAILED"),
+            },
+        )
+        raise
+    logger.info(
+        "Attachment parse completed",
+        extra={
+            "event": "attachment_parse_completed", "attachment_id": attachment.id,
+            "email_id": attachment.email_id, "file_type": attachment_type(attachment),
+            "status": attachment.parse_status,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+    return result

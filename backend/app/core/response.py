@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
-
 from fastapi.encoders import jsonable_encoder
+from app.core.request_context import get_request_id
 
 
 def request_id() -> str:
-    return f"req_{uuid4().hex[:16]}"
+    return get_request_id() or "request_context_unavailable"
 
 
 def ok(data: Any = None, message: str = "ok") -> dict[str, Any]:

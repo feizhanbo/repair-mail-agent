@@ -122,6 +122,27 @@ def test_renderer_blocks_missing_or_conflicting_cid(case: str, expected: str) ->
     assert caught.value.code == expected
 
 
+def test_renderer_recovers_missing_known_accotest_logo_from_customer_quote() -> None:
+    message = EmailMessage()
+    message["From"] = "rmatest2@accotest.com"
+    message["To"] = "rmatest1@accotest.com"
+    message["Subject"] = "Re: repair"
+    message["Message-ID"] = "<supplement@example.com>"
+    message.set_content("Supplement information with quoted system signature")
+    message.add_alternative(
+        '<div>Supplement information<img src="cid:accotest_logo"></div>',
+        subtype="html",
+    )
+
+    history = render_reply_history_from_eml(
+        message.as_bytes(), parent_email_id=22, language="zh-CN"
+    )
+
+    assert len(history.resources) == 1
+    assert history.resources[0].original_content_id == "accotest_logo"
+    assert "cid:history-22-" in history.html
+
+
 def test_renderer_plain_text_fallback_is_safe_html() -> None:
     message = EmailMessage()
     message["From"] = "customer@example.com"

@@ -17,13 +17,15 @@ async def get_external_operation(
     *,
     operation_type: str,
     operation_key: str,
+    for_update: bool = False,
 ) -> ExternalOperationRecord | None:
-    return await session.scalar(
-        select(ExternalOperationRecord).where(
-            ExternalOperationRecord.operation_type == operation_type,
-            ExternalOperationRecord.operation_key == operation_key,
-        )
+    statement = select(ExternalOperationRecord).where(
+        ExternalOperationRecord.operation_type == operation_type,
+        ExternalOperationRecord.operation_key == operation_key,
     )
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
 
 
 async def start_external_operation(
@@ -42,6 +44,7 @@ async def start_external_operation(
         session,
         operation_type=operation_type,
         operation_key=operation_key,
+        for_update=True,
     )
     if record is None:
         record = ExternalOperationRecord(

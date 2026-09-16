@@ -55,6 +55,8 @@ def test_payload_from_eml_bytes_extracts_headers_body_and_attachment_metadata() 
     assert first["file_hash"] == hashlib.sha256(b"fault log").hexdigest()
     second = payload.attachments[1]
     assert second["is_inline"] is True
+    assert second["resource_role"] == "regular_attachment"
+    assert second["content_disposition"] == "inline"
     assert second["content_id"] == "inline-image-1"
 
 
@@ -92,3 +94,4 @@ def test_content_id_image_without_disposition_is_inline() -> None:
     assert payload.attachments[0]["file_name"] == "screenshot.png"
     assert payload.attachments[0]["content_id"] == "foxmail-image"
     assert payload.attachments[0]["is_inline"] is True
+    assert payload.attachments[0]["resource_role"] == "regular_attachment"

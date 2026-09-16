@@ -8,6 +8,7 @@ Usage: python tests/sync_test_sns.py
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -193,14 +194,19 @@ async def sync_sns(rows: list[dict]) -> tuple[int, int]:
             customer_name = row.get("customer_name") or "TestCustomer"
             material_code = row.get("material_code") or "TEST-MAT"
             material_name = row.get("material_name") or "TestMaterial"
+            external_id = f"xlsx:{sn}:{material_code}"
+            ins_id = int(hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12], 16)
 
             # failure_description is parsed above but sn_assets table has no such column;
             # it is available in row["failure_description"] if needed for reporting.
 
-            # Check if already exists and status is 'valid'
+            # Check the exact test master row identity, never SN alone.
             result = await conn.execute(
-                text("SELECT asset_status FROM sn_assets WHERE sn = :sn LIMIT 1"),
-                {"sn": sn},
+                text(
+                    "SELECT asset_status FROM sn_assets "
+                    "WHERE source_system = :source_system AND external_id = :external_id"
+                ),
+                {"source_system": "e2e_test", "external_id": external_id},
             )
             existing = result.fetchone()
             if existing and existing[0] == "valid":
@@ -216,6 +222,9 @@ async def sync_sns(rows: list[dict]) -> tuple[int, int]:
                 "material_code": material_code,
                 "material_name": material_name,
                 "asset_status": "valid",
+                "ins_id": ins_id,
+                "source_system": "e2e_test",
+                "external_id": external_id,
             }
 
             columns = ", ".join(values.keys())
@@ -223,7 +232,7 @@ async def sync_sns(rows: list[dict]) -> tuple[int, int]:
             updates = ", ".join(
                 f"{k} = VALUES({k})"
                 for k in values.keys()
-                if k != "sn"
+                if k not in {"source_system", "external_id"}
             )
 
             sql = (

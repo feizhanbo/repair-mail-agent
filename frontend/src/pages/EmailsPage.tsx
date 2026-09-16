@@ -1,10 +1,12 @@
-import { DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownloadOutlined, ReloadOutlined, SearchOutlined, SwapOutlined, SyncOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, Upload, message } from 'antd';
+import { Button, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Table, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
 import ErrorResult from '../components/ErrorResult';
+import { DeletionImpactPreview } from '../components/FriendlyPreview';
 import JsonBlock from '../components/JsonBlock';
 import ContentPreviewButton from '../components/ContentPreviewButton';
 import CopyableField from '../components/CopyableField';
@@ -12,11 +14,10 @@ import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import { useAuthStore } from '../stores/authStore';
-import type { Attachment, EmailIngestAttachment, EmailIngestRequest, EmailIngestResult, EmailItem, ParseResult } from '../types/api';
+import type { Attachment, EmailItem, ParseResult } from '../types/api';
 import { ARCHIVE_DOWNLOAD_WARNING, attachmentTypeLabel, isEngineeringReference } from '../utils/attachments';
 import { filtersWithDateRange } from '../utils/filters';
 import { compactText, formatFileSizeKb, formatTime, numberText } from '../utils/format';
-import { saveBlob } from '../utils/download';
 import { rememberJob, waitForJob } from '../utils/jobs';
 import { hasAnyRole } from '../utils/roles';
 
@@ -26,31 +27,26 @@ type EmailFilters = {
   message_id?: string;
   parse_status?: string;
   intent_type?: string;
-  intent_subtype?: string;
   handling_level?: string;
   date_range?: unknown;
 };
 
-const emailAsyncEnabled = import.meta.env.VITE_EMAIL_ASYNC_ENABLED === 'true';
-
 export default function EmailsPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const user = useAuthStore((state) => state.user);
   const canFetchImap = hasAnyRole(user?.roles, ['admin', 'operator']);
   const canPreflightImap = hasAnyRole(user?.roles, ['admin']);
+  const canDelete = hasAnyRole(user?.roles, ['admin']);
   const [filters, setFilters] = useState<Record<string, unknown>>({});
   const [page, setPage] = useState(1);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [ingestOpen, setIngestOpen] = useState(false);
-  const [manualAttachments, setManualAttachments] = useState<EmailIngestAttachment[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(() => {
+    const value = Number(searchParams.get('email_id'));
+    return Number.isInteger(value) && value > 0 ? value : null;
+  });
   const [filterForm] = Form.useForm<EmailFilters>();
   const queryClient = useQueryClient();
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
-  const ingestSuccessMessage = (data: EmailIngestResult) => {
-    if (data.skipped) return '邮件已被预检查跳过';
-    if (data.duplicate) return '邮件已存在，未重复入库';
-    if (data.parse && typeof data.parse === 'object' && 'manual_ticket' in data.parse) return '邮件已入库并进入人工复核';
-    return '邮件已入库';
-  };
   const emailsQuery = useQuery({
     queryKey: ['emails', filters, page],
     queryFn: () => api.emails({ ...filters, page, page_size: 20 }),
@@ -60,42 +56,22 @@ export default function EmailsPage() {
     queryFn: () => api.emailDetail(selectedId as number),
     enabled: Boolean(selectedId),
   });
-  const ingestMutation = useMutation({
-    mutationFn: async (values: EmailIngestRequest) => {
-      const body = { ...values, attachments: manualAttachments };
-      if (!emailAsyncEnabled) return api.ingestEmail(body);
-      const result = await api.ingestEmailJob(body);
-      if (result.job) await waitForJob(result.job);
-      return result.ingest;
-    },
-    onSuccess: (data) => {
-      message.success(ingestSuccessMessage(data));
-      setIngestOpen(false);
-      setManualAttachments([]);
-      void queryClient.invalidateQueries({ queryKey: ['emails'] });
-      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
-    },
-    onError: handleMutationError,
+  const linkedTicketsQuery = useQuery({
+    queryKey: ['email-linked-tickets', selectedId],
+    queryFn: () => api.linkedTickets(selectedId as number),
+    enabled: Boolean(selectedId),
   });
+  useEffect(() => {
+    const value = Number(searchParams.get('email_id'));
+    setSelectedId(Number.isInteger(value) && value > 0 ? value : null);
+  }, [searchParams]);
+  const openEmail = (id: number) => navigate(`/emails?email_id=${id}`);
+  const closeEmail = () => navigate('/emails');
   const fetchStatusQuery = useQuery({
     queryKey: ['imap-fetch-status'],
     queryFn: api.fetchEmailStatus,
     enabled: canFetchImap,
     refetchInterval: 5000,
-  });
-  const ingestEmlMutation = useMutation({
-    mutationFn: (file: File) => api.ingestEmlFileJob(file),
-    onSuccess: ({ ingest, job }) => {
-      if (job) {
-        rememberJob(job);
-        message.success(`邮件已归档，解析任务 #${job.id} 已排队`);
-      } else {
-        message.success(ingestSuccessMessage(ingest));
-      }
-      void queryClient.invalidateQueries({ queryKey: ['emails'] });
-      void queryClient.invalidateQueries({ queryKey: ['tickets'] });
-    },
-    onError: handleMutationError,
   });
   const reparseMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -175,22 +151,39 @@ export default function EmailsPage() {
       onOk: () => attachmentDownloadMutation.mutate(record.id),
     });
   };
-  const exportMutation = useMutation({
-    mutationFn: () => api.exportEmails(filters),
-    onSuccess: (blob) => saveBlob(blob, 'emails-export.xlsx'),
-    onError: handleMutationError,
-  });
-  const addManualAttachment = async (file: File) => {
-    const content_base64 = await fileToBase64(file);
-    setManualAttachments((items) => [
-      ...items,
-      {
-        file_name: file.name,
-        content_type: file.type || 'application/octet-stream',
-        file_size: file.size,
-        content_base64,
-      },
-    ]);
+  const goToLinkedTicket = async (emailId: number) => {
+    try {
+      const links = await api.linkedTickets(emailId);
+      if (!links.length) return void message.info('该邮件暂未关联工单');
+      if (links.length === 1) return void navigate(`/tickets?ticket_id=${links[0].ticket_id}`);
+      Modal.info({
+        title: '选择关联工单',
+        content: <Space direction="vertical">{links.map((link) => <Button key={link.ticket_id} type="link" onClick={() => navigate(`/tickets?ticket_id=${link.ticket_id}`)}>{link.ticket_no}（{link.current_status_code}）</Button>)}</Space>,
+        okText: '关闭',
+      });
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
+  };
+  const confirmDeleteEmail = async (emailId: number) => {
+    try {
+      const preview = await api.emailDeletePreview(emailId);
+      Modal.confirm({
+        title: '确认删除该邮件？',
+        width: 620,
+        okText: '确认删除',
+        okButtonProps: { danger: true, disabled: !preview.deletable },
+        content: <DeletionImpactPreview preview={preview} />,
+        onOk: async () => {
+          await api.deleteEmail(emailId, preview.confirmation_token ?? '');
+          message.success('邮件已删除');
+          closeEmail();
+          await Promise.all([queryClient.invalidateQueries({ queryKey: ['emails'] }), queryClient.invalidateQueries({ queryKey: ['tickets'] })]);
+        },
+      });
+    } catch (error) {
+      message.error(apiErrorMessage(error));
+    }
   };
 
   const columns: ColumnsType<EmailItem> = [
@@ -198,18 +191,17 @@ export default function EmailsPage() {
     { title: '发件人', dataIndex: 'from_address', ellipsis: true, width: 220 },
     { title: '层级', dataIndex: 'handling_level', width: 125, render: (value?: string) => <StatusTag value={value} /> },
     { title: '意图', dataIndex: 'intent_type', width: 170, render: (value?: string) => <StatusTag value={value} /> },
-    { title: '子类型', dataIndex: 'intent_subtype', width: 150, render: (value?: string) => value || '-' },
     { title: '解析', dataIndex: 'parse_status', width: 110, render: (value: string) => <StatusTag value={value} kind="parse" /> },
-    { title: '线程', dataIndex: 'thread_id', width: 90, render: numberText },
     { title: '收信时间', dataIndex: 'received_at', width: 160, render: formatTime },
     {
       title: '操作',
       width: 130,
       render: (_, record) => (
         <Space>
-          <Button type="link" size="small" onClick={() => setSelectedId(record.id)}>
+          <Button type="link" size="small" onClick={() => openEmail(record.id)}>
             详情
           </Button>
+          <Button type="link" size="small" onClick={() => void goToLinkedTicket(record.id)}>工单</Button>
           <Button
             type="link"
             size="small"
@@ -222,6 +214,7 @@ export default function EmailsPage() {
               onOk: () => reparseMutation.mutate(record.id),
             })}
           />
+          {canDelete ? <Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDeleteEmail(record.id)} /> : null}
         </Space>
       ),
     },
@@ -233,6 +226,7 @@ export default function EmailsPage() {
         title="邮件中心"
         extra={(
           <Space>
+            <Button icon={<SwapOutlined />} onClick={() => navigate('/tickets')}>切换到工单中心</Button>
             {canPreflightImap && (
               <Button
                 loading={imapPreflightMutation.isPending}
@@ -251,22 +245,6 @@ export default function EmailsPage() {
                 立即捞取
               </Button>
             )}
-            <Button icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate()}>
-              导出
-            </Button>
-            <Upload
-              accept=".eml,message/rfc822"
-              showUploadList={false}
-              beforeUpload={(file) => {
-                ingestEmlMutation.mutate(file);
-                return false;
-              }}
-            >
-              <Button icon={<UploadOutlined />} loading={ingestEmlMutation.isPending}>导入 EML</Button>
-            </Upload>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIngestOpen(true)}>
-              手动入库
-            </Button>
           </Space>
         )}
       />
@@ -346,17 +324,6 @@ export default function EmailsPage() {
               ]}
             />
           </Form.Item>
-          <Form.Item name="intent_subtype">
-            <Select
-              allowClear
-              placeholder="意图子类型"
-              style={{ width: 180 }}
-              options={[
-                { value: 'general_irrelevant', label: '普通无关' },
-                { value: 'out_of_scope_repair', label: '超出负责范围的报修' },
-              ]}
-            />
-          </Form.Item>
           <Form.Item name="parse_status">
             <Select
               allowClear
@@ -399,16 +366,16 @@ export default function EmailsPage() {
           pagination={{ current: page, pageSize: 20, total: emailsQuery.data?.total ?? 0, onChange: setPage, showSizeChanger: false }}
         />
       </SectionPanel>
-      <Drawer width={760} title="邮件详情" open={Boolean(selectedId)} onClose={() => setSelectedId(null)}>
+      <Drawer width={760} title="邮件详情" open={Boolean(selectedId)} onClose={closeEmail} extra={selectedId && canDelete ? <Button danger icon={<DeleteOutlined />} onClick={() => void confirmDeleteEmail(selectedId)}>删除</Button> : null}>
         {detailQuery.data ? (
           <div className="drawer-stack">
             <Descriptions column={1} size="small" bordered>
+              <Descriptions.Item label="关联工单">{linkedTicketsQuery.data?.length ? <Space wrap>{linkedTicketsQuery.data.map((link) => <Button key={link.ticket_id} type="link" onClick={() => navigate(`/tickets?ticket_id=${link.ticket_id}`)}>{link.ticket_no}</Button>)}</Space> : '-'}</Descriptions.Item>
               <Descriptions.Item label="主题">{detailQuery.data.email.subject || '-'}</Descriptions.Item>
               <Descriptions.Item label="发件人"><CopyableField value={detailQuery.data.email.from_address} /></Descriptions.Item>
               <Descriptions.Item label="收件人">{detailQuery.data.email.to_addresses || '-'}</Descriptions.Item>
               <Descriptions.Item label="Message-ID"><CopyableField value={detailQuery.data.email.message_id || ''} displayText={detailQuery.data.email.message_id || '-'} /></Descriptions.Item>
               <Descriptions.Item label="意图">{detailQuery.data.email.intent_type || '-'}</Descriptions.Item>
-              <Descriptions.Item label="意图子类型">{detailQuery.data.email.intent_subtype || '-'}</Descriptions.Item>
               <Descriptions.Item label="处理层级">{detailQuery.data.email.handling_level || '-'}</Descriptions.Item>
               <Descriptions.Item label="分类版本">{detailQuery.data.email.classification_version || '-'}</Descriptions.Item>
               <Descriptions.Item label="原始EML">
@@ -486,7 +453,6 @@ export default function EmailsPage() {
                 columns={[
                   { title: '解析器', dataIndex: 'parser_type', width: 90 },
                   { title: '意图', dataIndex: 'intent_type', width: 120 },
-                  { title: '子类型', dataIndex: 'intent_subtype', width: 150 },
                   { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
                   { title: '应用状态', dataIndex: 'apply_status', width: 120, render: (value: string) => <StatusTag value={value} /> },
                   { title: '缺失字段', dataIndex: 'missing_fields', render: (value) => <JsonBlock value={value} /> },
@@ -496,91 +462,6 @@ export default function EmailsPage() {
           </div>
         ) : null}
       </Drawer>
-      <Modal
-        title="手动邮件入库"
-        open={ingestOpen}
-        onCancel={() => {
-          setIngestOpen(false);
-          setManualAttachments([]);
-        }}
-        footer={null}
-        destroyOnClose
-      >
-        <Form<EmailIngestRequest>
-          layout="vertical"
-          initialValues={{ mailbox_account: 'manual', folder_name: 'INBOX' }}
-          onFinish={(values) => ingestMutation.mutate(values)}
-        >
-          <Form.Item label="邮箱账号" name="mailbox_account" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item label="发件人" name="from_address" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item label="收件人" name="to_addresses">
-            <Input />
-          </Form.Item>
-          <Form.Item label="主题" name="subject">
-            <Input />
-          </Form.Item>
-          <Form.Item label="正文" name="text_body">
-            <Input.TextArea rows={7} />
-          </Form.Item>
-          <Form.Item label="附件">
-            <Upload
-              multiple
-              accept=".docx,.xlsx,.csv,.txt,.html,.htm,.pdf,image/*"
-              showUploadList={false}
-              beforeUpload={(file) => {
-                addManualAttachment(file).catch(handleMutationError);
-                return Upload.LIST_IGNORE;
-              }}
-            >
-              <Button icon={<UploadOutlined />}>选择附件</Button>
-            </Upload>
-            <Table<EmailIngestAttachment>
-              size="small"
-              rowKey={(record) => `${record.file_name}-${record.file_size ?? 0}`}
-              dataSource={manualAttachments}
-              pagination={false}
-              style={{ marginTop: 8 }}
-              columns={[
-                { title: '文件名', dataIndex: 'file_name', ellipsis: true },
-                { title: '类型', dataIndex: 'content_type', width: 160 },
-                { title: '大小', dataIndex: 'file_size', width: 100, render: (value?: number | null) => formatFileSizeKb(undefined, value) },
-                {
-                  title: '操作',
-                  width: 80,
-                  render: (_, record) => (
-                    <Button
-                      type="link"
-                      size="small"
-                      onClick={() => setManualAttachments((items) => items.filter((item) => item !== record))}
-                    >
-                      移除
-                    </Button>
-                  ),
-                },
-              ]}
-            />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={ingestMutation.isPending}>
-            入库
-          </Button>
-        </Form>
-      </Modal>
     </div>
   );
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const value = String(reader.result || '');
-      resolve(value.includes(',') ? value.split(',', 2)[1] : value);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error('FILE_READ_FAILED'));
-    reader.readAsDataURL(file);
-  });
 }

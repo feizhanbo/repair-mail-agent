@@ -1,8 +1,18 @@
-from app.models import Base
+from app.models import Base, Email, RepairTicket
+from app.services.tickets import EMAIL_FIELDS, TICKET_FIELDS
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 37
+    assert len(Base.metadata.tables) == 41
+
+
+def test_ticket_serializer_fields_exist_on_ticket_model() -> None:
+    assert not [field for field in TICKET_FIELDS if not hasattr(RepairTicket, field)]
+
+
+def test_email_serializer_fields_exist_and_expose_persistence_contract() -> None:
+    assert not [field for field in EMAIL_FIELDS if not hasattr(Email, field)]
+    assert {"persistence_tier", "classification_locked"} <= set(EMAIL_FIELDS)
 
 
 def test_phase_one_table_names() -> None:
@@ -20,6 +30,9 @@ def test_phase_one_table_names() -> None:
         "field_audit_logs",
         "job_run_logs",
         "mail_fetch_records",
+        "mailbox_sync_states",
+        "email_outbox",
+        "mail_delivery_events",
         "manual_review_tasks",
         "notification_events",
         "notification_user_states",
@@ -36,6 +49,7 @@ def test_phase_one_table_names() -> None:
         "sap_sn_staging",
         "sn_validation_results",
         "system_event_logs",
+        "system_configs",
         "ticket_status_logs",
         "ticket_relay_exports",
         "ticket_rma_items",
@@ -68,6 +82,20 @@ def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:
         "imap_uid",
     )
     assert "fetch_status" in table.columns
+    assert table.columns["message_id"].nullable is True
+    assert {"raw_eml_oss_object_id", "raw_eml_sha256", "internal_date", "raw_retention_mode"} <= set(table.columns.keys())
+
+
+def test_mail_transport_foundation_contract() -> None:
+    sync_columns = Base.metadata.tables["mailbox_sync_states"].columns
+    assert {"uid_validity", "sync_mode", "last_discovered_uid", "last_fetched_uid", "lease_expires_at"} <= set(sync_columns.keys())
+    outbox_columns = Base.metadata.tables["email_outbox"].columns
+    assert {
+        "reply_record_id", "idempotency_key", "message_id", "frozen_eml_oss_object_id",
+        "frozen_eml_sha256", "status", "lease_owner", "accepted_at",
+    } <= set(outbox_columns.keys())
+    delivery_columns = Base.metadata.tables["mail_delivery_events"].columns
+    assert {"outbox_id", "original_message_id", "final_recipient", "delivery_status"} <= set(delivery_columns.keys())
 
 
 def test_email_oss_link_columns_exist_for_archival_consistency() -> None:
@@ -107,7 +135,7 @@ def test_sn_hierarchy_and_sap_export_columns_exist() -> None:
         "ticket_id",
         "ticket_item_id",
         "relay_export_id",
-            "source_request_id",
+            "RequestID",
         "payload_hash",
         "remote_call_id",
         "rma_no",
@@ -142,3 +170,28 @@ def test_board_policy_and_ticket_route_columns_exist() -> None:
         "return_route_status",
         "return_route_snapshot",
     } <= set(item_columns.keys())
+
+
+def test_sn_asset_business_sn_is_indexed_but_not_unique() -> None:
+    table = Base.metadata.tables["sn_assets"]
+    unique_sets = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("sn",) not in unique_sets
+    assert ("source_system", "ins_id") in unique_sets
+    assert ("source_system", "external_id") in unique_sets
+    assert any(index.name == "idx_sn_assets_sn" and not index.unique for index in table.indexes)
+
+
+def test_sap_sn_staging_identity_is_batch_and_ins_id() -> None:
+    table = Base.metadata.tables["sap_sn_staging"]
+    unique_sets = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("sync_batch_id", "ins_id") in unique_sets
+    assert ("sync_batch_id", "sn") not in unique_sets
+    assert table.columns["ins_id"].nullable is False

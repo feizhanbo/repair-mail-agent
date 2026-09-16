@@ -119,7 +119,6 @@ async def export_tickets(
     request_date_start: date | None = None,
     request_date_end: date | None = None,
 ) -> Response:
-    del current_user
     rows = await ticket_service.export_tickets(
         session,
         status_code=status_code,
@@ -153,6 +152,17 @@ async def export_tickets(
         "updated_at",
     ]
     content = await asyncio.to_thread(xlsx_bytes, rows, fieldnames)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="tickets_exported",
+        target_type="ticket_export", description="用户导出工单业务数据。",
+        after_data={"row_count": len(rows), "filter_keys": sorted(key for key, value in {
+            "status_code": status_code, "keyword": keyword, "ticket_no": ticket_no,
+            "customer": customer, "contact": contact, "sn": sn,
+            "assigned_user_id": assigned_user_id, "request_date_start": request_date_start,
+            "request_date_end": request_date_end,
+        }.items() if value is not None)},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -166,8 +176,13 @@ async def export_selected_tickets(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> Response:
-    del current_user
     content = await ticket_service.export_tickets_selected(session, ids=payload.ids)
+    await log_operation(
+        session, user_id=current_user.id, operation_type="tickets_exported",
+        target_type="ticket_export", description="用户导出选中的工单业务数据。",
+        after_data={"selected_count": len(payload.ids), "selected_ids": payload.ids},
+    )
+    await session.commit()
     return Response(
         content=content,
         media_type=EXCEL_MEDIA_TYPE,
@@ -746,15 +761,6 @@ async def approve_rma_manual_policy(
     )
 
 
-@router.post("/{ticket_id}/confirm-device-received", deprecated=True)
-async def confirm_ticket_device_received(
-    ticket_id: int,
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
-) -> dict:
-    del ticket_id, current_user
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
-
-
 @router.post("/{ticket_id}/confirm-export", deprecated=True)
 async def confirm_export(
     ticket_id: int,
@@ -914,7 +920,6 @@ async def delete_ticket(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
-    reason: Annotated[str, Query(min_length=3, max_length=500)],
     confirmation_token: Annotated[str, Query(min_length=20)],
     force_local_cleanup: bool = False,
 ) -> dict:
@@ -923,7 +928,7 @@ async def delete_ticket(
             session,
             ticket_id=ticket_id,
             user_id=current_user.id,
-            reason=reason,
+            reason="用户确认删除工单",
             confirmation_token=confirmation_token,
             force_local_cleanup=force_local_cleanup,
         )

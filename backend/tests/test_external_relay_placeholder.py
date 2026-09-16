@@ -30,16 +30,16 @@ async def test_raw_parse_result_push_is_deprecated() -> None:
     result = await push_ai_parse_result_to_relay(object(), parse_result_id=123)
     assert result["status"] == "deprecated"
     assert result["parse_result_id"] == 123
-    assert "SourceRequestID" in result["message"]
+    assert "RequestID" in result["message"]
 
 
-def test_configuration_requires_source_request_column(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configuration_requires_request_table(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "RELAY_SQLSERVER_ENABLED", True)
     monkeypatch.setattr(settings, "RELAY_ADAPTER", "sqlserver")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN", "")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_REQUEST_TABLE", "")
     status = relay_configuration_status()
     assert status["configured"] is False
-    assert "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN" in status["missing"]
+    assert "RELAY_SQLSERVER_REQUEST_TABLE" in status["missing"]
 
 
 def test_identifier_rejects_sql_fragments() -> None:
@@ -85,27 +85,21 @@ class _Connection:
 def _items() -> list[ExternalRmaSubmissionItem]:
     return [
         ExternalRmaSubmissionItem(
-            source_request_id=UUID("11111111-1111-4111-8111-111111111111"),
+            request_id=UUID("11111111-1111-4111-8111-111111111111"),
             sn="SN-1",
-            payload={"sn": "SN-1", "customer_code": "CM1"},
+            payload={"RequestID": "11111111-1111-4111-8111-111111111111", "internalSN": "SN-1", "customer": "CM1"},
         ),
         ExternalRmaSubmissionItem(
-            source_request_id=UUID("22222222-2222-4222-8222-222222222222"),
+            request_id=UUID("22222222-2222-4222-8222-222222222222"),
             sn="SN-2",
-            payload={"sn": "SN-2", "customer_code": "CM1"},
+            payload={"RequestID": "22222222-2222-4222-8222-222222222222", "internalSN": "SN-2", "customer": "CM1"},
         ),
     ]
 
 
 def _configure_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_SCHEMA", "dbo")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_RESULT_TARGET", "exported")
-    monkeypatch.setattr(settings, "RELAY_SQLSERVER_SOURCE_REQUEST_ID_COLUMN", "SourceRequestID")
-    monkeypatch.setattr(
-        settings,
-        "RELAY_SQLSERVER_RESULT_COLUMN_MAP",
-        {"sn": "internalSN", "customer_code": "customer"},
-    )
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_REQUEST_SCHEMA", "dbo")
+    monkeypatch.setattr(settings, "RELAY_SQLSERVER_REQUEST_TABLE", "oscl_rma")
 
 
 def test_sqlserver_submits_all_sn_in_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +111,7 @@ def test_sqlserver_submits_all_sn_in_one_transaction(monkeypatch: pytest.MonkeyP
     assert connection.committed is True
     assert connection.rolled_back is False
     assert len(connection.cursor_value.calls) == 2
-    assert "[SourceRequestID]" in connection.cursor_value.calls[0][0]
+    assert "[RequestID]" in connection.cursor_value.calls[0][0]
     assert "CallID" not in connection.cursor_value.calls[0][0]
 
 

@@ -14,66 +14,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.repair_items import canonical_sn, normalize_repair_item, normalize_repair_items
+from app.ai.prompts import PROMPTS, REPAIR_FIELD_EXTRACT, REPLY_DRAFT
+from app.core.email_classification import CLASSIFICATION_VERSION, decision_for_intent, normalize_intent
+from app.core.repair_items import (
+    canonical_sn,
+    normalize_board_code,
+    normalize_repair_item,
+    normalize_repair_items,
+)
 from app.core.request_context import get_correlation_id
-from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse, DeepSeekProvider
-from app.integrations.qwen_provider import QwenProvider
-from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, SnAsset
+from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse
+from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
 from app.services.parser import clean_email_body
-
-AI_EXTRACT_SYSTEM_PROMPT = """
-你是邮件报修系统的结构化解析助手，只能输出 JSON 对象。
-所有邮件都必须由你判断最终类型；规则解析只作为候选上下文，不能直接决定结果。
-请输出 intent_type, extracted_fields, extracted_items, missing_fields, conflict_fields, confidence_score,
-field_confidences, evidence, confidence_reasons, manual_review_direction, original_evidence。
-置信度必须给出依据：SN 是否有效、邮箱/电话是否正常、字段是否冲突、邮件类型是否准确、正文是否完整、是否有异常。
-如果需要人工处理，manual_review_direction 要明确说明人工需要核对什么，并在 original_evidence 放入原始邮件片段依据。
-不要编造不存在的信息；不确定字段放入 missing_fields 或 conflict_fields。
-联系电话或手机号可以抽取为 contact_phone，但它是选填字段，缺失时不得放入 missing_fields。
-工单明细只从邮件提取 sn、board_code（板卡型号）、board_name（板卡名称）和故障信息。
-material_code/material_name 是 SAP 物料主数据，只能由 SN 反查，禁止根据邮件内容猜测或写入。
-mailing_address/contact_person/contact_phone 是客户方邮寄信息；维修寄回地址由系统规则计算，禁止从邮件字段混用。
-""".strip()
-
-AI_EXTRACT_SYSTEM_PROMPT += """
-
-业务范围规则：
-- 本系统只处理客户将板卡寄回本公司维修并申请 RMA 的业务。
-- 只有邮件明确说明属于其他维修或服务业务时，才分类为
-  intent_type=irrelevant、intent_subtype=out_of_scope_repair，并在
-  evidence.scope_decision 中提供原文范围证据。
-- 广告、系统通知等普通无关邮件使用 intent_subtype=general_irrelevant。
-- SN 未知、SN 不存在、资料缺失或描述不完整都不能作为超范围依据。
-- intent_type 不是 irrelevant 时，intent_subtype 必须为 null。
-""".strip()
-
-AI_EXTRACT_SYSTEM_PROMPT += """
-
-邮件业务分层分类：
-- FIRST/auto_repair: new_repair、thread_new_repair、customer_supplement。
-- SECOND/manual_rma_business: component_replacement_repair、onsite_service、
-  warranty_status_inquiry、repair_thread_other。
-- THIRD/lifecycle_only: device_intake_received、repaired_device_dispatched、
-  customer_repaired_device_received、contract_confirmation、invoice、
-  third_party_equipment_quote。
-- UNKNOWN: unknown。
-明确询问某个 SN/板卡/设备是否过保、保修状态或保修截止日期时，必须使用
-warranty_status_inquiry；客户仅陈述已经过保并明确申请标准寄修时，不得仅因“过保”
-判为咨询。回复链不等于补充信息；修改 RMA/SN/地址、撤销、异议和进度询问使用
-repair_thread_other。回复链中明确提出另一台、新增或再次报修时使用 thread_new_repair。
-同一邮件同时补充旧工单并提出新报修时使用 repair_thread_other，并列出
-candidate_intents。清晰的新报修动作优先于纯 THIRD 通知。输出 handling_level、
-candidate_intents 和 classification_reason_code；不得让 SECOND 与 unknown 混淆。
-""".strip()
-
-AI_REPLY_SYSTEM_PROMPT = """
-你是邮件报修自动化系统的中文客服助理。你只能输出 JSON 对象。
-根据工单缺失字段和模板草稿生成更自然的追问草稿。草稿只能用于人工审核，不代表已发送。
-语气礼貌、简洁，避免承诺维修结果，不要加入输入中不存在的客户信息。
-""".strip()
+from app.services.sn_master_resolution import sn_exists
 
 logger = logging.getLogger(__name__)
 _ai_log_file_lock = asyncio.Lock()
@@ -92,28 +49,15 @@ def _is_retryable_error(exc: AiProviderError) -> bool:
 
 
 def text_ai_configured() -> bool:
-    return bool(settings.AI_API_KEY)
+    return llm_task_configured(LlmTask.REPAIR_FIELD_EXTRACT)
 
 
 def multimodal_ai_configured() -> bool:
-    return (
-        settings.MULTIMODAL_PROVIDER.lower() == "qwen"
-        and bool(settings.QWEN_API_KEY)
-        and bool(settings.QWEN_VL_MODEL or settings.QWEN_MODEL)
-    )
+    return llm_task_configured(LlmTask.ATTACHMENT_VISUAL_PARSE)
 
 
 def ai_configured() -> bool:
     return text_ai_configured()
-
-
-def _text_provider() -> DeepSeekProvider:
-    return DeepSeekProvider(
-        api_key=settings.AI_API_KEY,
-        base_url=settings.AI_BASE_URL,
-        model=settings.AI_MODEL,
-        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
-    )
 
 
 def _compact_text(value: str | None, limit: int) -> str:
@@ -121,6 +65,205 @@ def _compact_text(value: str | None, limit: int) -> str:
         return ""
     normalized = value.strip()
     return normalized[:limit]
+
+
+_BODY_TOKEN_PATTERN = re.compile(r"\b[A-Z0-9][A-Z0-9._-]{7,99}\b", re.IGNORECASE)
+_EMBEDDED_SN_PATTERN = re.compile(
+    r"M[A-Z0-9]{13,20}(?=(?:校准|自检|FAIL|异常|故障|损坏|[,，。;；\s]|$))",
+    re.IGNORECASE,
+)
+_RETURN_CONTEXT_PATTERNS = (
+    re.compile(r"(?:维修返回地址|返修寄回地址|维修后寄回地址|寄回地址|收件地址|邮寄地址)\s*[:：]?", re.IGNORECASE),
+    re.compile(r"(?:shipping information after repaired|send back to|return address)\s*[:：]?", re.IGNORECASE),
+)
+_FIELD_LABEL_PATTERNS = {
+    "contact_person": re.compile(r"(?:寄回联系人|收件人|联系人|contact|attn)\s*[:：]?", re.IGNORECASE),
+    "contact_phone": re.compile(r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel|phone|mob)\s*[/A-Za-z]*\s*[:：]?", re.IGNORECASE),
+}
+_SUPPLEMENT_PHONE_PATTERN = re.compile(
+    r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
+    r"[ \t]*[:：]?[ \t]*(\+?\d[\d \t()\-]{5,28}\d)",
+    re.IGNORECASE,
+)
+_EXPLICIT_ENGLISH_ADDRESS_PATTERN = re.compile(
+    r"(?:^|\n)[ \t]*(?:addr(?:ess)?|shipping[ \t]+address)"
+    r"[ \t]*[:：][ \t]*([^\r\n]{8,220})"
+    r"(?:\r?\n[ \t]*ZIP[ \t]*[:：][ \t]*([^\r\n]{3,20}))?",
+    re.IGNORECASE,
+)
+
+
+def _apply_deterministic_explicit_return_fields(
+    *, fields: dict[str, Any], email: Email, evidence: dict[str, Any],
+    field_confidences: dict[str, float]
+) -> None:
+    """Preserve explicit current-message labels when the model paraphrases them."""
+    body = clean_email_body(email)
+    address_match = _EXPLICIT_ENGLISH_ADDRESS_PATTERN.search(body)
+    if address_match:
+        address = address_match.group(1).strip()
+        postal_code = (address_match.group(2) or "").strip()
+        if postal_code:
+            address = f"{address} ZIP: {postal_code}"
+        fields["mailing_address"] = address
+        field_confidences["mailing_address"] = 1.0
+        evidence.setdefault("derived_fields", {})["mailing_address"] = {
+            "source": "explicit_english_address_label"
+        }
+
+
+def _apply_deterministic_supplement_fields(
+    *, fields: dict[str, Any], email: Email, evidence: dict[str, Any],
+    field_confidences: dict[str, float]
+) -> None:
+    """Prefer explicit labels in the customer's latest reply over AI omission."""
+    body = clean_email_body(email)
+    phone_match = _SUPPLEMENT_PHONE_PATTERN.search(body)
+    if phone_match:
+        fields["contact_phone"] = re.sub(
+            r"\s+", "", phone_match.group(1).strip()
+        )
+        field_confidences["contact_phone"] = 1.0
+        evidence.setdefault("derived_fields", {})["contact_phone"] = {
+            "source": "explicit_supplement_label"
+        }
+
+
+def _normalize_customer_mailing_address(value: Any) -> Any:
+    """Remove only an immediately repeated municipality prefix.
+
+    This deliberately avoids broad address rewriting: the source mail remains
+    unchanged and only an unambiguous adjacent duplication is normalized.
+    """
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    for municipality in ("北京市", "上海市", "天津市", "重庆市"):
+        normalized = re.sub(
+            rf"^(?:{re.escape(municipality)}){{2,}}",
+            municipality,
+            normalized,
+        )
+    return normalized
+
+
+def _return_context(body: str) -> str:
+    starts = [
+        match.start()
+        for pattern in _RETURN_CONTEXT_PATTERNS
+        for match in pattern.finditer(body)
+    ]
+    if not starts:
+        return ""
+    # A return-information declaration normally covers the remaining contact
+    # block. Limit its size so unrelated quoted history cannot become evidence.
+    return body[min(starts) : min(len(body), min(starts) + 1200)]
+
+
+def _sanitize_customer_return_fields(
+    *,
+    fields: dict[str, Any],
+    email: Email,
+    evidence: dict[str, Any],
+    field_confidences: dict[str, float],
+) -> None:
+    """Reject signature-only customer return details after AI extraction."""
+    body = clean_email_body(email)
+    if not body:
+        return
+    context = _return_context(body)
+    rejected: list[str] = []
+    accepted: list[str] = []
+    for name in ("mailing_address", "contact_person", "contact_phone"):
+        value = str(fields.get(name) or "").strip()
+        if not value:
+            continue
+        value_present = value.casefold() in context.casefold()
+        if name == "mailing_address":
+            supported = bool(
+                context
+                and (
+                    value_present
+                    or re.search(
+                        r"(?:^|\n)\s*(?:addr(?:ess)?|ship(?:ping)? address)\s*[:：]",
+                        context,
+                        re.IGNORECASE,
+                    )
+                )
+            )
+        elif name == "contact_person":
+            supported = bool(
+                context
+                and value_present
+                and (
+                    _FIELD_LABEL_PATTERNS[name].search(context)
+                    or re.search(r"shipping information after repaired|send back to", context, re.IGNORECASE)
+                )
+            )
+        else:
+            supported = bool(
+                context
+                and value_present
+                and _FIELD_LABEL_PATTERNS[name].search(context)
+            )
+        if not supported:
+            fields.pop(name, None)
+            rejected.append(name)
+        else:
+            accepted.append(name)
+            field_confidences[name] = 1.0
+    if rejected:
+        evidence.setdefault("derived_fields", {})["rejected_signature_only_fields"] = {
+            "fields": rejected,
+            "reason": "explicit_customer_return_context_required",
+        }
+    if accepted:
+        evidence.setdefault("derived_fields", {})["accepted_customer_return_fields"] = {
+            "fields": accepted,
+            "reason": "explicit_customer_return_context",
+        }
+
+
+async def _replace_ai_sns_with_known_body_assets(
+    session: AsyncSession,
+    *,
+    email: Email,
+    items: list[dict[str, Any]],
+    evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Prefer exact, valid SN master hits found in the body over AI column guesses."""
+    body = clean_email_body(email)
+    tokens = list(
+        dict.fromkeys(
+            [match.group(0).upper() for match in _BODY_TOKEN_PATTERN.finditer(body)]
+            + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
+        )
+    )
+    known_sns: list[str] = []
+    for token in tokens:
+        if await sn_exists(session, token):
+            known_sns.append(token)
+    known_sns = list(dict.fromkeys(known_sns))
+    actual_sns = [canonical_sn(item) for item in items if canonical_sn(item)]
+    if not known_sns or known_sns == actual_sns:
+        return items
+    if len(known_sns) != len(items):
+        return items
+    corrected: list[dict[str, Any]] = []
+    for item, sn in zip(items, known_sns, strict=True):
+        row = dict(item)
+        row["sn"] = sn
+        # If the AI put the actual SN into board_code because it shifted a
+        # flattened table column, that value is not a valid board code.
+        if normalize_board_code(row.get("board_code")) in set(known_sns):
+            row.pop("board_code", None)
+        corrected.append(row)
+    evidence.setdefault("derived_fields", {})["sn_list"] = {
+        "source": "valid_sn_assets_present_in_email_body",
+        "sn_count": len(known_sns),
+        "replaced_ai_candidates": actual_sns,
+    }
+    return corrected
 
 
 def _safe_json(value: Any) -> str:
@@ -173,7 +316,7 @@ def _key_result(call_type: str, parsed: BaseModel | None) -> dict[str, Any] | No
     if parsed is None:
         return None
     data = parsed.model_dump()
-    if call_type in {"field_extract", "classification_and_extract"}:
+    if call_type == "field_extract":
         return {
             "intent_type": data.get("intent_type"),
             "field_keys": sorted((data.get("extracted_fields") or {}).keys()),
@@ -243,7 +386,6 @@ def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, i
 
 def _ai_call_context(call_type: str) -> tuple[str, str]:
     mapping = {
-        "classification_and_extract": ("邮件级 DeepSeek 结构化解析", "识别邮件意图并抽取业务字段"),
         "field_extract": ("邮件级 DeepSeek 结构化解析", "抽取业务字段和明细"),
         "generate_reply_draft": ("DeepSeek 回复草稿生成", "生成客户回复草稿"),
         "attachment_text_parse": ("Qwen 文本类附件解析", "解析文本、表格或文档附件"),
@@ -305,10 +447,15 @@ async def persist_ai_log(
     ticket_id: int | None = None,
     attachment_id: int | None = None,
     job_run_id: int | None = None,
+    mail_fetch_record_id: int | None = None,
     correlation_id: str | None = None,
     provider_name: str = "deepseek",
     model_name: str | None = None,
     prompt_version: str | None = None,
+    prompt_hash: str | None = None,
+    route_name: str | None = None,
+    route_attempt: int = 1,
+    fallback_used: bool = False,
     attempt_count: int = 1,
     error_message: str | None = None,
 ) -> AiCallLog:
@@ -321,12 +468,17 @@ async def persist_ai_log(
         "correlation_id": correlation_id or get_correlation_id(),
         "call_type": call_type,
         "prompt_version": prompt_version,
+        "prompt_hash": prompt_hash,
+        "route_name": route_name,
+        "route_attempt": route_attempt,
+        "fallback_used": fallback_used,
         "provider": provider_name,
         "model": model_name,
         "email_id": email_id,
         "ticket_id": ticket_id,
         "attachment_id": attachment_id,
         "job_run_id": job_run_id,
+        "mail_fetch_record_id": mail_fetch_record_id,
         "input_metadata": _payload_metadata(input_payload),
         "request_metadata": _payload_metadata(request_payload),
         "response_metadata": _payload_metadata(output_payload),
@@ -359,11 +511,16 @@ async def persist_ai_log(
         ticket_id=ticket_id,
         attachment_id=attachment_id,
         job_run_id=job_run_id,
+        mail_fetch_record_id=mail_fetch_record_id,
         correlation_id=correlation_id or get_correlation_id(),
         call_type=call_type,
         provider_name=provider_name,
         model_name=model_name,
         prompt_version=prompt_version,
+        prompt_hash=prompt_hash,
+        route_name=route_name,
+        route_attempt=route_attempt,
+        fallback_used=fallback_used,
         input_summary=input_summary[:1000],
         output_summary=(output_summary or "")[:1000] or None,
         parsed_key_result=_key_result(call_type, parsed),
@@ -382,6 +539,29 @@ async def persist_ai_log(
     )
     session.add(ai_log)
     await session.flush()
+    log_method = logger.info if ai_log.status in {"success", "low_confidence"} else logger.error
+    log_method(
+        "AI call persisted",
+        extra={
+            "event": "ai_call_completed" if ai_log.status != "failed" else "ai_call_failed",
+            "trace_id": trace_id,
+            "call_type": call_type,
+            "provider": provider_name,
+            "model": model_name,
+            "prompt_version": prompt_version,
+            "route_name": route_name,
+            "fallback": fallback_used,
+            "attempt": attempt_count,
+            "duration_ms": latency_ms,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "status": ai_log.status,
+            "error_code": error_code,
+            "email_id": email_id,
+            "ticket_id": ticket_id,
+            "attachment_id": attachment_id,
+        },
+    )
     return ai_log
 
 
@@ -567,29 +747,18 @@ async def _run_ai_json(
     if not text_ai_configured():
         return None, None
 
-    last_error: AiProviderError | None = None
-    max_retries = settings.AI_MAX_RETRIES
-
-    attempt_count = 0
-    for attempt in range(max_retries + 1):
-        attempt_count = attempt + 1
-        try:
-            completion = await _text_provider().chat_json(messages=messages, response_model=response_model)
-            last_error = None
-            break
-        except AiProviderError as exc:
-            last_error = exc
-            if attempt < max_retries and _is_retryable_error(exc):
-                delay = settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
-                logger.warning(
-                    "AI call failed (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, max_retries, delay, exc,
-                )
-                await asyncio.sleep(delay)
-            else:
-                break
-
-    if last_error is not None:
+    task = LlmTask.REPLY_DRAFT if call_type == "reply_draft" else LlmTask.REPAIR_FIELD_EXTRACT
+    prompt = PROMPTS[task.value]
+    logger.info(
+        "AI call started",
+        extra={
+            "event": "ai_call_started", "call_type": call_type, "prompt_version": prompt.version,
+            "email_id": email_id, "ticket_id": ticket_id,
+        },
+    )
+    try:
+        completion = await invoke_structured(task=task, messages=messages, response_model=response_model)
+    except AiProviderError as last_error:
         trace_id = sha256_text(f"{call_type}:{utcnow().isoformat()}")[:32]
         raw_out = getattr(last_error, "raw_output", None)
         error_code = safe_error_code(last_error, "AI_CALL_FAILED")
@@ -598,7 +767,7 @@ async def _run_ai_json(
             trace_id=trace_id,
             call_type=call_type,
             input_payload=input_payload,
-            request_payload={"model": settings.AI_MODEL, "messages": messages, "response_format": {"type": "json_object"}},
+            request_payload=getattr(last_error, "request_payload", {"messages": messages}),
             output_payload={"error": str(last_error), "raw_output": raw_out if raw_out else None},
             parsed=None,
             latency_ms=None,
@@ -606,7 +775,14 @@ async def _run_ai_json(
             output_summary=error_code,
             email_id=email_id,
             ticket_id=ticket_id,
-            attempt_count=attempt_count,
+            provider_name=str(getattr(last_error, "route_name", "unknown")),
+            model_name=str(getattr(last_error, "model_name", "unknown")),
+            prompt_version=prompt.version,
+            prompt_hash=prompt.content_hash,
+            route_name=getattr(last_error, "route_name", None),
+            route_attempt=int(getattr(last_error, "route_attempt", 1)),
+            fallback_used=int(getattr(last_error, "route_attempt", 1)) > 1,
+            attempt_count=int(getattr(last_error, "route_attempt", 1)),
             error_message=error_code,
         )
         return None, ai_log
@@ -626,7 +802,14 @@ async def _run_ai_json(
         output_summary=output_summary,
         email_id=email_id,
         ticket_id=ticket_id,
-        attempt_count=attempt_count,
+        provider_name=completion.provider_name or "unknown",
+        model_name=completion.model_name or "unknown",
+        prompt_version=prompt.version,
+        prompt_hash=prompt.content_hash,
+        route_name=completion.route_name,
+        route_attempt=completion.route_attempt,
+        fallback_used=completion.fallback_used,
+        attempt_count=completion.route_attempt,
     )
     return parsed, ai_log
 
@@ -728,6 +911,34 @@ def _email_input(email: Email, attachments: list[EmailAttachment], mode: str) ->
 def _valid_email(value: str | None) -> bool:
     parsed = parseaddr(value or "")[1]
     return bool(parsed and "@" in parsed and "." in parsed.rsplit("@", 1)[-1])
+
+
+_PROBLEM_LINE_PATTERN = re.compile(
+    r"(?:detected\s+fail|self[ -]?check|\bfail(?:ed|ure|ing)?\b|\bfault\b|"
+    r"\berror\b|\babnormal(?:ity)?\b|\bissue\b|\bproblem\b|故障|异常|损坏|不良|失效)",
+    re.IGNORECASE,
+)
+_NEGATED_PROBLEM_PATTERN = re.compile(
+    r"\b(?:no|not|without)\s+(?:issue|problem|fault|error|failure)\b|"
+    r"(?:无|没有|未发现)(?:故障|异常|问题)",
+    re.IGNORECASE,
+)
+
+
+def _problem_description_from_latest_reply(email: Email) -> str | None:
+    """Return a short explicit failure statement when the model omitted it."""
+    latest_reply = clean_email_body(email)
+    candidates: list[str] = []
+    for raw_line in latest_reply.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip(" \t-|;，；")
+        if not line or len(line) > 500:
+            continue
+        if not _PROBLEM_LINE_PATTERN.search(line) or _NEGATED_PROBLEM_PATTERN.search(line):
+            continue
+        candidates.append(line)
+        if len(candidates) == 3:
+            break
+    return "\n".join(dict.fromkeys(candidates)) or None
 
 
 def _intent_requires_business_fields(intent_type: str | None) -> bool:
@@ -877,6 +1088,24 @@ async def _request_date_source(
     return source_email or email, ticket
 
 
+def _can_auto_recover_customer_supplement(
+    *,
+    intent_type: str | None,
+    existing_ticket: RepairTicket | None,
+    expected_missing_fields: set[str],
+    missing: dict[str, Any],
+    conflicts: dict[str, Any],
+) -> bool:
+    """Whether a linked supplement can safely resume automated processing."""
+    return (
+        intent_type == "customer_supplement"
+        and existing_ticket is not None
+        and bool(expected_missing_fields)
+        and not missing
+        and not conflicts
+    )
+
+
 def _apply_request_date_fallback(
     *,
     fields: dict[str, Any],
@@ -926,11 +1155,42 @@ async def _enrich_ai_quality(
     evidence = dict(parsed.evidence or {})
     confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
+    existing_ticket: RepairTicket | None = None
+    expected_supplement_fields: set[str] = set()
 
     normalized_items = normalize_repair_items(
         dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)
     )
+    normalized_items = await _replace_ai_sns_with_known_body_assets(
+        session,
+        email=email,
+        items=normalized_items,
+        evidence=evidence,
+    )
     parsed.extracted_items = normalized_items
+    if fields.get("mailing_address"):
+        fields["mailing_address"] = _normalize_customer_mailing_address(
+            fields["mailing_address"]
+        )
+    _apply_deterministic_explicit_return_fields(
+        fields=fields,
+        email=email,
+        evidence=evidence,
+        field_confidences=field_confidences,
+    )
+    _sanitize_customer_return_fields(
+        fields=fields,
+        email=email,
+        evidence=evidence,
+        field_confidences=field_confidences,
+    )
+    if parsed.intent_type == "customer_supplement":
+        _apply_deterministic_supplement_fields(
+            fields=fields,
+            email=email,
+            evidence=evidence,
+            field_confidences=field_confidences,
+        )
     if not fields.get("problem_description"):
         descriptions = [
             str(item.get("failure_description")).strip()
@@ -943,6 +1203,18 @@ async def _enrich_ai_quality(
                 float(field_confidences.get("problem_description") or 0),
                 0.95,
             )
+    if _intent_requires_business_fields(parsed.intent_type) and not fields.get("problem_description"):
+        deterministic_problem = _problem_description_from_latest_reply(email)
+        if deterministic_problem:
+            fields["problem_description"] = deterministic_problem
+            field_confidences["problem_description"] = max(
+                float(field_confidences.get("problem_description") or 0),
+                0.9,
+            )
+            evidence.setdefault("derived_fields", {})["problem_description"] = {
+                "source": "explicit_failure_statement_in_latest_reply",
+                "line_count": len(deterministic_problem.splitlines()),
+            }
 
     if not fields.get("contact_email") and _valid_email(email.from_address):
         fields["contact_email"] = parseaddr(email.from_address)[1] or email.from_address
@@ -960,39 +1232,6 @@ async def _enrich_ai_quality(
         item_sns = [str(item.get("sn") or "").strip().upper() for item in items if isinstance(item, dict) and item.get("sn")]
         if not item_sns:
             missing.setdefault("sn", "缺少设备 SN，无法校验资产。")
-        else:
-            invalid_sns: list[str] = []
-            resolved_assets: list[SnAsset] = []
-            for sn in item_sns:
-                asset = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
-                if asset is None:
-                    invalid_sns.append(f"{sn}: 资产库不存在")
-                elif asset.asset_status != "valid":
-                    invalid_sns.append(f"{sn}: 状态为 {asset.asset_status}")
-                else:
-                    resolved_assets.append(asset)
-            if invalid_sns:
-                conflicts.setdefault("sn", "；".join(invalid_sns))
-            elif len(resolved_assets) == len(item_sns) and not fields.get("customer_name"):
-                customer_names = {
-                    str(getattr(asset, "customer_name", "") or "").strip()
-                    for asset in resolved_assets
-                    if str(getattr(asset, "customer_name", "") or "").strip()
-                }
-                customer_codes = {
-                    str(getattr(asset, "customer_code", "") or "").strip()
-                    for asset in resolved_assets
-                    if str(getattr(asset, "customer_code", "") or "").strip()
-                }
-                if len(customer_names) == 1:
-                    fields["customer_name"] = next(iter(customer_names))
-                    if len(customer_codes) == 1 and not fields.get("customer_code"):
-                        fields["customer_code"] = next(iter(customer_codes))
-                    field_confidences["customer_name"] = 1.0
-                    evidence.setdefault("derived_fields", {})["customer_name"] = {
-                        "source": "sn_asset_consensus",
-                        "sn_count": len(resolved_assets),
-                    }
 
     if parsed.intent_type in {"new_repair", "customer_supplement"}:
         source_email, existing_ticket = await _request_date_source(
@@ -1007,6 +1246,46 @@ async def _enrich_ai_quality(
             source_email=source_email,
             existing_request_date=existing_ticket.request_date if existing_ticket else None,
         )
+        if parsed.intent_type == "customer_supplement" and existing_ticket is not None:
+            original_missing = set((existing_ticket.missing_fields or {}).keys())
+            expected_supplement_fields = original_missing
+            # A supplement reply contains quoted history by definition.  When
+            # the customer is only answering fields that we explicitly asked
+            # for, never let AI re-interpret quoted table columns as new SNs or
+            # overwrite the original ticket's item structure.
+            existing_items = (
+                await session.execute(
+                    select(RepairTicketItem)
+                    .where(RepairTicketItem.ticket_id == existing_ticket.id)
+                    .order_by(RepairTicketItem.line_no.asc(), RepairTicketItem.id.asc())
+                )
+            ).scalars().all()
+            parsed.extracted_items = [
+                {
+                    "line_no": item.line_no,
+                    "sn": item.sn,
+                    "material_code": item.material_code,
+                    "material_name": item.material_name,
+                    "board_code": item.board_code,
+                    "board_name": item.board_name,
+                    "failure_description": item.failure_description,
+                }
+                for item in existing_items
+            ]
+            conflicts.pop("sn", None)
+            evidence.setdefault("quality_controls", {})[
+                "customer_supplement_item_preservation"
+            ] = {
+                "allowed": True,
+                "reason": "linked_ticket_items_are_authoritative_for_requested_field_supplement",
+                "ticket_id": existing_ticket.id,
+                "item_count": len(existing_items),
+            }
+            missing = {
+                key: value
+                for key, value in missing.items()
+                if key in original_missing and not fields.get(key)
+            }
 
     missing = required_missing_for_values(
         intent_type=parsed.intent_type,
@@ -1032,8 +1311,60 @@ async def _enrich_ai_quality(
         evidence["confidence_reasons"] = confidence_reasons
     if parsed.original_evidence:
         evidence["original_evidence"] = parsed.original_evidence
-    if parsed.manual_review_direction:
+    auto_recover_supplement = _can_auto_recover_customer_supplement(
+        intent_type=parsed.intent_type,
+        existing_ticket=existing_ticket,
+        expected_missing_fields=expected_supplement_fields,
+        missing=missing,
+        conflicts=conflicts,
+    )
+    accepted_return_fields = set(
+        (
+            evidence.get("derived_fields", {})
+            .get("accepted_customer_return_fields", {})
+            .get("fields", [])
+        )
+    )
+    explicit_return_context_resolved = (
+        parsed.intent_type == "new_repair"
+        and not missing
+        and not conflicts
+        and {"mailing_address", "contact_person", "contact_phone"}.issubset(
+            accepted_return_fields
+        )
+    )
+    if explicit_return_context_resolved:
+        evidence.pop("manual_review_direction", None)
+        evidence.setdefault("quality_controls", {})[
+            "explicit_customer_return_context"
+        ] = {
+            "allowed": True,
+            "reason": "all_customer_return_fields_supported_by_explicit_return_context",
+        }
+        parsed.confidence_score = max(
+            float(parsed.confidence_score or 0),
+            float(settings.AUTO_APPLY_MIN_CONFIDENCE),
+        )
+    if (
+        parsed.manual_review_direction
+        and not auto_recover_supplement
+        and not explicit_return_context_resolved
+    ):
         manual_directions.insert(0, parsed.manual_review_direction)
+    if auto_recover_supplement:
+        evidence.pop("manual_review_direction", None)
+        evidence.setdefault("quality_controls", {})[
+            "customer_supplement_auto_recovery"
+        ] = {
+            "allowed": True,
+            "reason": "linked_ticket_complete_without_conflicts",
+            "ticket_id": existing_ticket.id,
+            "resolved_field_keys": sorted(expected_supplement_fields),
+        }
+        parsed.confidence_score = max(
+            float(parsed.confidence_score or 0),
+            float(settings.AUTO_APPLY_MIN_CONFIDENCE),
+        )
     if manual_directions:
         evidence["manual_review_direction"] = "；".join(manual_directions)
 
@@ -1078,6 +1409,32 @@ async def parse_attachment_multimodal(
     return await parse_attachment(session, attachment)
 
 
+async def _resolve_email_sn_assets(
+    session: AsyncSession,
+    email: Email,
+) -> list[SnAsset]:
+    """Resolve valid SN master-data assets found in the email body.
+
+    The field-extraction prompt requires material_code/material_name to come
+    from SN master data instead of AI guessing.  Without an explicit master
+    snapshot in the prompt the model reports conservative low confidence, so
+    gold regression (and normal parsing) must pass the resolved assets along.
+    """
+    body = clean_email_body(email)
+    tokens = list(
+        dict.fromkeys(
+            [match.group(0).upper() for match in _BODY_TOKEN_PATTERN.finditer(body)]
+            + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
+        )
+    )
+    assets: list[SnAsset] = []
+    for token in tokens:
+        asset = await session.scalar(select(SnAsset).where(SnAsset.sn == token))
+        if asset is not None and asset.asset_status == "valid":
+            assets.append(asset)
+    return assets
+
+
 async def create_ai_parse_candidate(
     session: AsyncSession,
     *,
@@ -1093,13 +1450,26 @@ async def create_ai_parse_candidate(
         input_payload["rule_context"] = rule_context
     if multimodal_results:
         input_payload["multimodal_results"] = multimodal_results
+    if mode == "field_extract":
+        sn_assets = await _resolve_email_sn_assets(session, email)
+        if sn_assets:
+            input_payload["sn_master_data"] = [
+                {
+                    "sn": str(asset.sn),
+                    "material_code": str(asset.material_code or ""),
+                    "material_name": str(asset.material_name or ""),
+                    "customer_code": str(asset.customer_code or ""),
+                    "customer_name": str(asset.customer_name or ""),
+                }
+                for asset in sn_assets
+            ]
     messages = [
-        {"role": "system", "content": AI_EXTRACT_SYSTEM_PROMPT},
+        {"role": "system", "content": REPAIR_FIELD_EXTRACT.system},
         {
             "role": "user",
             "content": (
                 "请输出 JSON，字段为 intent_type, extracted_fields, extracted_items, missing_fields, "
-                "intent_subtype, conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
+                "conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
                 "manual_review_direction, original_evidence。\n"
                 f"{_safe_json(input_payload)}"
             ),
@@ -1117,15 +1487,24 @@ async def create_ai_parse_candidate(
     )
     if not isinstance(parsed, AiExtractResponse) or ai_log is None:
         return None
+    locked_intent = normalize_intent(email.intent_type)
+    locked_decision = decision_for_intent(locked_intent, reason_code=email.classification_reason_code or "PRECLASSIFICATION_LOCKED")
+    # Field extraction is downstream of the authoritative preclassification.
+    # Quality rules (required fields and deterministic fallbacks) must use the
+    # locked ingress intent, never a legacy intent echoed by the extraction
+    # model.
+    parsed.intent_type = locked_decision.intent_type
     parsed = await _enrich_ai_quality(session, parsed=parsed, email=email, attachments=attachments)
+    parsed.handling_level = locked_decision.handling_level
+    parsed.classification_version = email.classification_version or CLASSIFICATION_VERSION
+    parsed.classification_reason_code = email.classification_reason_code or locked_decision.reason_code
 
     parse_result = ParseResult(
         email_id=email.id,
         ticket_id=ticket_id,
         parser_type="ai",
-        parser_version=settings.AI_PROMPT_VERSION,
+        parser_version=REPAIR_FIELD_EXTRACT.version,
         intent_type=parsed.intent_type,
-        intent_subtype=parsed.intent_subtype,
         handling_level=parsed.handling_level,
         classification_version=parsed.classification_version,
         classification_confidence=parsed.confidence_score,
@@ -1142,11 +1521,11 @@ async def create_ai_parse_candidate(
             "source_type": "ai",
             "trace_id": ai_log.trace_id,
             "ai_call_log_id": ai_log.id,
-            "provider": "deepseek",
-            "model": settings.AI_MODEL,
-            "multimodal_provider": settings.MULTIMODAL_PROVIDER,
-            "multimodal_model": settings.QWEN_VL_MODEL or settings.QWEN_MODEL,
-            "prompt_version": settings.AI_PROMPT_VERSION,
+            "provider": ai_log.provider_name,
+            "model": ai_log.model_name,
+            "route_name": ai_log.route_name,
+            "fallback_used": ai_log.fallback_used,
+            "prompt_version": REPAIR_FIELD_EXTRACT.version,
             "mode": mode,
         },
         apply_status="pending",
@@ -1194,7 +1573,7 @@ async def generate_ai_reply_draft(
         },
     }
     messages = [
-        {"role": "system", "content": AI_REPLY_SYSTEM_PROMPT},
+        {"role": "system", "content": REPLY_DRAFT.system},
         {
             "role": "user",
             "content": (
@@ -1205,7 +1584,7 @@ async def generate_ai_reply_draft(
     ]
     parsed, ai_log = await _run_ai_json(
         session,
-        call_type="generate_reply_draft",
+        call_type="reply_draft",
         messages=messages,
         response_model=AiReplyDraftResponse,
         input_payload=input_payload,

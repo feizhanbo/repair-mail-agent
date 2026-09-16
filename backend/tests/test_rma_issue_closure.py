@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -16,8 +17,17 @@ from app.models import (
 from app.services import jobs, replies
 
 
+def test_rma_smtp_acceptance_is_committed_before_close_finalization() -> None:
+    source = inspect.getsource(replies._send_reply_record)
+    acceptance = source.index('reply.send_status = "sent"')
+    durable_boundary = source.index("await _commit_if_available(session)", acceptance)
+    close_finalization = source.index("closed = await _finalize_rma_issue(", acceptance)
+
+    assert acceptance < durable_boundary < close_finalization
+
+
 @pytest.mark.anyio
-async def test_rma_issue_closes_only_after_all_archive_gates_pass(
+async def test_rma_issue_archives_and_closes_ticket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ticket = RepairTicket(
@@ -70,15 +80,17 @@ async def test_rma_issue_closes_only_after_all_archive_gates_pass(
         get=get,
     )
 
-    async def transition(_session, *, ticket, trigger_event, **_kwargs):
-        assert trigger_event == "rma_issued_and_archived"
+    async def close_ticket(_session, **kwargs):
+        assert kwargs["to_status_code"] == "closed"
+        assert kwargs["trigger_event"] == "rma_issued_and_archived"
         ticket.current_status_code = "closed"
         return ticket
 
+    transition = AsyncMock(side_effect=close_ticket)
     monkeypatch.setattr(replies, "transition_ticket", transition)
     monkeypatch.setattr(replies, "_ensure_reply_manual_task", AsyncMock())
 
-    closed = await replies._finalize_rma_issue(
+    finalized = await replies._finalize_rma_issue(
         session,
         ticket=ticket,
         reply=reply,
@@ -86,7 +98,7 @@ async def test_rma_issue_closes_only_after_all_archive_gates_pass(
         auto=True,
     )
 
-    assert closed is True
+    assert finalized is True
     assert ticket.current_status_code == "closed"
     assert ticket.rma_status == "issued"
     assert reply.archive_status == "archived"
@@ -95,6 +107,7 @@ async def test_rma_issue_closes_only_after_all_archive_gates_pass(
     assert rma.pdf_validation_status == "passed"
     assert rma.pdf_archive_status == "archived"
     assert rma.issued_at is not None
+    transition.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -129,7 +142,6 @@ async def test_archive_retry_never_calls_smtp(
     )
 
     async def finalize(*_args, **_kwargs):
-        ticket.current_status_code = "closed"
         return True
 
     monkeypatch.setattr(replies, "_finalize_rma_issue", finalize)
@@ -145,7 +157,7 @@ async def test_archive_retry_never_calls_smtp(
         user_id=9,
     )
 
-    assert result["status"] == "closed"
+    assert result["status"] == "rma_sent"
     assert result["idempotent_reuse"] is False
     replies._send_reply_via_smtp.assert_not_called()
 

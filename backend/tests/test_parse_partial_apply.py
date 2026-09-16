@@ -73,6 +73,7 @@ async def test_partial_item_selection_creates_only_selected_candidate() -> None:
     items = [value for value in session.added if isinstance(value, RepairTicketItem)]
     audits = [value for value in session.added if isinstance(value, FieldAuditLog)]
     assert [item.sn for item in items] == ["TESTSN00000002"]
+    assert items[0].material_code is None
     assert len(audits) == 1
 
 
@@ -101,7 +102,7 @@ async def test_reparse_reconciles_existing_placeholder_without_duplicate_line() 
         email_id=3,
         extracted_items={
             "items": [
-                {"line_no": 1, "sn": "M8123260108000171", "failure_description": "Controlled failure"},
+                {"line_no": 1, "sn": "M8123260108000171", "material_code": "PART-X", "material_name": "Part X", "failure_description": "Controlled failure"},
             ]
         },
     )
@@ -109,8 +110,46 @@ async def test_reparse_reconciles_existing_placeholder_without_duplicate_line() 
     await _create_items_from_parse_result(session, ticket, parse, user_id=7)
 
     assert placeholders[0].sn == "M8123260108000171"
+    assert placeholders[0].material_code is None
+    assert placeholders[0].material_name is None
     assert session.deleted == [placeholders[1]]
     assert not [value for value in session.added if isinstance(value, RepairTicketItem)]
+
+
+@pytest.mark.anyio
+async def test_reparse_enriches_existing_same_sn_without_duplicate_item() -> None:
+    existing = RepairTicketItem(
+        id=11,
+        ticket_id=1,
+        line_no=1,
+        sn="M81252101025023",
+        quantity=1,
+        material_code="M8125",
+    )
+
+    class ReconcileSession(ItemSession):
+        async def execute(self, _statement):
+            return ScalarRows([existing])
+
+    session = ReconcileSession()
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="RMATEST",
+        problem_description="selfcheck FAIL",
+    )
+    parse = ParseResult(
+        id=2,
+        email_id=3,
+        extracted_items={"items": [{"sn": "m81252101025023", "material_name": "SVI40"}]},
+    )
+
+    await _create_items_from_parse_result(session, ticket, parse, user_id=None)
+
+    assert existing.material_code == "M8125"
+    assert existing.material_name is None
+    assert existing.failure_description == "selfcheck FAIL"
+    assert not [value for value in session.added if isinstance(value, RepairTicketItem)]
+    assert len([value for value in session.added if isinstance(value, FieldAuditLog)]) == 1
 
 
 @pytest.mark.anyio

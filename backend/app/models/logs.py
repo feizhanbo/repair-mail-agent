@@ -18,10 +18,12 @@ class AiCallLog(CreatedAtMixin, Base):
         Index("idx_ai_logs_ticket", "ticket_id"),
         Index("idx_ai_logs_job", "job_run_id"),
         Index("idx_ai_logs_attachment", "attachment_id"),
+        Index("idx_ai_logs_mail_fetch_record", "mail_fetch_record_id"),
         Index("idx_ai_logs_correlation", "correlation_id"),
         Index("idx_ai_logs_call_type", "call_type"),
         Index("idx_ai_logs_ticket_call_time", "ticket_id", "call_type", "created_at"),
         Index("idx_ai_logs_status", "status", "created_at"),
+        Index("idx_ai_logs_route_time", "route_name", "created_at"),
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="confidence_between_0_and_1"),
     )
 
@@ -31,11 +33,16 @@ class AiCallLog(CreatedAtMixin, Base):
     ticket_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("repair_tickets.id", name="fk_ai_logs_ticket"))
     job_run_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("job_run_logs.id", name="fk_ai_logs_job"))
     attachment_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("email_attachments.id", name="fk_ai_logs_attachment"))
+    mail_fetch_record_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("mail_fetch_records.id", name="fk_ai_logs_mail_fetch_record"))
     correlation_id: Mapped[str | None] = mapped_column(String(100))
     call_type: Mapped[str] = mapped_column(String(50), nullable=False)
     provider_name: Mapped[str | None] = mapped_column(String(100))
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    prompt_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
+    route_name: Mapped[str | None] = mapped_column(String(100))
+    route_attempt: Mapped[int] = mapped_column(nullable=False, server_default="1")
+    fallback_used: Mapped[bool] = mapped_column(mysql.BOOLEAN, nullable=False, server_default="0")
     input_summary: Mapped[str | None] = mapped_column(String(1000))
     output_summary: Mapped[str | None] = mapped_column(String(1000))
     parsed_key_result: Mapped[dict | None] = mapped_column(mysql.JSON)
@@ -63,6 +70,9 @@ class AiCallLog(CreatedAtMixin, Base):
     )
     attachment: Mapped["EmailAttachment | None"] = relationship(
         "EmailAttachment", foreign_keys=[attachment_id], back_populates="ai_call_logs", lazy="raise"
+    )
+    mail_fetch_record: Mapped["MailFetchRecord | None"] = relationship(
+        "MailFetchRecord", foreign_keys=[mail_fetch_record_id], back_populates="ai_call_logs", lazy="raise"
     )
     reply_records: Mapped[list["ReplyRecord"]] = relationship(
         "ReplyRecord", foreign_keys="ReplyRecord.ai_call_log_id", back_populates="ai_call_log", lazy="raise"

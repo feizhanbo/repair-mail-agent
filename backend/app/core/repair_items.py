@@ -32,6 +32,10 @@ def _serial_number_is_sn(value: Any) -> bool:
 def normalize_repair_item(payload: dict[str, Any], *, default_line_no: int | None = None) -> dict[str, Any]:
     """Normalize one item without treating an Excel row number as an SN."""
     normalized = dict(payload)
+    # Customer/parser input describes a board. SAP material identity is populated
+    # only by the authoritative SN-master resolution stage.
+    normalized.pop("material_code", None)
+    normalized.pop("material_name", None)
     serial_number = _text(normalized.get("serial_number"))
 
     line_no = normalized.get("line_no")

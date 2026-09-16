@@ -114,6 +114,7 @@ async def resolve_task(
         resolution_type=payload.resolution_type,
         next_action=payload.next_action,
         result_payload=payload.result_payload,
+        target_first_intent=payload.target_first_intent,
     )
     await session.commit()
     return ok(result, "manual task resolved")

@@ -6,9 +6,12 @@ import html
 import logging
 import re
 import smtplib
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
+from email import policy
 from email.message import EmailMessage
-from email.utils import getaddresses, make_msgid, parseaddr
+from email.parser import BytesParser
+from email.utils import format_datetime, getaddresses, make_msgid, parseaddr
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -20,7 +23,9 @@ from app.core.request_context import get_correlation_id
 from app.models import (
     Email,
     EmailAttachment,
+    EmailOutbox,
     EmailThread,
+    ExportSap,
     EmailTicketLink,
     ManualReviewTask,
     OssObject,
@@ -40,12 +45,19 @@ from app.services.external_operations import (
     start_external_operation,
     succeed_external_operation,
 )
+from app.services.email_outbox import (
+    mark_outbox_accepted,
+    mark_outbox_failed,
+    mark_outbox_sending,
+    prepare_outbox,
+)
 from app.services.mail_safety import TEST_MAIL_RECIPIENT, TEST_MAIL_SENDER, test_envelope_allowed, test_only_subject
 from app.services.mail_reply_renderer import (
     RelatedResource,
     ReplyRenderError,
     render_reply_history,
 )
+from app.resources.signature_logo import ACCO_TEST_LOGO_CONTENT_ID, ACCO_TEST_LOGO_PNG
 from app.services.rma_pdf import (
     RmaPdfError,
     TEMPLATE_VERSION as RMA_TEMPLATE_VERSION,
@@ -56,11 +68,12 @@ from app.services.rma_pdf import (
     rma_pdf_snapshot,
 )
 from app.services.storage import StorageConfigurationError, StorageUploadError, download_oss_object_bytes, upload_bytes_to_oss
+from app.services.smtp_pool import smtp_connection_pool
 from app.services.tickets import get_ticket
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 logger = logging.getLogger(__name__)
-_smtp_semaphore = asyncio.Semaphore(max(1, settings.MAIL_IO_CONCURRENCY))
+_smtp_semaphore = asyncio.Semaphore(max(1, settings.SMTP_MAX_CONNECTIONS))
 
 RMA_TASK_TYPES_RESOLVED_ON_SEND = frozenset(
     {
@@ -270,7 +283,8 @@ async def _require_reply_parent(
     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-RMA_REPLY_ZH_VERSION = "rma_reply_zh_v2"
+RMA_REPLY_ZH_IN_WARRANTY_VERSION = "domestic_in_warranty_v1"
+RMA_REPLY_ZH_OUT_OF_WARRANTY_VERSION = "domestic_out_warranty_v1"
 OVERSEAS_WARRANTY_IN_VERSION = "overseas_in_warranty_v1"
 OVERSEAS_WARRANTY_OUT_VERSION = "overseas_out_warranty_v1"
 OVERSEAS_WARRANTY_ST_VERSION = "overseas_st_pickup_v1"
@@ -294,29 +308,48 @@ def _parse_template_date(value: Any) -> date | None:
     return None
 
 
-def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
-    if ticket.language_code != "en-US":
-        return "rma_authorization_domestic", RMA_REPLY_ZH_VERSION
+def _warranty_date_from_validation_check(check: dict[str, Any], field: str) -> date | None:
+    """Read both the legacy flat check and the resolved SN-master snapshot."""
+    direct = _parse_template_date(check.get(field))
+    if direct is not None:
+        return direct
+    resolution = check.get("master_resolution")
+    resolved_asset = resolution.get("resolved_asset") if isinstance(resolution, dict) else None
+    if not isinstance(resolved_asset, dict):
+        return None
+    return _parse_template_date(resolved_asset.get(field))
 
+
+def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
     email = (ticket.contact_email or "").strip().lower()
     customer = " ".join((ticket.customer_name or "").lower().split())
-    if email.endswith("@amkor.com"):
+    if ticket.language_code == "en-US" and email.endswith("@amkor.com"):
         raise RmaReplyRuleError("rma_amkor_manual", "RMA_AMKOR_MANUAL_HANDLING_REQUIRED")
-    if "stmicroelectronics pte ltd" in customer:
+    if ticket.language_code == "en-US" and "stmicroelectronics pte ltd" in customer:
         raise RmaReplyRuleError(
             "rma_st_manual",
             "RMA_ST_CUSTOM_HANDLING_REQUIRES_MANUAL",
         )
 
     checks = list((ticket.sn_validation_snapshot or {}).get("checks") or [])
-    if len(checks) != 1:
+    if not checks:
         raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_EVIDENCE_MISSING")
-    warranty_start = _parse_template_date(checks[0].get("warranty_start_date"))
-    warranty_end = _parse_template_date(checks[0].get("warranty_end_date"))
     request_date = ticket.request_date
-    if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
-        raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
-    if request_date <= warranty_end:
+    warranty_flags: set[bool] = set()
+    for check in checks:
+        warranty_start = _warranty_date_from_validation_check(check, "warranty_start_date")
+        warranty_end = _warranty_date_from_validation_check(check, "warranty_end_date")
+        if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
+            raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
+        warranty_flags.add(request_date <= warranty_end)
+    if len(warranty_flags) != 1:
+        raise RmaReplyRuleError("warranty_status_unknown", "RMA_MIXED_WARRANTY_STATUS")
+    in_warranty = True in warranty_flags
+    if ticket.language_code != "en-US":
+        if in_warranty:
+            return "rma_authorization_domestic_in_warranty", RMA_REPLY_ZH_IN_WARRANTY_VERSION
+        return "rma_authorization_domestic_out_of_warranty", RMA_REPLY_ZH_OUT_OF_WARRANTY_VERSION
+    if in_warranty:
         return "rma_authorization_overseas_in_warranty", OVERSEAS_WARRANTY_IN_VERSION
     if email == "daniel@leitik.com":
         raise RmaReplyRuleError("rma_price_required", "RMA_OUT_OF_WARRANTY_PRICE_REQUIRED")
@@ -407,6 +440,9 @@ def _render_template(
     content: str = "",
     original_subject: str = "",
     return_address_block: str = "",
+    city: str = "",
+    repair_fee: str = "",
+    currency_unit: str = "",
     escape_values: bool = False,
 ) -> str:
     def value(item: str) -> str:
@@ -420,6 +456,9 @@ def _render_template(
         .replace("{{ content }}", content if escape_values else value(content))
         .replace("{{ original_subject }}", value(original_subject))
         .replace("{{ return_address_block }}", value(return_address_block))
+        .replace("{{ city }}", value(city))
+        .replace("{{ repair_fee }}", value(repair_fee))
+        .replace("{{ currency_unit }}", value(currency_unit))
     )
 
 
@@ -470,12 +509,6 @@ def _rma_envelope_valid(reply: ReplyRecord) -> bool:
     return test_envelope_allowed(reply.to_addresses, reply.cc_addresses)
 
 
-def _smtp_client() -> smtplib.SMTP:
-    if settings.SMTP_PORT == 465:
-        return smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
-    return smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20)
-
-
 def _recipient_in_whitelist(*values: str | None) -> bool:
     to_addresses = values[0] if values else None
     cc_addresses = values[1] if len(values) > 1 else None
@@ -508,6 +541,15 @@ def _smtp_message_id(reply: ReplyRecord) -> str:
     return f"<repair-reply-{reply_id}@{domain}>" if reply_id else make_msgid(domain=domain)
 
 
+def _deterministic_date(reply: ReplyRecord) -> str:
+    """构建稳定的 Date 头，保证跨重试重建 EML 字节一致。"""
+    created = getattr(reply, "created_at", None)
+    dt = created if isinstance(created, datetime) else utcnow()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return format_datetime(dt)
+
+
 def _build_reply_message(
     reply: ReplyRecord,
     message_id: str,
@@ -523,6 +565,10 @@ def _build_reply_message(
         message["Cc"] = reply.cc_addresses
     message["Subject"] = test_only_subject(reply.subject)
     message["Message-ID"] = message_id
+    # 显式写入稳定的 Date 头，避免 email 库在 as_bytes() 时注入当前时间，
+    # 否则每次重建 EML 的 sha256 都不同，导致重试时
+    # OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH。
+    message["Date"] = _deterministic_date(reply)
     if reply.in_reply_to:
         message["In-Reply-To"] = reply.in_reply_to
     if reply.references_header:
@@ -533,7 +579,24 @@ def _build_reply_message(
         message.add_alternative(rendered_html, subtype="html")
         html_part = message.get_body(preferencelist=("html",))
         if html_part is not None:
-            for resource in related_resources:
+            resources = list(related_resources)
+            if f"cid:{ACCO_TEST_LOGO_CONTENT_ID}" in rendered_html:
+                resources.insert(
+                    0,
+                    RelatedResource(
+                        content=ACCO_TEST_LOGO_PNG,
+                        maintype="image",
+                        subtype="png",
+                        content_id=ACCO_TEST_LOGO_CONTENT_ID,
+                        original_content_id=ACCO_TEST_LOGO_CONTENT_ID,
+                        content_hash=hashlib.sha256(ACCO_TEST_LOGO_PNG).hexdigest(),
+                    ),
+                )
+            seen_cids: set[str] = set()
+            for resource in resources:
+                if resource.content_id in seen_cids:
+                    continue
+                seen_cids.add(resource.content_id)
                 html_part.add_related(
                     resource.content,
                     maintype=resource.maintype,
@@ -548,13 +611,34 @@ def _build_reply_message(
             subtype="pdf",
             filename=attachment_filename or "rma-authorization.pdf",
         )
+    _pin_deterministic_boundaries(message, reply)
     return message
+
+
+def _pin_deterministic_boundaries(message: EmailMessage, reply: ReplyRecord) -> None:
+    """为每个 multipart 子部件写入确定性的 MIME boundary。
+
+    Python 3.11 的 email 库在建 multipart 时注入随机 boundary，导致同一逻辑
+    邮件每次重建的字节都不同，使 outbound EML 归档哈希在重试重建时不一致
+    （OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH）。此处按 reply.id + 层序派生稳定
+    boundary，保证跨重试重建字节一致，同时避免嵌套层 boundary 复用。
+    """
+    reply_id = getattr(reply, "id", None)
+    depth = 0
+    for part in message.walk():
+        if not part.get_content_type().startswith("multipart/"):
+            continue
+        seed = f"reply:{reply_id or ''}:boundary:{depth}"
+        boundary = "====" + hashlib.sha256(seed.encode()).hexdigest()[:20] + "=="
+        part.set_param("boundary", boundary, header="Content-Type")
+        depth += 1
 
 
 def _send_reply_via_smtp(
     reply: ReplyRecord,
     *,
     message: EmailMessage | None = None,
+    raw_message: bytes | None = None,
     attachment_content: bytes | None = None,
     attachment_filename: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
@@ -581,19 +665,58 @@ def _send_reply_via_smtp(
         )
     elif str(message.get("Message-ID") or "") != message_id:
         return False, None, "SMTP_MESSAGE_ID_MISMATCH"
+    if raw_message is not None:
+        frozen_header = BytesParser(policy=policy.default).parsebytes(raw_message, headersonly=True)
+        if str(frozen_header.get("Message-ID") or "") != message_id:
+            return False, None, "SMTP_MESSAGE_ID_MISMATCH"
+    started = time.monotonic()
     try:
-        with _smtp_client() as smtp:
-            if settings.SMTP_PORT == 587:
-                smtp.starttls()
-            smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            # Recheck at the last possible point before the network send.
-            if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
-                return False, None, "SMTP_RECIPIENT_NOT_ALLOWED"
-            if not _smtp_sender_is_exact_login() or not _rma_envelope_valid(reply):
-                return False, None, "SMTP_ENVELOPE_RECHECK_FAILED"
-            smtp.send_message(message)
-    except Exception:
-        return False, None, "SMTP_SEND_FAILED_UNCERTAIN"
+        # Recheck at the last possible point before the network send.
+        if not _recipient_in_whitelist(reply.to_addresses, reply.cc_addresses):
+            return False, None, "SMTP_RECIPIENT_NOT_ALLOWED"
+        if not _smtp_sender_is_exact_login() or not _rma_envelope_valid(reply):
+            return False, None, "SMTP_ENVELOPE_RECHECK_FAILED"
+        pool = smtp_connection_pool()
+        refused = (
+            pool.send_raw(
+                from_address=settings.SMTP_USER,
+                recipients=_recipient_addresses(reply.to_addresses, reply.cc_addresses),
+                raw_message=raw_message,
+            )
+            if raw_message is not None
+            else pool.send_message(message)
+        )
+        if refused:
+            # smtplib returns refused recipients only when at least one other
+            # recipient may already have been accepted. Never retry the whole
+            # envelope automatically.
+            refused_addresses = {str(address).strip().lower() for address in refused}
+            to_addresses = {address.lower() for address in _recipient_addresses(reply.to_addresses, None)}
+            cc_addresses = {address.lower() for address in _recipient_addresses(None, reply.cc_addresses)}
+            if refused_addresses and refused_addresses <= cc_addresses and not (refused_addresses & to_addresses):
+                return True, message_id, "SMTP_CC_PARTIAL_ACCEPTED"
+            return False, message_id, "SMTP_PARTIAL_ACCEPTED"
+    except smtplib.SMTPRecipientsRefused as exc:
+        codes = [int(value[0]) for value in exc.recipients.values() if value and isinstance(value[0], int)]
+        retryable = bool(codes) and all(400 <= code < 500 for code in codes)
+        return False, None, "SMTP_REJECTED_RETRYABLE" if retryable else "SMTP_REJECTED_TERMINAL"
+    except smtplib.SMTPResponseException as exc:
+        retryable = 400 <= int(exc.smtp_code or 0) < 500
+        return False, None, "SMTP_REJECTED_RETRYABLE" if retryable else "SMTP_REJECTED_TERMINAL"
+    except Exception as exc:
+        logger.exception(
+            "SMTP transport failed after send was attempted",
+            extra={
+                "event": "smtp_send_failed", "ticket_id": getattr(reply, "ticket_id", None),
+                "reply_record_id": getattr(reply, "id", None), "smtp_host": settings.SMTP_HOST,
+                "smtp_port": settings.SMTP_PORT,
+                "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
+                "smtp_status": "uncertain", "smtp_response_code": getattr(exc, "smtp_code", None),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_code": "SMTP_SEND_FAILED_UNCERTAIN",
+            },
+        )
+        return False, message_id, "SMTP_SEND_FAILED_UNCERTAIN"
     return True, message_id, None
 
 
@@ -603,6 +726,8 @@ async def _select_base_template(
     *,
     hide_company_name: bool = False,
 ) -> ReplyTemplate | None:
+    if language == "en-US" and not hide_company_name:
+        return await _select_template(session, "international_company_base", language)
     if language != "zh-CN":
         return None
     return await _select_template(
@@ -618,8 +743,21 @@ def _return_address_block(
     customer_policy: dict[str, Any] | None = None,
 ) -> str:
     policy = customer_policy or {}
-    company = str(policy.get("shipping_company") or "").strip()
-    address = str(policy.get("shipping_address") or "").strip()
+    if language == "en-US":
+        return settings.RMA_OVERSEAS_BEIJING_ADDRESS_BLOCK
+    route = str(policy.get("shipping_route") or policy.get("return_location") or "").strip().lower()
+    default_company = {
+        "beijing": settings.RMA_DEFAULT_BEIJING_COMPANY,
+        "tianjin": settings.RMA_DEFAULT_TIANJIN_COMPANY,
+    }.get(route, "")
+    default_address = {
+        "beijing": settings.RMA_DEFAULT_BEIJING_ADDRESS,
+        "tianjin": settings.RMA_DEFAULT_TIANJIN_ADDRESS,
+    }.get(route, "")
+    company = str(policy.get("shipping_company") or default_company).strip()
+    address = str(policy.get("shipping_address") or default_address).strip()
+    if company and address.startswith(company):
+        address = address[len(company):].lstrip(" \t\r\n　，,；;")
     contact = str(policy.get("shipping_contact") or "").strip()
     phone = str(policy.get("shipping_phone") or "").strip()
     postal_code = str(policy.get("shipping_postal_code") or "").strip()
@@ -645,6 +783,12 @@ async def _render_reply_templates(
 ) -> tuple[str, str, str, ReplyTemplate | None, str, str]:
     original_subject = (parent.subject or f"Repair request {ticket.ticket_no}").strip()
     policy = customer_policy or {}
+    city = {"beijing": "北京", "tianjin": "天津"}.get(
+        str(policy.get("shipping_route") or "").strip().lower(), ""
+    )
+    repair_fee = str(policy.get("repair_price") or "").strip()
+    currency = str(policy.get("currency") or "").strip().upper()
+    currency_unit = {"CNY": "RMB", "RMB": "RMB", "USD": "USD"}.get(currency, currency)
     return_address_block = _return_address_block(
         language=content_template.language,
         customer_policy=policy,
@@ -655,6 +799,9 @@ async def _render_reply_templates(
         missing_fields=missing_fields,
         original_subject=original_subject,
         return_address_block=return_address_block,
+        city=city,
+        repair_fee=repair_fee,
+        currency_unit=currency_unit,
     )
     salutation = str((customer_policy or {}).get("reply_salutation") or "").strip()
     if salutation:
@@ -667,7 +814,11 @@ async def _render_reply_templates(
         content_template.language,
         hide_company_name=bool((customer_policy or {}).get("hide_company_name")),
     )
-    if content_template.language == "zh-CN" and base_template is None:
+    if (
+        content_template.language in {"zh-CN", "en-US"}
+        and not bool((customer_policy or {}).get("hide_company_name"))
+        and base_template is None
+    ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_BASE_TEMPLATE_NOT_FOUND")
     body = (
         _render_template(
@@ -677,6 +828,9 @@ async def _render_reply_templates(
             content=content,
             original_subject=original_subject,
             return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
         )
         if base_template is not None
         else content
@@ -688,22 +842,28 @@ async def _render_reply_templates(
             missing_fields=missing_fields,
             original_subject=original_subject,
             return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
             escape_values=True,
         )
-        if base_template is not None and base_template.html_body_template:
-            html_body = _render_template(
-                base_template.html_body_template,
-                ticket=ticket,
-                missing_fields=missing_fields,
-                content=html_content,
-                original_subject=original_subject,
-                return_address_block=return_address_block,
-                escape_values=True,
-            )
-        else:
-            html_body = html_content
     else:
-        html_body = _plain_to_html(body)
+        html_content = _plain_to_html(content)
+    if base_template is not None and base_template.html_body_template:
+        html_body = _render_template(
+            base_template.html_body_template,
+            ticket=ticket,
+            missing_fields=missing_fields,
+            content=html_content,
+            original_subject=original_subject,
+            return_address_block=return_address_block,
+            city=city,
+            repair_fee=repair_fee,
+            currency_unit=currency_unit,
+            escape_values=True,
+        )
+    else:
+        html_body = html_content
 
     history = await render_reply_history(
         session,
@@ -891,23 +1051,10 @@ async def _finalize_rma_issue(
             trigger_event="rma_issued_and_archived",
             user_id=user_id,
             operator_type="system" if auto else "user",
-            reason="正式RMA已回填，PDF关键字段校验、邮件发送及附件归档均已完成。",
-            metadata={
-                "reply_id": reply.id,
-                "rma_no": rma_record.rma_no,
-                "smtp_message_id": reply.smtp_message_id,
-                "pdf_sha256": expected_hash,
-                "closure_gates": {
-                    "rma_received": True,
-                    "pdf_validated": True,
-                    "smtp_sent": True,
-                    "message_id_saved": True,
-                    "pdf_archived": True,
-                    "outbound_archived": True,
-                },
-            },
+            reason="RMA回复发送成功且PDF与出站EML归档核验完成。",
+            metadata={"reply_id": reply.id, "smtp_message_id": reply.smtp_message_id},
         )
-    return ticket.current_status_code == "closed"
+    return True
 
 
 async def retry_rma_archive(
@@ -1159,8 +1306,6 @@ async def _reply_send_guard_error(
     ticket: RepairTicket,
     reply: ReplyRecord,
 ) -> str | None:
-    if reply.reply_type == "device_received_ack":
-        return "DEVICE_RECEIPT_FEATURE_REMOVED"
     if ticket.ticket_category == "manual_business" and reply.reply_type == "rma_authorization":
         return "MANUAL_BUSINESS_RMA_FORBIDDEN"
     if is_followup_reply_type(reply.reply_type):
@@ -1188,7 +1333,9 @@ async def _reply_send_guard_error(
         if (
             base_template is None
             or not base_template.enabled
-            or base_template.template_type not in {"domestic_company_base", "neutral_base"}
+            or base_template.template_type not in {
+                "domestic_company_base", "international_company_base", "neutral_base"
+            }
         ):
             return "REPLY_BASE_TEMPLATE_NOT_AVAILABLE"
     if reply.related_email_id is None:
@@ -1262,7 +1409,8 @@ async def _send_reply_record(
     reply: ReplyRecord,
     user_id: int | None,
     auto: bool,
-) -> None:
+    prepare_only: bool = False,
+) -> Any | None:
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
@@ -1280,22 +1428,6 @@ async def _send_reply_record(
             auto=auto,
         )
         return
-    reply.send_attempt_count = int(reply.send_attempt_count or 0) + 1
-    guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
-    if guard_error is not None:
-        reply.send_status = "send_failed"
-        reply.last_error_code = guard_error
-        reply.error_message = guard_error
-        sync_ticket_delivery_status()
-        await _ensure_reply_manual_task(
-            session,
-            ticket=ticket,
-            task_type="reply_send_blocked",
-            reason=guard_error,
-            email_id=reply.related_email_id,
-            user_id=user_id,
-        )
-        return
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
         reply.send_status = "send_uncertain"
         reply.last_error_code = "SMTP_SEND_RESULT_UNCERTAIN"
@@ -1306,6 +1438,24 @@ async def _send_reply_record(
             reason="SMTP_SEND_RESULT_UNCERTAIN", email_id=reply.related_email_id, user_id=user_id,
         )
         return
+    frozen_outbox = await session.scalar(
+        select(EmailOutbox).where(EmailOutbox.reply_record_id == reply.id).with_for_update()
+    )
+    frozen_sendable = frozen_outbox is not None and frozen_outbox.status in {
+        "ready", "claimed", "failed_retryable"
+    }
+    if not frozen_sendable:
+        guard_error = await _reply_send_guard_error(session, ticket=ticket, reply=reply)
+        if guard_error is not None:
+            reply.send_status = "send_failed"
+            reply.last_error_code = guard_error
+            reply.error_message = guard_error
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked", reason=guard_error,
+                email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
     if not _smtp_sender_is_exact_login():
         reply.send_status = "send_failed"
         reply.last_error_code = "SMTP_SENDER_LOGIN_MISMATCH"
@@ -1337,84 +1487,112 @@ async def _send_reply_record(
         )
         return
 
+    if frozen_sendable:
+        safety_snapshot = frozen_outbox.safety_snapshot or {}
+        if (
+            frozen_outbox.to_addresses != reply.to_addresses
+            or frozen_outbox.cc_addresses != reply.cc_addresses
+            or frozen_outbox.from_address != settings.SMTP_USER
+            or safety_snapshot.get("rma_pdf_oss_object_id") != reply.rma_pdf_oss_object_id
+        ):
+            reply.send_status = "send_failed"
+            reply.last_error_code = "OUTBOX_ENVELOPE_MISMATCH"
+            reply.error_message = "OUTBOX_ENVELOPE_MISMATCH"
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked",
+                reason="OUTBOX_ENVELOPE_MISMATCH", email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+
     attachment_content: bytes | None = None
     attachment_filename: str | None = None
     if reply.rma_pdf_oss_object_id:
         attachment_content = await download_oss_object_bytes(session, oss_object_id=reply.rma_pdf_oss_object_id)
         oss_object = await session.get(OssObject, reply.rma_pdf_oss_object_id)
         attachment_filename = (oss_object.original_file_name if oss_object else None) or f"RMA-{ticket.ticket_no}.pdf"
-    template = await session.get(ReplyTemplate, reply.template_id) if reply.template_id else None
-    parent = await session.get(Email, reply.related_email_id) if reply.related_email_id else None
-    try:
-        if template is None or parent is None:
-            raise ReplyRenderError("REPLY_RENDER_PREREQUISITE_MISSING")
-        reply_history = await render_reply_history(
-            session,
-            parent=parent,
-            language=template.language,
+    if frozen_sendable:
+        raw_message = await download_oss_object_bytes(
+            session, oss_object_id=frozen_outbox.frozen_eml_oss_object_id
         )
-        if reply_history.snapshot_hash != reply.thread_history_hash:
-            raise ReplyRenderError("REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED")
-    except ReplyRenderError as exc:
-        reply.send_status = "send_failed"
-        reply.last_error_code = exc.code
-        reply.error_message = exc.code
-        sync_ticket_delivery_status()
-        await _ensure_reply_manual_task(
-            session,
-            ticket=ticket,
-            task_type="reply_render_failed",
-            reason=exc.code,
-            email_id=reply.related_email_id,
-            user_id=user_id,
+        raw_hash = hashlib.sha256(raw_message).hexdigest()
+        if raw_hash != frozen_outbox.frozen_eml_sha256:
+            reply.send_status = "send_failed"
+            reply.last_error_code = "OUTBOX_FROZEN_EML_HASH_MISMATCH"
+            reply.error_message = "OUTBOX_FROZEN_EML_HASH_MISMATCH"
+            frozen_outbox.status = "failed_terminal"
+            frozen_outbox.last_error_code = reply.last_error_code
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_send_blocked",
+                reason=reply.last_error_code, email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+        outbound_message = BytesParser(policy=policy.SMTP).parsebytes(raw_message)
+        message_id = frozen_outbox.message_id
+        reply.smtp_message_id = message_id
+    else:
+        template = await session.get(ReplyTemplate, reply.template_id) if reply.template_id else None
+        parent = await session.get(Email, reply.related_email_id) if reply.related_email_id else None
+        try:
+            if template is None or parent is None:
+                raise ReplyRenderError("REPLY_RENDER_PREREQUISITE_MISSING")
+            reply_history = await render_reply_history(
+                session,
+                parent=parent,
+                language=template.language,
+            )
+            if reply_history.snapshot_hash != reply.thread_history_hash:
+                raise ReplyRenderError("REPLY_THREAD_HISTORY_CHANGED_REGENERATE_REQUIRED")
+        except ReplyRenderError as exc:
+            reply.send_status = "send_failed"
+            reply.last_error_code = exc.code
+            reply.error_message = exc.code
+            sync_ticket_delivery_status()
+            await _ensure_reply_manual_task(
+                session, ticket=ticket, task_type="reply_render_failed", reason=exc.code,
+                email_id=reply.related_email_id, user_id=user_id,
+            )
+            return
+        message_id = _smtp_message_id(reply)
+        reply.smtp_message_id = message_id
+        outbound_message = _build_reply_message(
+            reply, message_id, related_resources=reply_history.resources,
+            attachment_content=attachment_content, attachment_filename=attachment_filename,
         )
-        return
-    message_id = _smtp_message_id(reply)
-    reply.smtp_message_id = message_id
-    outbound_message = _build_reply_message(
-        reply,
-        message_id,
-        related_resources=reply_history.resources,
-        attachment_content=attachment_content,
-        attachment_filename=attachment_filename,
-    )
-    raw_message = outbound_message.as_bytes()
+        raw_message = outbound_message.as_bytes()
     raw_hash = hashlib.sha256(raw_message).hexdigest()
     archive_operation = None
     try:
-        archive_operation = await start_external_operation(
-            session,
-            operation_type="oss_put_outbound_eml",
-            operation_key=f"reply:{reply.id}:raw-eml",
-            ticket_id=ticket.id,
-            email_id=reply.related_email_id,
-            reply_record_id=reply.id,
-            recovery_stage="outbound_archive",
-        )
-        if archive_operation.status == "succeeded" and archive_operation.remote_reference:
+        if frozen_sendable:
             raw_object = await session.get(
-                OssObject,
-                int(archive_operation.remote_reference),
+                OssObject, frozen_outbox.frozen_eml_oss_object_id,
             )
-            archived_hash = str(
-                (archive_operation.details_json or {}).get("sha256") or ""
-            )
-            if raw_object is None or archived_hash != raw_hash:
-                raise StorageUploadError("OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH")
+            if raw_object is None:
+                raise StorageUploadError("OUTBOX_FROZEN_EML_OBJECT_MISSING")
         else:
-            raw_object = await upload_bytes_to_oss(
+            archive_operation = await start_external_operation(
                 session,
-                content=raw_message,
-                original_file_name=f"reply-{reply.id}.eml",
-                content_type="message/rfc822",
-                source_type="outbound_raw_eml",
-                user_id=user_id,
+                operation_type="oss_put_outbound_eml",
+                operation_key=f"reply:{reply.id}:raw-eml",
+                ticket_id=ticket.id,
+                email_id=reply.related_email_id,
+                reply_record_id=reply.id,
+                recovery_stage="outbound_archive",
             )
-            succeed_external_operation(
-                archive_operation,
-                remote_reference=str(raw_object.id),
-                details={"sha256": raw_hash},
-            )
+            if archive_operation.status == "succeeded" and archive_operation.remote_reference:
+                raw_object = await session.get(OssObject, int(archive_operation.remote_reference))
+                archived_hash = str((archive_operation.details_json or {}).get("sha256") or "")
+                if raw_object is None or archived_hash != raw_hash:
+                    raise StorageUploadError("OUTBOUND_ARCHIVE_EVIDENCE_MISMATCH")
+            else:
+                raw_object = await upload_bytes_to_oss(
+                    session, content=raw_message, original_file_name=f"reply-{reply.id}.eml",
+                    content_type="message/rfc822", source_type="outbound_raw_eml", user_id=user_id,
+                )
+                succeed_external_operation(
+                    archive_operation, remote_reference=str(raw_object.id), details={"sha256": raw_hash},
+                )
     except (StorageConfigurationError, StorageUploadError) as exc:
         reply.send_status = "send_failed"
         reply.archive_status = "archive_failed"
@@ -1451,6 +1629,55 @@ async def _send_reply_record(
         )
         return
 
+    rma_snapshot = await session.scalar(
+        select(TicketRma).where(TicketRma.ticket_id == ticket.id).order_by(TicketRma.id.desc()).limit(1)
+    )
+    sap_request_ids = list(
+        (
+            await session.execute(
+                select(ExportSap.request_id)
+                .where(ExportSap.ticket_id == ticket.id)
+                .order_by(ExportSap.id)
+            )
+        ).scalars().all()
+    )
+    outbox = frozen_outbox
+    if outbox is None:
+        outbox = await prepare_outbox(
+            session, reply=reply, frozen_eml_oss_object_id=raw_object.id,
+            frozen_eml_sha256=raw_hash, message_id=message_id, from_address=settings.SMTP_USER,
+            ticket_version=int(ticket.version or 0),
+            request_id=sap_request_ids[0] if len(sap_request_ids) == 1 else None,
+            rma_no=rma_snapshot.rma_no if rma_snapshot is not None else None,
+            pdf_sha256=rma_snapshot.pdf_sha256 if rma_snapshot is not None else None,
+            safety_snapshot={
+                "reply_type": reply.reply_type, "thread_history_hash": reply.thread_history_hash,
+                "render_hash": reply.render_hash, "rma_template_version": reply.rma_template_version,
+                "rma_pdf_oss_object_id": reply.rma_pdf_oss_object_id,
+                "sap_request_ids": sap_request_ids,
+                "pdf_sha256": rma_snapshot.pdf_sha256 if rma_snapshot is not None else None,
+            },
+        )
+    # READY means the exact MIME object is frozen and durable. From this point
+    # the transport path must not render or mutate customer-visible content.
+    await _commit_if_available(session)
+    if prepare_only:
+        from app.services.jobs import enqueue_job
+
+        reply.send_status = "approved_pending_send"
+        queued_job = await enqueue_job(
+            session,
+            job_type="smtp_send",
+            resource_type="email_outbox",
+            resource_id=reply.id,
+            idempotency_key=f"smtp_outbox:{outbox.id}",
+            metadata={"user_id": user_id, "outbox_id": outbox.id},
+            max_attempts=max(1, settings.SMTP_RETRY_LIMIT),
+        )
+        return queued_job
+
+    reply.send_attempt_count = int(reply.send_attempt_count or 0) + 1
+
     smtp_operation = await start_external_operation(
         session,
         operation_type="smtp_send",
@@ -1469,18 +1696,53 @@ async def _send_reply_record(
         error = None
     else:
         reply.send_status = "auto_sending" if auto else "sending"
+        mark_outbox_sending(outbox)
         await _commit_if_available(session)
+        smtp_started = time.monotonic()
+        logger.info(
+            "SMTP send started",
+            extra={
+                "event": "smtp_send_started", "ticket_id": ticket.id, "reply_record_id": reply.id,
+                "smtp_host": settings.SMTP_HOST, "smtp_port": settings.SMTP_PORT,
+                "recipient_count": len(_recipient_addresses(reply.to_addresses, reply.cc_addresses)),
+                "attachment_count": 1 if attachment_content else 0,
+                "attempt": int(reply.send_attempt_count or 0),
+            },
+        )
         async with _smtp_semaphore:
             ok, sent_message_id, error = await asyncio.to_thread(
                 _send_reply_via_smtp,
                 reply,
                 message=outbound_message,
+                raw_message=raw_message,
+            )
+        if not ok and error == "SMTP_SEND_FAILED_UNCERTAIN" and sent_message_id:
+            from app.services.imap_fetcher import sent_folder_contains_message
+
+            if await sent_folder_contains_message(sent_message_id):
+                ok = True
+                error = "SMTP_ACCEPTED_SENT_FOLDER"
+        smtp_duration_ms = int((time.monotonic() - smtp_started) * 1000)
+        # Transport exceptions are logged with traceback inside the sync SMTP
+        # boundary. Other failures are deterministic policy/configuration
+        # outcomes and are recorded here without a duplicate traceback event.
+        if error != "SMTP_SEND_FAILED_UNCERTAIN":
+            (logger.info if ok else logger.error)(
+                "SMTP send completed" if ok else "SMTP send failed",
+                extra={
+                    "event": "smtp_send_completed" if ok else "smtp_send_failed",
+                    "ticket_id": ticket.id, "reply_record_id": reply.id,
+                    "smtp_host": settings.SMTP_HOST, "smtp_port": settings.SMTP_PORT,
+                    "duration_ms": smtp_duration_ms, "message_id": sent_message_id,
+                    "smtp_status": "accepted" if ok else "rejected",
+                    "smtp_response_code": None, "error_code": error,
+                },
             )
     if ok and sent_message_id:
         was_counted = reply.send_status == "sent"
         reply.send_status = "sent"
         reply.sent_at = utcnow()
-        reply.smtp_response = "SMTP_ACCEPTED"
+        reply.smtp_response = error or "SMTP_ACCEPTED"
         reply.last_error_code = None
         reply.error_message = None
         succeed_external_operation(
@@ -1488,6 +1750,7 @@ async def _send_reply_record(
             remote_reference=sent_message_id,
             details={"accepted": True},
         )
+        mark_outbox_accepted(outbox, smtp_response=error or "SMTP_ACCEPTED")
         await _archive_outbound_email(
             session,
             reply=reply,
@@ -1535,6 +1798,12 @@ async def _send_reply_record(
                     "rma_no": rma_record.rma_no if rma_record is not None else None,
                 },
             )
+            # SMTP acceptance is an irreversible external effect.  Persist the
+            # acceptance evidence, outbound archive and rma_sent transition
+            # before attempting the independently recoverable close step.  A
+            # close failure can then retry from the durable SMTP operation
+            # without sending the customer another message.
+            await _commit_if_available(session)
             closed = await _finalize_rma_issue(
                 session,
                 ticket=ticket,
@@ -1563,16 +1832,24 @@ async def _send_reply_record(
                 metadata={"reply_id": reply.id, "smtp_message_id": sent_message_id},
             )
     else:
-        reply.send_status = "send_uncertain" if error == "SMTP_SEND_FAILED_UNCERTAIN" else "send_failed"
+        uncertain_result = error in {"SMTP_SEND_FAILED_UNCERTAIN", "SMTP_PARTIAL_ACCEPTED"}
+        reply.send_status = "send_uncertain" if uncertain_result else "send_failed"
         reply.last_error_code = error or "SMTP_SEND_FAILED"
         reply.error_message = error or "SMTP_SEND_FAILED"
         fail_external_operation(
             smtp_operation,
             error_code=reply.last_error_code,
             error_message=reply.error_message,
-            retryable=reply.send_status == "send_failed",
+            retryable=reply.send_status == "send_failed" and error != "SMTP_REJECTED_TERMINAL",
             uncertain=reply.send_status == "send_uncertain",
             recovery_stage="smtp_send",
+        )
+        mark_outbox_failed(
+            outbox,
+            error_code=reply.last_error_code,
+            uncertain=uncertain_result,
+            partial_accepted=error == "SMTP_PARTIAL_ACCEPTED",
+            retryable=error != "SMTP_REJECTED_TERMINAL",
         )
         await _ensure_reply_manual_task(
             session,
@@ -1621,8 +1898,6 @@ async def create_reply_draft(
 ) -> dict[str, Any]:
     ticket = await get_ticket(session, ticket_id)
     reply_kind = _infer_reply_type(ticket, reply_type)
-    if reply_kind == "device_received_ack":
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="DEVICE_RECEIPT_FEATURE_REMOVED")
     if ticket.ticket_category == "manual_business" and reply_kind == "rma_authorization":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MANUAL_BUSINESS_RMA_FORBIDDEN")
     language = "en-US" if ticket.language_code == "en-US" else "zh-CN"
@@ -1657,6 +1932,17 @@ async def create_reply_draft(
         .order_by(ReplyRecord.created_at.desc(), ReplyRecord.id.desc())
     )
     if existing_draft is not None:
+        can_auto_send = _reply_can_auto_send(existing_draft)
+        if can_auto_send:
+            existing_draft.review_status = "auto_approved"
+            existing_draft.reviewed_at = utcnow()
+            await _send_reply_record(
+                session,
+                reply=existing_draft,
+                user_id=user_id,
+                auto=True,
+                prepare_only=True,
+            )
         return serialize_reply(existing_draft)
     if is_followup_reply_type(reply_kind) and ticket.followup_count >= ticket.max_followup_count:
         if ticket.current_status_code != "manual_review":
@@ -1784,7 +2070,7 @@ async def create_reply_draft(
     if can_auto_send:
         reply.review_status = "auto_approved"
         reply.reviewed_at = utcnow()
-        await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
+        await _send_reply_record(session, reply=reply, user_id=user_id, auto=True, prepare_only=True)
     await log_operation(
         session,
         user_id=user_id,
@@ -1834,7 +2120,9 @@ async def update_reply(session: AsyncSession, *, reply_id: int, user_id: int, va
 
 
 async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -> dict[str, Any]:
-    reply = await get_reply(session, reply_id)
+    reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_NOT_FOUND")
     if reply.send_status == "sent":
         return {"status": "sent", "reply": serialize_reply(reply), "auto_send_enabled": settings.AUTO_SEND_ENABLED, "reply_send_mode": settings.REPLY_SEND_MODE}
     if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
@@ -1851,7 +2139,13 @@ async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -
     reply.reviewed_at = utcnow()
     reply.send_status = "approved_pending_send"
     reply.error_message = None
-    await _send_reply_record(session, reply=reply, user_id=user_id, auto=False)
+    queued_job = await _send_reply_record(
+        session,
+        reply=reply,
+        user_id=user_id,
+        auto=False,
+        prepare_only=True,
+    )
     await log_operation(
         session,
         user_id=user_id,
@@ -1866,37 +2160,34 @@ async def approve_reply(session: AsyncSession, *, reply_id: int, user_id: int) -
             "reply_send_mode": settings.REPLY_SEND_MODE,
         },
     )
+    from app.services.jobs import serialize_job
+
     return {
         "status": reply.send_status,
         "error_code": reply.last_error_code or reply.error_message,
         "reply": serialize_reply(reply),
+        "job_id": getattr(queued_job, "id", None),
+        "job": serialize_job(queued_job) if queued_job is not None else None,
         "auto_send_enabled": settings.AUTO_SEND_ENABLED,
         "reply_send_mode": settings.REPLY_SEND_MODE,
     }
 
 
-async def approve_reply_for_async(session: AsyncSession, *, reply_id: int, user_id: int) -> ReplyRecord:
-    reply = await get_reply(session, reply_id)
-    if reply.send_status == "sent":
-        return reply
-    if reply.send_status in {"sending", "auto_sending", "send_uncertain"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="REPLY_SEND_RESULT_UNCERTAIN")
-    reply.review_status = "approved"
-    reply.reviewed_by_user_id = user_id
-    reply.reviewed_at = utcnow()
-    reply.send_status = "approved_pending_send"
-    reply.error_message = None
-    await log_operation(
-        session,
-        user_id=user_id,
-        operation_type="reply_approved_for_async_send",
-        target_type="reply_record",
-        target_id=reply.id,
-        email_id=reply.related_email_id,
-        ticket_id=reply.ticket_id,
-        after_data={"send_status": reply.send_status},
-    )
-    return reply
+async def execute_approved_reply_send(
+    session: AsyncSession,
+    *,
+    reply_id: int,
+    user_id: int | None,
+) -> dict[str, Any]:
+    reply = await session.get(ReplyRecord, reply_id, with_for_update=True)
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="REPLY_NOT_FOUND")
+    await _send_reply_record(session, reply=reply, user_id=user_id, auto=reply.review_status == "auto_approved")
+    return {
+        "status": reply.send_status,
+        "error_code": reply.last_error_code or reply.error_message,
+        "reply": serialize_reply(reply),
+    }
 
 
 async def reject_reply(session: AsyncSession, *, reply_id: int, user_id: int, reason: str) -> dict[str, Any]:
@@ -1936,12 +2227,17 @@ async def reconcile_uncertain_reply(
     ticket = await session.get(RepairTicket, reply.ticket_id, with_for_update=True)
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TICKET_NOT_FOUND")
+    outbox = await session.scalar(
+        select(EmailOutbox).where(EmailOutbox.reply_record_id == reply.id).with_for_update()
+    )
 
     if outcome == "sent":
         reply.send_status = "sent"
         reply.sent_at = utcnow()
         reply.smtp_message_id = smtp_message_id or reply.smtp_message_id
         reply.error_message = None
+        if outbox is not None:
+            mark_outbox_accepted(outbox, smtp_response="SMTP_ACCEPTED_MANUAL_RECONCILIATION")
         if is_followup_reply_type(reply.reply_type):
             ticket.followup_count = min(ticket.max_followup_count, ticket.followup_count + 1)
             if ticket.current_status_code == "need_customer_info":
@@ -1989,6 +2285,12 @@ async def reconcile_uncertain_reply(
         reply.error_message = "SMTP_SEND_CONFIRMED_FAILED"
         if reply.reply_type == "rma_authorization":
             ticket.rma_status = "manual_review"
+        if outbox is not None:
+            outbox.status = "failed_terminal"
+            outbox.last_error_code = "SMTP_SEND_CONFIRMED_FAILED"
+            outbox.last_error_message = reason
+            outbox.lease_owner = None
+            outbox.lease_expires_at = None
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="REPLY_RECONCILE_OUTCOME_INVALID")
 
@@ -2167,8 +2469,8 @@ async def create_and_send_rma_authorization(
     manual_special_reasons: list[str] = []
     if str(customer_policy.get("policy_type") or "") == "special_out_of_warranty":
         manual_special_reasons.append("SPECIAL_OUT_OF_WARRANTY_PRICE")
-    if str(customer_policy.get("currency") or "CNY").upper() != "CNY":
-        manual_special_reasons.append("NON_CNY_CURRENCY")
+    if str(customer_policy.get("currency") or "RMB").upper() not in {"RMB", "CNY"}:
+        manual_special_reasons.append("NON_RMB_CURRENCY")
     if str(customer_policy.get("reply_salutation") or "").strip():
         manual_special_reasons.append("SPECIAL_REPLY_SALUTATION")
     if bool(customer_policy.get("hide_company_name")):
@@ -2393,7 +2695,14 @@ async def create_and_send_rma_authorization(
         return {"status": "pending_review", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
 
     ticket.rma_status = "sending" if attach_rma else "manual_review"
-    await _send_reply_record(session, reply=reply, user_id=user_id, auto=True)
+    await _send_reply_record(session, reply=reply, user_id=user_id, auto=True, prepare_only=True)
+    if reply.send_status == "approved_pending_send":
+        return {
+            "status": "queued",
+            "ticket_id": ticket.id,
+            "reply_id": reply.id,
+            "idempotent_reuse": False,
+        }
     if reply.send_status == "sent":
         if not attach_rma:
             ticket.rma_status = "manual_review"

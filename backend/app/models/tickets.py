@@ -189,6 +189,12 @@ class RepairTicketItem(TimestampMixin, Base):
     return_route_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
     sn: Mapped[str | None] = mapped_column(String(100))
     sn_asset_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("sn_assets.id", name="fk_ticket_items_sn_asset"))
+    sn_master_resolution_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
+    sn_master_resolution_method: Mapped[str | None] = mapped_column(String(60))
+    sn_master_resolution_snapshot: Mapped[dict | None] = mapped_column(mysql.JSON)
+    sn_master_resolved_at: Mapped[Any | None] = datetime_column()
     quantity: Mapped[int] = mapped_column(nullable=False, server_default="1")
     failure_description: Mapped[str | None] = mapped_column(Text)
     failure_information: Mapped[str | None] = mapped_column(Text)

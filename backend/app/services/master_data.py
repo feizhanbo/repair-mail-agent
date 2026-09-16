@@ -13,10 +13,10 @@ from xml.etree import ElementTree
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BoardCard, JobRunLog, SnAsset
+from app.models import BoardCard, JobRunLog, RepairTicketItem, SnAsset, SnValidationResult
 from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.schemas.business import BoardCardImportItem, SnAssetImportItem
 from app.services.audit import log_operation
@@ -24,6 +24,7 @@ from app.services.common import model_to_dict, paginate_scalars, utcnow
 
 SN_ASSET_FIELDS = (
     "id",
+    "ins_id",
     "customer_code",
     "customer_name",
     "material_code",
@@ -41,6 +42,10 @@ SN_ASSET_FIELDS = (
     "source_file_hash",
     "source_row_no",
     "raw_data",
+    "source_system",
+    "external_id",
+    "source_updated_at",
+    "source_row_hash",
     "imported_by_user_id",
     "imported_at",
     "created_at",
@@ -71,6 +76,110 @@ BOARD_CARD_FIELDS = (
 )
 
 EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+SN_ASSET_MUTABLE_FIELDS = {
+    "customer_code", "customer_name", "material_code", "material_name", "sn",
+    "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
+    "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
+}
+BOARD_CARD_MUTABLE_FIELDS = {
+    "board_code", "board_name", "return_location", "route_type", "customer_scope",
+    "need_ship_to_beijing", "shipping_address",
+    "shipping_contact", "shipping_phone", "postal_code", "status",
+}
+
+
+async def update_sn_asset(session: AsyncSession, *, asset_id: int, values: dict[str, Any], user_id: int, reason: str) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id, with_for_update=True)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    before = model_to_dict(asset, SN_ASSET_FIELDS)
+    payload = {key: value for key, value in values.items() if key in SN_ASSET_MUTABLE_FIELDS}
+    if "sn" in payload:
+        next_sn = str(payload["sn"] or "").strip().upper()
+        if not next_sn:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SN_REQUIRED")
+        if next_sn != asset.sn:
+            item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+            validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+            if item_refs or validation_refs:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "SN_IDENTITY_IN_USE", "references": item_refs + validation_refs})
+        payload["sn"] = next_sn
+    for key in ("parent_sn", "top_sn"):
+        if key in payload and payload[key]:
+            payload[key] = str(payload[key]).strip().upper()
+    for key, value in payload.items():
+        setattr(asset, key, value)
+    await session.flush()
+    after = model_to_dict(asset, SN_ASSET_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="sn_asset_updated", target_type="sn_asset", target_id=asset.id, description=reason, before_data=before, after_data=after)
+    return after
+
+
+async def delete_sn_asset(session: AsyncSession, *, asset_id: int, user_id: int, reason: str) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id, with_for_update=True)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+    validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+    if item_refs or validation_refs:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "SN_ASSET_IN_USE", "references": {"ticket_items": item_refs, "validation_results": validation_refs}})
+    before = model_to_dict(asset, SN_ASSET_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="sn_asset_deleted", target_type="sn_asset", target_id=asset.id, description=reason, before_data=before)
+    await session.delete(asset)
+    await session.flush()
+    return {"deleted": True, "asset": before}
+
+
+async def preview_sn_asset_delete(session: AsyncSession, asset_id: int) -> dict[str, Any]:
+    asset = await session.get(SnAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SN_ASSET_NOT_FOUND")
+    item_refs = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.sn_asset_id == asset.id)) or 0)
+    validation_refs = int(await session.scalar(select(func.count()).select_from(SnValidationResult).where(SnValidationResult.matched_sn_asset_id == asset.id)) or 0)
+    return {"resource_type": "sn_asset", "resource_id": asset.id, "affected_counts": {"ticket_items": item_refs, "validation_results": validation_refs}, "blockers": ["SN_ASSET_IN_USE"] if item_refs or validation_refs else [], "deletable": not (item_refs or validation_refs)}
+
+
+async def update_board_card(session: AsyncSession, *, card_id: int, values: dict[str, Any], user_id: int, reason: str) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id, with_for_update=True)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    before = model_to_dict(card, BOARD_CARD_FIELDS)
+    payload = {key: value for key, value in values.items() if key in BOARD_CARD_MUTABLE_FIELDS}
+    if "board_code" in payload:
+        payload["board_code"] = normalize_board_code(payload["board_code"])
+    if "board_name" in payload:
+        payload["board_name"] = normalize_board_name(payload["board_name"])
+    if "return_location" in payload:
+        payload["need_ship_to_beijing"] = payload["return_location"] == "beijing"
+    for key, value in payload.items():
+        setattr(card, key, value)
+    await session.flush()
+    after = model_to_dict(card, BOARD_CARD_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="board_card_updated", target_type="board_card", target_id=card.id, description=reason, before_data=before, after_data=after)
+    return after
+
+
+async def delete_board_card(session: AsyncSession, *, card_id: int, user_id: int, reason: str) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id, with_for_update=True)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.matched_board_card_id == card.id)) or 0)
+    if references:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "BOARD_CARD_IN_USE", "references": references})
+    before = model_to_dict(card, BOARD_CARD_FIELDS)
+    await log_operation(session, user_id=user_id, operation_type="board_card_deleted", target_type="board_card", target_id=card.id, description=reason, before_data=before)
+    await session.delete(card)
+    await session.flush()
+    return {"deleted": True, "board_card": before}
+
+
+async def preview_board_card_delete(session: AsyncSession, card_id: int) -> dict[str, Any]:
+    card = await session.get(BoardCard, card_id)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BOARD_CARD_NOT_FOUND")
+    references = int(await session.scalar(select(func.count()).select_from(RepairTicketItem).where(RepairTicketItem.matched_board_card_id == card.id)) or 0)
+    return {"resource_type": "board_card", "resource_id": card.id, "affected_counts": {"ticket_items": references}, "blockers": ["BOARD_CARD_IN_USE"] if references else [], "deletable": not references}
 
 
 async def list_sn_assets(
@@ -149,12 +258,25 @@ async def import_sn_assets(
         for hierarchy_sn_field in ("parent_sn", "top_sn"):
             if data.get(hierarchy_sn_field):
                 data[hierarchy_sn_field] = data[hierarchy_sn_field].strip().upper()
-        row = await session.scalar(select(SnAsset).where(SnAsset.sn == sn))
+        if source_file_hash and data.get("source_row_no") is not None:
+            external_id = f"file:{source_file_hash}:{data['source_row_no']}"
+        else:
+            external_id = "row:" + hashlib.sha256(
+                item.model_dump_json(exclude_none=False).encode("utf-8")
+            ).hexdigest()
+        row = await session.scalar(
+            select(SnAsset).where(
+                SnAsset.source_system == "manual_import",
+                SnAsset.external_id == external_id,
+            )
+        )
         payload = {
             **data,
             "sn": sn,
             "source_file_name": source_file_name,
             "source_file_hash": source_file_hash,
+            "source_system": "manual_import",
+            "external_id": external_id,
             "imported_by_user_id": user_id,
             "imported_at": utcnow(),
         }
@@ -255,12 +377,8 @@ async def import_board_cards(
     active_routes: dict[str, set[str]] = {}
     for item in items:
         data = item.model_dump()
-        board_code = normalize_board_code(
-            data.get("board_code") or data.get("material_code")
-        )
-        board_name = normalize_board_name(
-            data.get("board_name") or data.get("material_name")
-        ) or None
+        board_code = normalize_board_code(data.get("board_code"))
+        board_name = normalize_board_name(data.get("board_name")) or None
         if not board_code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -278,8 +396,6 @@ async def import_board_cards(
             "return_location": return_location,
             "route_type": route_type,
             "customer_scope": customer_scope,
-            "material_code": board_code,
-            "material_name": board_name,
             "need_ship_to_beijing": return_location == "beijing",
         }
         normalized_items.append(normalized)
@@ -690,6 +806,7 @@ def parse_sn_assets_xlsx(content: bytes) -> tuple[list[SnAssetImportItem], str]:
         try:
             items.append(
                 SnAssetImportItem(
+                    ins_id=int(row["ins_id"]) if _string_value(row.get("ins_id")).strip() else None,
                     customer_code=_string_value(row.get("customer_code")).strip(),
                     customer_name=_string_value(row.get("customer_name")).strip(),
                     material_code=_string_value(row.get("material_code")).strip(),
@@ -724,21 +841,17 @@ def parse_board_cards_xlsx(content: bytes) -> tuple[list[BoardCardImportItem], s
     errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=2):
         try:
+            if "material_code" in row or "material_name" in row:
+                raise ValueError("BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN")
             items.append(
                 BoardCardImportItem(
-                    board_code=_string_value(
-                        row.get("board_code") or row.get("material_code")
-                    ).strip(),
-                    board_name=_string_value(
-                        row.get("board_name") or row.get("material_name")
-                    ).strip() or None,
+                    board_code=_string_value(row.get("board_code")).strip(),
+                    board_name=_string_value(row.get("board_name")).strip() or None,
                     return_location=_string_value(row.get("return_location")).strip() or None,
                     route_type=_string_value(row.get("route_type") or "board_rule").strip(),
                     customer_scope=_string_value(
                         row.get("customer_scope") or "domestic"
                     ).strip(),
-                    material_code=_string_value(row.get("material_code")).strip() or None,
-                    material_name=_string_value(row.get("material_name")).strip() or None,
                     need_ship_to_beijing=(
                         _bool_value(_string_value(row.get("need_ship_to_beijing")))
                         if row.get("need_ship_to_beijing") is not None
@@ -865,6 +978,7 @@ def parse_sn_assets_csv(content: bytes) -> tuple[list[SnAssetImportItem], str]:
         try:
             items.append(
                 SnAssetImportItem(
+                    ins_id=int(row["ins_id"]) if (row.get("ins_id") or "").strip() else None,
                     customer_code=(row.get("customer_code") or "").strip(),
                     customer_name=(row.get("customer_name") or "").strip(),
                     material_code=(row.get("material_code") or "").strip(),
@@ -895,15 +1009,15 @@ def parse_board_cards_csv(content: bytes) -> tuple[list[BoardCardImportItem], st
     errors: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=2):
         try:
+            if "material_code" in row or "material_name" in row:
+                raise ValueError("BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN")
             items.append(
                 BoardCardImportItem(
-                    board_code=(row.get("board_code") or row.get("material_code") or "").strip(),
-                    board_name=(row.get("board_name") or row.get("material_name") or "").strip() or None,
+                    board_code=(row.get("board_code") or "").strip(),
+                    board_name=(row.get("board_name") or "").strip() or None,
                     return_location=(row.get("return_location") or "").strip() or None,
                     route_type=(row.get("route_type") or "board_rule").strip(),
                     customer_scope=(row.get("customer_scope") or "domestic").strip(),
-                    material_code=(row.get("material_code") or "").strip() or None,
-                    material_name=(row.get("material_name") or "").strip() or None,
                     need_ship_to_beijing=(
                         _bool_value(row.get("need_ship_to_beijing"))
                         if row.get("need_ship_to_beijing") not in {None, ""}
@@ -938,6 +1052,7 @@ def sn_assets_template_csv() -> bytes:
     return csv_bytes(
         [
             {
+                "ins_id": 100001,
                 "sn": "SN202607070001",
                 "customer_code": "CUST001",
                 "customer_name": "示例客户",
@@ -954,7 +1069,7 @@ def sn_assets_template_csv() -> bytes:
             }
         ],
         [
-            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "ins_id", "sn", "customer_code", "customer_name", "material_code", "material_name",
             "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
             "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
         ],
@@ -989,6 +1104,7 @@ def sn_assets_template_xlsx() -> bytes:
     return xlsx_bytes(
         [
             {
+                "ins_id": 100001,
                 "sn": "SN202607070001",
                 "customer_code": "CUST001",
                 "customer_name": "示例客户",
@@ -1005,7 +1121,7 @@ def sn_assets_template_xlsx() -> bytes:
             }
         ],
         [
-            "sn", "customer_code", "customer_name", "material_code", "material_name",
+            "ins_id", "sn", "customer_code", "customer_name", "material_code", "material_name",
             "service_tracking_card_no", "parent_sn", "top_sn", "parent_material_code",
             "top_material_code", "asset_status", "warranty_start_date", "warranty_end_date",
         ],

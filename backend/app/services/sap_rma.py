@@ -23,6 +23,7 @@ from app.models import (
     TicketRelayExport,
     TicketRma,
     TicketRmaItem,
+    User,
 )
 from app.services.common import model_to_dict, utcnow
 from app.services.business_notifications import notify_ticket_once
@@ -32,12 +33,15 @@ from app.services.external_operations import (
     succeed_external_operation,
 )
 from app.integrations.sap_middleware import (
+    ExternalRmaResult,
     ExternalRmaSubmissionItem,
     SapUnknownCommitStateError,
     create_sap_middleware_adapter,
 )
 from app.services.jobs import enqueue_job
 from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
+from app.services.sap_rma_mapping import build_rma_submission
+from app.services.sn_master_resolution import RESOLVED, resolved_asset_from_snapshot
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 
@@ -48,7 +52,7 @@ EXPORT_FIELDS = (
     "ticket_item_id",
     "relay_export_id",
     "ticket_version",
-    "source_request_id",
+    "request_id",
     "payload_hash",
     "policy_snapshot",
     "status",
@@ -124,7 +128,7 @@ def _stable_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _source_request_id() -> str:
+def _request_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -189,17 +193,22 @@ async def ensure_export_lines(
     if not items:
         raise ValueError("SAP_EXPORT_ITEMS_REQUIRED")
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
+    owner = await session.get(User, ticket.assigned_user_id) if ticket.assigned_user_id else None
     requested_on = ticket.request_date or utcnow().date()
-    prepared: list[tuple[RepairTicketItem, dict[str, Any], str]] = []
+    prepared: list[tuple[RepairTicketItem, Any, dict[str, Any], str]] = []
 
     for item in items:
         sn = (item.sn or "").strip().upper()
-        material_code = (item.material_code or "").strip()
+        asset = resolved_asset_from_snapshot(item.sn_master_resolution_snapshot)
         if (
             not sn
-            or not ticket.customer_code
-            or not material_code
-            or not item.material_name
+            or asset is None
+            or item.sn_master_resolution_status != RESOLVED
+            or item.sn_asset_id != asset.id
+            or asset.ins_id is None
+            or not asset.customer_code
+            or not asset.material_code
+            or sn != str(asset.sn or "").strip().upper()
             or not ticket.mailing_address
             or not ticket.contact_person
             or not ticket.contact_phone
@@ -210,6 +219,7 @@ async def ensure_export_lines(
         policy = dict(ticket.policy_snapshot or {})
         policy["charge_status"] = ticket.charge_status
         policy["customer_scope"] = ticket.customer_scope
+        policy["sap_owner_name"] = owner.real_name if owner is not None else None
         # RMA rendering consumes these compatibility keys, but SAP payload
         # fields below always come from the customer's mailing information.
         policy["shipping_route"] = item.return_location
@@ -220,16 +230,21 @@ async def ensure_export_lines(
         policy["return_route_source"] = item.return_route_source
         policy["return_route_status"] = item.return_route_status
         policy["return_route_snapshot"] = item.return_route_snapshot
-        prepared.append((item, policy, sn))
+        policy["sn_asset_id"] = asset.id
+        policy["sn_source_row_hash"] = asset.source_row_hash
+        policy["ins_id"] = asset.ins_id
+        policy["sn_master_resolution_method"] = item.sn_master_resolution_method
+        policy["sn_master_resolution_snapshot"] = item.sn_master_resolution_snapshot
+        prepared.append((item, asset, policy, sn))
 
     rows: list[ExportSap] = []
-    for item, policy, sn in prepared:
+    for item, asset, policy, sn in prepared:
         payload = {
             "sn": sn,
-            "customer_code": ticket.customer_code,
-            "material_code": item.material_code,
-            "customer_name": ticket.customer_name,
-            "material_name": item.material_name,
+            "customer_code": asset.customer_code,
+            "material_code": asset.material_code,
+            "customer_name": asset.customer_name,
+            "material_name": asset.material_name,
             "charge_status": ticket.charge_status,
             "contact_person": ticket.contact_person,
             "contact_phone": ticket.contact_phone,
@@ -264,7 +279,7 @@ async def ensure_export_lines(
             ticket_item_id=item.id,
             relay_export_id=export.id,
             ticket_version=ticket.version,
-            source_request_id=_source_request_id(),
+            request_id=_request_id(),
             payload_hash=payload_hash,
             policy_snapshot=policy,
             status="pending",
@@ -291,33 +306,37 @@ async def ensure_export_lines(
     return rows
 
 
-def _line_payload(row: ExportSap) -> dict[str, Any]:
-    return {
-        "source_request_id": row.source_request_id,
-        "ticket_id": row.ticket_id,
-        "ticket_item_id": row.ticket_item_id,
-        "relay_export_id": row.relay_export_id,
-        "sn": row.sn,
-        "customer_code": row.customer_code,
-        "material_code": row.material_code,
-        "customer_name": row.customer_name,
-        "material_name": row.material_name,
-        "charge_status": row.charge_status,
-        "contact_person": row.contact_person,
-        "contact_phone": row.contact_phone,
-        "email_subject": row.email_subject,
-        "problem_description": row.problem_description,
-        "repair_requested_at": (
-            row.repair_requested_at.isoformat()
-            if row.repair_requested_at is not None
-            else None
-        ),
-        "mailing_address": row.mailing_address,
-        "currency": row.currency,
-        "shipping_fee": row.shipping_fee,
-        "repair_fee": str(row.repair_fee) if row.repair_fee is not None else None,
-        "tax_rate": str(row.tax_rate) if row.tax_rate is not None else None,
-    }
+async def _submission_items(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    lines: list[ExportSap],
+) -> list[ExternalRmaSubmissionItem]:
+    prepared: list[ExternalRmaSubmissionItem] = []
+    for line in lines:
+        item = await session.get(RepairTicketItem, line.ticket_item_id)
+        asset = resolved_asset_from_snapshot(
+            dict(line.policy_snapshot or {}).get("sn_master_resolution_snapshot")
+        )
+        if item is None or asset is None:
+            raise ValueError("SAP_EXPORT_SN_MASTER_REQUIRED")
+        dto = build_rma_submission(
+            request_id=line.request_id,
+            ticket=ticket,
+            item=item,
+            asset=asset,
+            policy=dict(line.policy_snapshot or {}),
+        )
+        prepared.append(
+            ExternalRmaSubmissionItem(
+                request_id=dto.request_id,
+                sn=dto.sn,
+                payload=dto.sql_parameters,
+                ticket_id=ticket.id,
+                ticket_item_id=item.id,
+            )
+        )
+    return prepared
 
 
 async def submit_export_batch(
@@ -366,7 +385,17 @@ async def submit_export_batch(
             "idempotent_reuse": True,
         }
 
-    # SourceRequestIDs must survive a worker crash or unknown external commit.
+    try:
+        submission_items = await _submission_items(session, ticket=ticket, lines=list(lines))
+    except ValueError as exc:
+        export.status = "manual_review"
+        export.error_code = str(exc).split(":", 1)[0]
+        ticket.relay_export_status = "failed"
+        return await _move_to_manual(
+            session, ticket=ticket, task_type="sap_export_field_mapping_invalid", reason=str(exc)
+        )
+
+    # RequestIDs must survive a worker crash or unknown external commit.
     await session.flush()
     await session.commit()
     export = await session.get(TicketRelayExport, export_id, with_for_update=True)
@@ -419,7 +448,7 @@ async def submit_export_batch(
         export_sap_id=lines[0].id,
         recovery_stage="source_request_batch_submit",
         details={
-            "source_request_ids": [line.source_request_id for line in lines],
+            "RequestIDs": [line.request_id for line in lines],
             "sns": [line.sn for line in lines],
         },
     )
@@ -428,14 +457,7 @@ async def submit_export_batch(
     await session.flush()
     await session.commit()
     adapter = create_sap_middleware_adapter()
-    items = [
-        ExternalRmaSubmissionItem(
-            source_request_id=uuid.UUID(line.source_request_id),
-            sn=line.sn,
-            payload=_line_payload(line),
-        )
-        for line in lines
-    ]
+    items = submission_items
     try:
         await adapter.submit_rma_batch(items)
     except SapUnknownCommitStateError as exc:
@@ -469,7 +491,7 @@ async def submit_export_batch(
                 title="SAP 提交结果等待自动核对",
                 content=(
                     f"工单 {ticket.ticket_no} 的整批提交结果未知；系统将在 "
-                    f"{settings.RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS} 秒后按 SourceRequestID 再次核对。"
+                    f"{settings.RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS} 秒后按 RequestID 再次核对。"
                 ),
                 priority="high",
                 metadata={"relay_export_id": export.id},
@@ -506,8 +528,11 @@ async def submit_export_batch(
             session,
             ticket=ticket,
             event_type="sap_export_failed",
-            title="SAP 整批提交失败",
-            content=f"工单 {ticket.ticket_no} 的 SAP 提交失败，可在工单详情查看原因并安全重试。",
+            title="SAP 整批提交失败，等待自动重试",
+            content=(
+                f"工单 {ticket.ticket_no} 的 SAP 提交失败；后台任务将按退避策略自动重试，"
+                "同一次技术重试会复用原 RequestID。达到重试上限后才需要人工介入。"
+            ),
             priority="high",
             metadata={"relay_export_id": export.id, "error_code": export.error_code},
         )
@@ -520,7 +545,7 @@ async def submit_export_batch(
         line.next_retry_at = None
     succeed_external_operation(
         operation,
-        details={"source_request_ids": [line.source_request_id for line in lines]},
+        details={"RequestIDs": [line.request_id for line in lines]},
     )
     export.status = "waiting_sap_result"
     export.error_code = None
@@ -538,23 +563,13 @@ async def submit_export_batch(
         metadata={
             "relay_export_id": export.id,
             "line_count": len(lines),
-            "source_request_ids": [line.source_request_id for line in lines],
+            "RequestIDs": [line.request_id for line in lines],
         },
-    )
-    poll_job = await enqueue_job(
-        session,
-        job_type="sap_rma_poll",
-        resource_type="ticket_relay_export",
-        resource_id=export.id,
-        idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
-        metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
-        max_attempts=5000,
     )
     return {
         "status": "waiting_sap_result",
         "export_id": export.id,
         "line_count": len(lines),
-        "poll_job_id": poll_job.id,
     }
 
 
@@ -594,17 +609,15 @@ async def reconcile_uncertain_submission(
     if not lines:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SAP_EXPORT_LINES_MISSING")
     adapter = create_sap_middleware_adapter()
-    results = await adapter.find_records_by_source_request_ids(
-        [uuid.UUID(line.source_request_id) for line in lines]
+    found_remote = await adapter.find_submitted_request_ids(
+        [uuid.UUID(line.request_id) for line in lines]
     )
-    found = {str(row.source_request_id): row for row in results}
-    expected = {line.source_request_id for line in lines}
-    found_ids = set(found)
+    expected = {line.request_id for line in lines}
+    found_ids = {str(value) for value in found_remote}
     if found_ids == expected:
         now = utcnow()
         for line in lines:
-            result = found[line.source_request_id]
-            line.status = "rma_received" if result.rma_no else "waiting_sap_result"
+            line.status = "waiting_sap_result"
             line.accepted_at = line.accepted_at or now
             line.next_retry_at = None
             line.last_error_code = None
@@ -614,20 +627,10 @@ async def reconcile_uncertain_submission(
         export.error_message = None
         export.next_retry_at = None
         ticket.relay_export_status = "waiting_rma"
-        poll_job = await enqueue_job(
-            session,
-            job_type="sap_rma_poll",
-            resource_type="ticket_relay_export",
-            resource_id=export.id,
-            idempotency_key=f"sap_rma_poll:{export.id}:{export.payload_hash[:16]}",
-            metadata={"ticket_id": ticket.id, "ticket_version": ticket.version},
-            max_attempts=5000,
-        )
         return {
             "status": "waiting_sap_result",
             "export_id": export.id,
             "found_count": len(found_ids),
-            "poll_job_id": poll_job.id,
         }
     if found_ids:
         export.status = "manual_review"
@@ -703,6 +706,7 @@ async def poll_export_batch(
     export_id: int,
     allow_late_result: bool = False,
     confirmed_by_user_id: int | None = None,
+    prefetched_results: list[ExternalRmaResult] | None = None,
 ) -> dict[str, Any]:
     export = await session.get(TicketRelayExport, export_id, with_for_update=True)
     if export is None:
@@ -746,33 +750,37 @@ async def poll_export_batch(
         email_id=ticket.source_email_id,
         export_sap_id=lines[0].id,
         recovery_stage="source_request_result_poll",
-        details={"source_request_ids": [line.source_request_id for line in lines]},
+        details={"RequestIDs": [line.request_id for line in lines]},
     )
-    try:
-        results = await create_sap_middleware_adapter().find_records_by_source_request_ids(
-            [uuid.UUID(line.source_request_id) for line in lines]
-        )
-    except Exception as exc:
-        fail_external_operation(
-            poll_operation,
-            error_code="RELAY_RMA_POLL_FAILED",
-            error_message=str(exc)[:2000],
-            retryable=True,
-            recovery_stage="source_request_result_poll",
-        )
-        raise
-    by_source_id = {str(result.source_request_id): result for result in results}
+    if prefetched_results is None:
+        try:
+            results = await create_sap_middleware_adapter().query_rma_results(
+                [uuid.UUID(line.request_id) for line in lines]
+            )
+        except Exception as exc:
+            fail_external_operation(
+                poll_operation,
+                error_code="RELAY_RMA_POLL_FAILED",
+                error_message=str(exc)[:2000],
+                retryable=True,
+                recovery_stage="source_request_result_poll",
+            )
+            raise
+    else:
+        expected_ids = {line.request_id for line in lines}
+        results = [row for row in prefetched_results if str(row.request_id) in expected_ids]
+    by_request_id = {str(result.request_id): result for result in results}
     succeed_external_operation(
         poll_operation,
         details={
-            "found_count": len(by_source_id),
+            "found_count": len(by_request_id),
             "expected_count": len(lines),
             "rma_numbers": sorted({row.rma_no for row in results if row.rma_no}),
         },
     )
     for line in lines:
         line.last_polled_at = now
-        result = by_source_id.get(line.source_request_id)
+        result = by_request_id.get(line.request_id)
         if result is None or not result.rma_no:
             line.status = "waiting_rma"
             waiting = True
@@ -792,6 +800,20 @@ async def poll_export_batch(
                 reason=str(exc),
             )
         line.rma_no = rma_no
+        remote_call_id = str(result.remote_call_id or "").strip()
+        if not remote_call_id.isdecimal():
+            line.status = "manual_review"
+            line.last_error_code = "RMA2_CALL_ID_MISSING_OR_INVALID"
+            export.status = "manual_review"
+            export.error_code = line.last_error_code
+            ticket.relay_export_status = "failed"
+            return await _move_to_manual(
+                session,
+                ticket=ticket,
+                task_type="sap_rma_call_id_invalid",
+                reason=line.last_error_code,
+            )
+        line.remote_call_id = remote_call_id
         line.rma_received_at = now
         line.status = "rma_received"
         line.last_error_code = None
@@ -823,6 +845,20 @@ async def poll_export_batch(
             "next_poll_seconds": settings.RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS,
         }
 
+    call_ids = [line.remote_call_id for line in lines]
+    if len(call_ids) != len(set(call_ids)):
+        export.status = "manual_review"
+        export.error_code = "RMA2_CALL_ID_DUPLICATED"
+        ticket.relay_export_status = "failed"
+        for line in lines:
+            line.status = "manual_review"
+            line.last_error_code = export.error_code
+        return await _move_to_manual(
+            session,
+            ticket=ticket,
+            task_type="sap_rma_call_id_duplicated",
+            reason=export.error_code,
+        )
     distinct_rmas = sorted({line.rma_no for line in lines if line.rma_no})
     existing_rmas: dict[str, TicketRma | None] = {}
     business_date = ticket.request_date or min(
@@ -985,4 +1021,47 @@ async def poll_export_batch(
         "export_id": export.id,
         "rma_no": rma_no,
         "rma_job_id": job.id,
+    }
+
+
+async def poll_waiting_rma_results(session: AsyncSession) -> dict[str, Any]:
+    """Read all due RequestIDs from RMA2 in one adapter call and aggregate by ticket."""
+
+    export_ids = list(
+        (
+            await session.execute(
+                select(TicketRelayExport.id)
+                .where(TicketRelayExport.status.in_({"waiting_sap_result", "waiting_rma"}))
+                .order_by(TicketRelayExport.id)
+            )
+        ).scalars().all()
+    )
+    if not export_ids:
+        return {"status": "idle", "export_count": 0, "request_count": 0, "results": []}
+
+    lines = list(
+        (
+            await session.execute(
+                select(ExportSap)
+                .where(ExportSap.relay_export_id.in_(export_ids))
+                .order_by(ExportSap.relay_export_id, ExportSap.ticket_item_id)
+            )
+        ).scalars().all()
+    )
+    request_ids = [uuid.UUID(line.request_id) for line in lines]
+    prefetched = await create_sap_middleware_adapter().query_rma_results(request_ids)
+    outcomes = [
+        await poll_export_batch(
+            session,
+            export_id=export_id,
+            prefetched_results=prefetched,
+        )
+        for export_id in export_ids
+    ]
+    return {
+        "status": "completed",
+        "export_count": len(export_ids),
+        "request_count": len(request_ids),
+        "result_count": len(prefetched),
+        "results": outcomes,
     }

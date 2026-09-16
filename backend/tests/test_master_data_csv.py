@@ -40,16 +40,26 @@ def test_parse_sn_assets_csv_reports_invalid_rows() -> None:
 
 def test_parse_board_cards_csv_parses_boolean_values() -> None:
     content = (
-        "material_code,material_name,need_ship_to_beijing,shipping_address,shipping_contact,shipping_phone,postal_code,status\n"
-        "MAT001,Main board,true,Beijing,Alice,010-00000000,100000,active\n"
+        "board_code,board_name,need_ship_to_beijing,shipping_address,shipping_contact,shipping_phone,postal_code,status\n"
+        "BOARD001,Main board,true,Beijing,Alice,010-00000000,100000,active\n"
     ).encode("utf-8")
 
     items, file_hash = master_data_service.parse_board_cards_csv(content)
 
     assert len(items) == 1
-    assert items[0].material_code == "MAT001"
+    assert items[0].board_code == "BOARD001"
     assert items[0].need_ship_to_beijing is True
     assert len(file_hash) == 64
+
+
+def test_parse_board_cards_csv_rejects_material_compatibility_columns() -> None:
+    content = b"board_code,material_code\nBOARD001,MAT001\n"
+
+    with pytest.raises(HTTPException) as exc_info:
+        master_data_service.parse_board_cards_csv(content)
+
+    assert exc_info.value.detail["code"] == "CSV_VALIDATION_FAILED"
+    assert "BOARD_CARD_MATERIAL_FIELDS_FORBIDDEN" in exc_info.value.detail["errors"][0]["error"]
 
 
 def test_csv_template_downloads_include_bom() -> None:
@@ -62,6 +72,7 @@ def test_xlsx_templates_are_parseable() -> None:
     board_items, board_hash = master_data_service.parse_board_cards_xlsx(master_data_service.board_cards_template_xlsx())
 
     assert sn_items[0].sn == "SN202607070001"
+    assert sn_items[0].ins_id == 100001
     assert board_items[0].board_code == "M8002"
     assert board_items[0].return_location == "beijing"
     assert len(sn_hash) == 64

@@ -225,10 +225,10 @@ def upgrade() -> None:
         """
         INSERT INTO workflow_transitions
             (from_status_code, to_status_code, trigger_event, condition_desc, require_manual, enabled)
-        VALUES
-            ('rma_sent', 'closed', 'rma_issued_and_archived',
-             '正式RMA已回填、PDF关键字段校验通过、邮件发送成功且PDF和出站邮件归档完成。',
-             0, 1)
+        SELECT 'rma_sent', 'closed', 'rma_issued_and_archived',
+               '正式RMA已回填、PDF关键字段校验通过、邮件发送成功且PDF和出站邮件归档完成。', 0, 1
+        WHERE EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='rma_sent')
+          AND EXISTS (SELECT 1 FROM workflow_statuses WHERE status_code='closed')
         ON DUPLICATE KEY UPDATE
             condition_desc=VALUES(condition_desc),
             require_manual=0,

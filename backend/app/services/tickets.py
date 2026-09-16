@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -34,6 +35,7 @@ from app.services.audit import log_operation
 from app.services.business_rules import FOLLOWUP_REPLY_TYPES, required_missing_for_ticket
 from app.services.common import model_to_dict, paginate_scalars, to_plain, utcnow
 from app.services.master_data import xlsx_workbook_bytes
+from app.services.ticket_safety import build_sn_validation_report
 from app.services.workflow import create_manual_task_if_missing, transition_ticket
 
 TICKET_FIELDS = (
@@ -126,6 +128,10 @@ ITEM_FIELDS = (
     "return_route_snapshot",
     "sn",
     "sn_asset_id",
+    "sn_master_resolution_status",
+    "sn_master_resolution_method",
+    "sn_master_resolution_snapshot",
+    "sn_master_resolved_at",
     "quantity",
     "failure_description",
     "failure_information",
@@ -141,8 +147,6 @@ ITEM_FIELDS = (
 
 ITEM_WRITE_FIELDS = {
     "line_no",
-    "material_code",
-    "material_name",
     "board_code",
     "board_name",
     "sn",
@@ -164,6 +168,8 @@ EMAIL_FIELDS = (
     "imap_uid",
     "fetch_job_run_id",
     "raw_eml_oss_object_id",
+    "persistence_tier",
+    "classification_locked",
     "message_id",
     "in_reply_to",
     "from_address",
@@ -177,7 +183,6 @@ EMAIL_FIELDS = (
     "parse_status",
     "processing_stage",
     "intent_type",
-    "intent_subtype",
     "handling_level",
     "classification_version",
     "classification_confidence",
@@ -269,7 +274,6 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "parser_type",
             "parser_version",
             "intent_type",
-            "intent_subtype",
             "handling_level",
             "classification_version",
             "classification_confidence",
@@ -534,6 +538,12 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             .order_by(ExportSap.ticket_item_id, ExportSap.created_at.desc())
         )
     ).scalars().all()
+    latest_sap_by_item: dict[int, ExportSap] = {}
+    for row in sap_exports:
+        latest_sap_by_item.setdefault(row.ticket_item_id, row)
+    latest_sap_rows = list(latest_sap_by_item.values())
+    repair_total = sum((row.repair_fee or Decimal("0")) for row in latest_sap_rows)
+    repair_currencies = {str(row.currency or "RMB").upper().replace("CNY", "RMB") for row in latest_sap_rows}
     rma_rows = (
         await session.execute(
             select(TicketRma)
@@ -711,6 +721,9 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
             "failed_count": sum(
                 1 for row in sap_exports if row.status in {"failed", "timed_out", "manual_review"}
             ),
+            "unit_price_meaning": "单个SN维修单价",
+            "repair_total": str(repair_total),
+            "currency": next(iter(repair_currencies)) if len(repair_currencies) == 1 else None,
         },
         "sap_exports": [
             model_to_dict(
@@ -719,7 +732,7 @@ async def get_ticket_detail(session: AsyncSession, ticket_id: int) -> dict[str, 
                     "id",
                     "ticket_item_id",
                     "relay_export_id",
-                    "source_request_id",
+                    "request_id",
                     "status",
                     "attempt_count",
                     "remote_call_id",
@@ -985,11 +998,32 @@ async def upsert_ticket_items(
                 )
             )
             item_changes[field] = {"old": to_plain(old_value), "new": to_plain(value)}
+        if "sn" in item_changes:
+            for material_field in ("material_code", "material_name"):
+                old_material = getattr(item, material_field)
+                if old_material is None:
+                    continue
+                setattr(item, material_field, None)
+                session.add(
+                    FieldAuditLog(
+                        ticket_id=ticket.id,
+                        ticket_item_id=item.id,
+                        field_name=material_field,
+                        old_value=_audit_value(old_material),
+                        new_value=None,
+                        source_type="system",
+                        reason="SN changed; stale SN-master material cleared.",
+                        operator_user_id=user_id,
+                    )
+                )
+                item_changes[material_field] = {
+                    "old": to_plain(old_material), "new": None
+                }
         if len(item_changes) > 1:
             changed.append(item_changes)
     if changed:
         ticket.version += 1
-        sn_fields = {"sn", "material_code", "material_name"}
+        sn_fields = {"sn"}
         await _invalidate_export_snapshot(
             session,
             ticket=ticket,
@@ -1253,98 +1287,6 @@ async def ensure_manual_review_ticket_from_parse_result(
     return ticket
 
 
-async def create_manual_business_ticket_from_email(
-    session: AsyncSession,
-    *,
-    email: Email,
-    parse_result: ParseResult,
-    reason: str,
-) -> RepairTicket:
-    """Create a SECOND side-car ticket without replacing the thread's FIRST ticket."""
-    existing_link = await session.scalar(
-        select(EmailTicketLink)
-        .join(RepairTicket, RepairTicket.id == EmailTicketLink.ticket_id)
-        .where(
-            EmailTicketLink.email_id == email.id,
-            RepairTicket.ticket_category == "manual_business",
-        )
-        .order_by(EmailTicketLink.id.desc())
-    )
-    if existing_link is not None:
-        existing = await session.get(RepairTicket, existing_link.ticket_id)
-        if existing is not None:
-            return existing
-
-    from app.services.routing import choose_system_owner
-
-    owner_id, language_code, routing_reason = await choose_system_owner(session, email)
-    ticket = RepairTicket(
-        ticket_no=await _next_ticket_no(session),
-        current_status_code="manual_review",
-        ticket_category="manual_business",
-        origin_handling_level=parse_result.handling_level or str(HandlingLevel.MANUAL_RMA_BUSINESS),
-        origin_intent_type=parse_result.intent_type,
-        source_email_id=email.id,
-        thread_id=email.thread_id,
-        contact_email=email.from_address,
-        assigned_user_id=owner_id,
-        language_code=language_code,
-        rma_required=False,
-        relay_export_status="not_required",
-        rma_status="not_required",
-        sn_validation_status="not_required",
-        policy_resolution_status="not_required",
-        confidence_score=parse_result.confidence_score,
-        conflict_fields=parse_result.conflict_fields,
-        max_followup_count=settings.MAX_FOLLOW_UP,
-    )
-    session.add(ticket)
-    await session.flush()
-    session.add(
-        TicketStatusLog(
-            ticket_id=ticket.id,
-            from_status_code=None,
-            to_status_code="manual_review",
-            trigger_event="manual_business_created",
-            reason=reason,
-            operator_type="system",
-            metadata_json={"email_id": email.id, "parse_result_id": parse_result.id, "routing": routing_reason},
-        )
-    )
-    session.add(
-        EmailTicketLink(
-            email_id=email.id,
-            ticket_id=ticket.id,
-            link_type="source",
-            link_reason="SECOND manual business side-car; does not replace FIRST active ticket",
-        )
-    )
-    parse_result.ticket_id = ticket.id
-    parse_result.apply_status = "needs_manual_review"
-    await create_manual_task_if_missing(
-        session,
-        ticket=ticket,
-        task_type=f"second_{parse_result.intent_type or 'manual_business'}",
-        trigger_reason=reason,
-        priority="normal",
-        email_id=email.id,
-        assigned_user_id=owner_id,
-        recovery_stage="manual_business",
-        recovery_action="人工处理后记录结果并将人工业务工单置为 resolved。",
-    )
-    await log_operation(
-        session,
-        operation_type="manual_business_ticket_created",
-        target_type="repair_ticket",
-        target_id=ticket.id,
-        email_id=email.id,
-        ticket_id=ticket.id,
-        description=reason,
-        after_data={"intent_type": parse_result.intent_type, "first_active_ticket_unchanged": True},
-    )
-    return ticket
-
-
 async def _create_items_from_parse_result(
     session: AsyncSession,
     ticket: RepairTicket,
@@ -1439,6 +1381,44 @@ async def _create_items_from_parse_result(
             payload = normalize_repair_item(payload, default_line_no=item_index + 1)
         sn = (payload.get("sn") or "").strip().upper() if isinstance(payload, dict) else ""
         if sn and sn in existing_sns:
+            existing = next(
+                (
+                    item
+                    for item in existing_items
+                    if str(item.sn or "").strip().upper() == sn
+                ),
+                None,
+            )
+            if existing is not None and not existing.manual_locked:
+                old_value = _audit_value(serialize_item(existing))
+                enrichments = {
+                    "board_code": payload.get("board_code") or payload.get("board_model"),
+                    "board_name": payload.get("board_name"),
+                    "failure_description": payload.get("failure_description") or ticket.problem_description,
+                    "failure_information": payload.get("failure_information"),
+                    "data_info": payload.get("data_info"),
+                    "remarks": payload.get("remarks"),
+                    "accessories": payload.get("accessories"),
+                }
+                changed = False
+                for field, value in enrichments.items():
+                    if value and not getattr(existing, field):
+                        setattr(existing, field, value)
+                        changed = True
+                if changed:
+                    session.add(
+                        FieldAuditLog(
+                            ticket_id=ticket.id,
+                            ticket_item_id=existing.id,
+                            field_name="item",
+                            old_value=old_value,
+                            new_value=_audit_value(serialize_item(existing)),
+                            source_type="parse_result",
+                            reason="Enriched existing same-SN parser item without overwriting populated fields.",
+                            operator_user_id=user_id,
+                            parse_result_id=parse_result.id,
+                        )
+                    )
             continue
         requested_line_no = int(payload.get("line_no") or 0) if isinstance(payload, dict) else 0
         placeholder = existing_by_line.get(requested_line_no) if requested_line_no > 0 else None
@@ -1627,6 +1607,16 @@ async def apply_parse_result(
     )
     if parse_result.intent_type in AUTO_INTENTS:
         await session.flush()
+        # Resolve SAP material fields from SN master data as soon as parser items
+        # are accepted.  This SN-only stage is deliberately independent of the
+        # complete export gate: a ticket may still need customer information,
+        # but board fields from the email must never stand in for material data.
+        await build_sn_validation_report(
+            session,
+            ticket_id=ticket.id,
+            user_id=user_id,
+            persist=True,
+        )
         current_items = (
             await session.execute(
                 select(RepairTicketItem)
@@ -1654,7 +1644,6 @@ async def apply_parse_result(
     parse_result.accepted_at = now
     email.parse_status = "parsed"
     email.intent_type = parse_result.intent_type or email.intent_type
-    email.intent_subtype = parse_result.intent_subtype
     email.handling_level = parse_result.handling_level
     email.classification_version = parse_result.classification_version
     email.classification_confidence = parse_result.classification_confidence or parse_result.confidence_score

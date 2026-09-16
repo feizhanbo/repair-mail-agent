@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -14,6 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import Email, EmailAttachment, JobRunLog, OssObject, ReplyRecord, TicketRma
 from app.services.common import utcnow
+
+logger = logging.getLogger(__name__)
+
+
+def _object_key_hash(object_key: str) -> str:
+    return hashlib.sha256(object_key.encode("utf-8")).hexdigest()[:16]
 
 
 logger = logging.getLogger(__name__)
@@ -141,6 +148,14 @@ async def upload_bytes_to_oss(
 
     try:
         headers = {"Content-Type": content_type} if content_type else None
+        started = time.monotonic()
+        logger.info(
+            "OSS upload started",
+            extra={
+                "event": "oss_upload_started", "bucket_alias": settings.OSS_BUCKET,
+                "object_key_hash": _object_key_hash(object_key), "object_size": len(content),
+            },
+        )
         async with _oss_semaphore:
             result = await asyncio.to_thread(
                 _build_bucket(endpoint=settings.OSS_ENDPOINT, bucket_name=settings.OSS_BUCKET).put_object,
@@ -151,11 +166,27 @@ async def upload_bytes_to_oss(
     except Exception as exc:
         oss_object.upload_status = "failed"
         oss_object.error_message = "OSS upload failed"
+        logger.exception(
+            "OSS upload failed",
+            extra={
+                "event": "oss_upload_failed", "bucket_alias": settings.OSS_BUCKET,
+                "object_key_hash": _object_key_hash(object_key), "object_size": len(content),
+                "duration_ms": int((time.monotonic() - started) * 1000), "error_code": "OSS_UPLOAD_FAILED",
+            },
+        )
         raise StorageUploadError("OSS_UPLOAD_FAILED") from exc
 
     oss_object.upload_status = "success"
     oss_object.etag = getattr(result, "etag", None)
     oss_object.error_message = None
+    logger.info(
+        "OSS upload completed",
+        extra={
+            "event": "oss_upload_completed", "bucket_alias": settings.OSS_BUCKET,
+            "object_key_hash": _object_key_hash(object_key), "object_size": len(content),
+            "etag": oss_object.etag, "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
     return oss_object
 
 
@@ -172,13 +203,38 @@ async def generate_presigned_url(
 
     bucket_name = bucket or settings.OSS_BUCKET
     endpoint_name = endpoint or settings.OSS_ENDPOINT
-    async with _oss_semaphore:
-        return await asyncio.to_thread(
-            _build_bucket(endpoint=endpoint_name, bucket_name=bucket_name).sign_url,
-            "GET",
-            object_key,
-            expires_seconds,
+    started = time.monotonic()
+    logger.info(
+        "OSS sign URL started",
+        extra={"event": "oss_sign_url_started", "bucket_alias": bucket_name, "object_key_hash": _object_key_hash(object_key)},
+    )
+    try:
+        async with _oss_semaphore:
+            url = await asyncio.to_thread(
+                _build_bucket(endpoint=endpoint_name, bucket_name=bucket_name).sign_url,
+                "GET",
+                object_key,
+                expires_seconds,
+            )
+    except Exception as exc:
+        logger.exception(
+            "OSS sign URL failed",
+            extra={
+                "event": "oss_sign_url_failed", "bucket_alias": bucket_name,
+                "object_key_hash": _object_key_hash(object_key), "error_code": "OSS_SIGN_URL_FAILED",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
         )
+        raise StorageUploadError("OSS_SIGN_URL_FAILED") from exc
+    logger.info(
+        "OSS sign URL completed",
+        extra={
+            "event": "oss_sign_url_completed", "bucket_alias": bucket_name,
+            "object_key_hash": _object_key_hash(object_key),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+    return url
 
 
 async def generate_presigned_url_for_object(
@@ -218,6 +274,11 @@ async def download_oss_object_bytes(
         raise StorageUploadError("OSS_OBJECT_NOT_READY")
 
     try:
+        started = time.monotonic()
+        logger.info(
+            "OSS download started",
+            extra={"event": "oss_download_started", "bucket_alias": oss_object.bucket, "object_key_hash": _object_key_hash(oss_object.object_key)},
+        )
         def _download() -> bytes:
             bucket_client = _build_bucket(
                 endpoint=oss_object.endpoint or settings.OSS_ENDPOINT,
@@ -226,8 +287,25 @@ async def download_oss_object_bytes(
             return bucket_client.get_object(oss_object.object_key).read()
 
         async with _oss_semaphore:
-            return await asyncio.to_thread(_download)
+            content = await asyncio.to_thread(_download)
+        logger.info(
+            "OSS download completed",
+            extra={
+                "event": "oss_download_completed", "bucket_alias": oss_object.bucket,
+                "object_key_hash": _object_key_hash(oss_object.object_key), "object_size": len(content),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
+        return content
     except Exception as exc:
+        logger.exception(
+            "OSS download failed",
+            extra={
+                "event": "oss_download_failed", "bucket_alias": oss_object.bucket,
+                "object_key_hash": _object_key_hash(oss_object.object_key), "error_code": "OSS_DOWNLOAD_FAILED",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         raise StorageUploadError("OSS_DOWNLOAD_FAILED") from exc
 
 
@@ -261,6 +339,11 @@ async def delete_oss_object(
     """Idempotently delete an OSS object using persisted identity fields."""
     if not _oss_configured():
         raise StorageConfigurationError("OSS_NOT_CONFIGURED")
+    started = time.monotonic()
+    logger.info(
+        "OSS delete started",
+        extra={"event": "oss_delete_started", "bucket_alias": bucket, "object_key_hash": _object_key_hash(object_key)},
+    )
     try:
         client = _build_bucket(
             endpoint=endpoint or settings.OSS_ENDPOINT,
@@ -269,7 +352,16 @@ async def delete_oss_object(
         async with _oss_semaphore:
             existed = bool(await asyncio.to_thread(client.object_exists, object_key))
             if not existed:
-                return OssDeleteResult(bucket, object_key, True, already_missing=True)
+                result = OssDeleteResult(bucket, object_key, True, already_missing=True)
+                logger.info(
+                    "OSS delete completed; object already missing",
+                    extra={
+                        "event": "oss_delete_completed", "bucket_alias": bucket,
+                        "object_key_hash": _object_key_hash(object_key), "already_missing": True,
+                        "duration_ms": int((time.monotonic() - started) * 1000),
+                    },
+                )
+                return result
             if object_version:
                 await asyncio.to_thread(
                     client.delete_object,
@@ -282,18 +374,49 @@ async def delete_oss_object(
                 remains = bool(await asyncio.to_thread(client.object_exists, object_key))
         if remains:
             raise StorageDeleteError("OSS_DELETE_NOT_CONFIRMED")
-        return OssDeleteResult(bucket, object_key, True)
-    except StorageDeleteError:
+        result = OssDeleteResult(bucket, object_key, True)
+        logger.info(
+            "OSS delete completed",
+            extra={
+                "event": "oss_delete_completed", "bucket_alias": bucket,
+                "object_key_hash": _object_key_hash(object_key),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
+        return result
+    except StorageDeleteError as exc:
+        logger.exception(
+            "OSS delete failed",
+            extra={
+                "event": "oss_delete_failed", "bucket_alias": bucket,
+                "object_key_hash": _object_key_hash(object_key), "error_code": exc.code,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         raise
     except Exception as exc:
         status_code = getattr(exc, "status", None) or getattr(exc, "status_code", None)
         provider_code = str(getattr(exc, "code", "") or getattr(exc, "error_code", ""))
+        # Another cleanup worker can delete the object after object_exists()
+        # and before delete_object().  OSS reports that race as NoSuchKey;
+        # deletion is already complete, so preserve the method's idempotent
+        # contract instead of scheduling a pointless retry.
+        if status_code == 404 or provider_code in {"NoSuchKey", "NoSuchObject", "NotFound"}:
+            return OssDeleteResult(bucket, object_key, True, already_missing=True)
         code = (
             "OSS_DELETE_FORBIDDEN"
             if status_code == 403
             or exc.__class__.__name__ in {"AccessDenied", "NoPermission"}
             or provider_code in {"AccessDenied", "Forbidden", "NoPermission"}
             else "OSS_DELETE_FAILED"
+        )
+        logger.exception(
+            "OSS delete failed",
+            extra={
+                "event": "oss_delete_failed", "bucket_alias": bucket,
+                "object_key_hash": _object_key_hash(object_key), "error_code": code,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
         )
         raise StorageDeleteError(code, retryable=code != "OSS_DELETE_FORBIDDEN") from exc
 

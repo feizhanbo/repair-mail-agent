@@ -18,8 +18,9 @@ from app.services.rma_pdf import (
     rma_pdf_snapshot,
     validate_rma_template_integrity,
     _latest_export_rows_by_item,
+    build_rma_pdf_data,
 )
-from app.models import ExportSap
+from app.models import ExportSap, RepairTicket, RepairTicketItem, TicketRma
 
 
 _CODE39_DECODE = {
@@ -115,6 +116,86 @@ def test_latest_export_row_per_item_prevents_duplicate_cost_after_reexport() -> 
         RmaPdfData.model_validate(values)
 
 
+class _ScalarRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _PdfDataSession:
+    def __init__(self, ticket, query_rows):
+        self.ticket = ticket
+        self.query_rows = list(query_rows)
+
+    async def get(self, _model, _identity):
+        return self.ticket
+
+    async def execute(self, _statement):
+        return _ScalarRows(self.query_rows.pop(0))
+
+
+@pytest.mark.anyio
+async def test_pdf_part_no_comes_from_oscl_print_call_id() -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="T1",
+        current_status_code="ready_for_export",
+        customer_code="C1",
+        customer_name="Customer",
+        mailing_address="Address",
+        contact_person="Alice",
+        contact_phone="13800000000",
+        contact_email="a@example.com",
+        request_date=date(2026, 7, 10),
+        missing_fields=[],
+        conflict_fields=[],
+    )
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        sn="SN-001",
+        material_code="SAP-MAT-001",
+        material_name="Material name",
+        quantity=1,
+        validation_status="pass",
+    )
+    rma = TicketRma(ticket_id=1, rma_no="2026071012")
+    export = ExportSap(
+        id=3,
+        ticket_id=1,
+        ticket_item_id=2,
+        rma_no="2026071012",
+        status="rma_received",
+        remote_call_id="987654",
+        currency="CNY",
+        repair_fee=Decimal("0"),
+    )
+
+    data = await build_rma_pdf_data(
+        _PdfDataSession(ticket, [[item], [rma], [export]]),
+        ticket_id=1,
+    )
+
+    assert data.items[0].part_no == "987654"
+    assert data.items[0].part_no != item.material_code
+
+
+def test_three_sn_unit_prices_sum_to_rma_repair_total() -> None:
+    rows = [
+        ExportSap(id=index, ticket_item_id=100 + index, repair_fee=Decimal("1200.00"), currency="RMB")
+        for index in range(1, 4)
+    ]
+    selected = _latest_export_rows_by_item(rows)
+    assert [row.repair_fee for row in selected.values()] == [Decimal("1200.00")] * 3
+    assert sum(row.repair_fee or Decimal("0") for row in selected.values()) == Decimal("3600.00")
+
+
 def test_continuation_has_only_real_rows_and_no_hidden_details_labels() -> None:
     pdf = render_rma_pdf(_data(7))
     with fitz.open(stream=pdf, filetype="pdf") as document:
@@ -152,18 +233,27 @@ def test_pdf_size_hard_limit_blocks_delivery(monkeypatch) -> None:
         render_rma_pdf(_data(1))
 
 
-def test_rma_filename_and_contact_follow_fixed_template_format() -> None:
+def test_rma_filename_and_contact_follow_ticket_data_format() -> None:
     data = _data(1)
     data.rma_no = "2026070910"
     data.customer_name = "南京矽力微电子技术有限公司"
-    data.mailing_contact_person = "牛世磊"
-    data.mailing_contact_phone = "086-15101248952"
+    data.mailing_contact_person = "张跃"
+    data.mailing_contact_phone = "15298760948"
 
-    assert data.mailing_contact == "牛世磊086-15101248952"
+    assert data.mailing_contact == "张跃15298760948"
     assert rma_pdf_file_name(data) == "RMA2026070910南京矽力微电子技术有限公司.pdf"
     with fitz.open(stream=render_rma_pdf(data), filetype="pdf") as document:
         compact = "".join(page.get_text() for page in document).replace(" ", "").replace("\n", "")
-    assert "牛世磊086-15101248952" in compact
+    assert "张跃15298760948" in compact
+
+
+def test_rma_pdf_clears_invalid_approved_by_placeholder() -> None:
+    with fitz.open(stream=render_rma_pdf(_data(1)), filetype="pdf") as document:
+        page_text = document[0].get_text()
+
+    assert "方方" not in page_text
+    assert "Approved by" in page_text
+    assert "/核准人:" in page_text
 
 
 def test_fixed_box_overflow_aborts_generation() -> None:

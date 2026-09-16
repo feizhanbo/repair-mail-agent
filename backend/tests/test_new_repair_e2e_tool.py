@@ -76,7 +76,7 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
             "ticket_detail": {
                 "ticket": {
                     "id": 7,
-                    "current_status_code": "closed",
+                    "current_status_code": "rma_sent",
                     "rma_status": "issued",
                     "missing_fields": {},
                     "customer_code": "TEST-CUSTOMER",
@@ -104,10 +104,6 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
                         "to_status_code": "rma_sent",
                         "trigger_event": "rma_reply_sent",
                     },
-                    {
-                        "to_status_code": "closed",
-                        "trigger_event": "rma_issued_and_archived",
-                    },
                 ],
                 "rma_issue_summary": {
                     "rma_received": True,
@@ -116,7 +112,7 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
                     "message_id_saved": True,
                     "pdf_archived": True,
                     "outbound_archived": True,
-                    "closed": True,
+                    "closed": False,
                 },
                 "email_timeline": [
                     {"id": 99, "subject": "[TEST ONLY] Re: controlled message"}
@@ -126,6 +122,27 @@ def test_complete_path_requires_one_atomic_test_rma_reply() -> None:
         }
     )
     assert result["reply"] == reply
+
+
+def test_complete_path_rejects_prematurely_closed_ticket() -> None:
+    parent_message_id = "<premature-close@example.test>"
+    with pytest.raises(E2EFailure, match="not rma_sent"):
+        validate_complete_path(
+            {
+                "email_detail": {
+                    "email": {
+                        "intent_type": "new_repair",
+                        "message_id": parent_message_id,
+                    }
+                },
+                "ticket_detail": {
+                    "ticket": {"current_status_code": "closed"},
+                    "items": [],
+                    "rma_records": [],
+                    "reply_records": [],
+                },
+            }
+        )
 
 
 def test_complete_path_rejects_closed_ticket_without_archive_evidence() -> None:
@@ -150,7 +167,7 @@ def test_complete_path_rejects_closed_ticket_without_archive_evidence() -> None:
                 },
                 "ticket_detail": {
                     "ticket": {
-                        "current_status_code": "closed",
+                        "current_status_code": "rma_sent",
                         "missing_fields": {},
                         "customer_code": "TEST-CUSTOMER",
                         "safety_check_hash": "a" * 64,
@@ -188,7 +205,7 @@ def test_complete_path_rejects_unprefixed_archived_transport_subject() -> None:
                 },
                 "ticket_detail": {
                     "ticket": {
-                        "current_status_code": "closed",
+                        "current_status_code": "rma_sent",
                         "missing_fields": {},
                         "customer_code": "TEST-CUSTOMER",
                         "safety_check_hash": "a" * 64,
@@ -238,18 +255,40 @@ def test_missing_path_allows_actual_required_field_subset_and_no_attachment() ->
     assert result["reply"] == reply
 
 
-def test_missing_path_rejects_optional_phone_question() -> None:
-    with pytest.raises(E2EFailure, match="customer-actionable required fields"):
-        validate_missing_path(
-            {
-                "email_detail": {"email": {"intent_type": "new_repair"}},
-                "ticket_detail": {
-                    "ticket": {
-                        "current_status_code": "auto_replied",
-                        "followup_count": 1,
-                        "missing_fields": {"mailing_address": "required", "contact_phone": "required"},
+def test_missing_path_accepts_phone_as_customer_actionable_required_field() -> None:
+    parent_message_id = "<missing-phone@accotest.com>"
+    reply = _reply(
+        "missing_fields",
+        in_reply_to=parent_message_id,
+        references_header=parent_message_id,
+        missing_fields={
+            "mailing_address": "required",
+            "contact_phone": "required",
+        },
+    )
+    result = validate_missing_path(
+        {
+            "email_detail": {
+                "email": {
+                    "intent_type": "new_repair",
+                    "message_id": parent_message_id,
+                }
+            },
+            "ticket_detail": {
+                "ticket": {
+                    "current_status_code": "auto_replied",
+                    "followup_count": 1,
+                    "missing_fields": {
+                        "mailing_address": "required",
+                        "contact_phone": "required",
                     },
-                    "reply_records": [_reply("missing_fields")],
                 },
-            }
-        )
+                "thread": {"id": 12},
+                "email_timeline": [
+                    {"id": 99, "subject": "[TEST ONLY] Re: controlled message"}
+                ],
+                "reply_records": [reply],
+            },
+        }
+    )
+    assert result["reply"] == reply

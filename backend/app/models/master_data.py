@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,7 +13,9 @@ from app.models.base import Base, TimestampMixin, bool_column, datetime_column, 
 class SnAsset(TimestampMixin, Base):
     __tablename__ = "sn_assets"
     __table_args__ = (
-        UniqueConstraint("sn", name="uk_sn_assets_sn"),
+        UniqueConstraint("source_system", "ins_id", name="uk_sn_assets_source_ins_id"),
+        UniqueConstraint("source_system", "external_id", name="uk_sn_assets_external"),
+        Index("idx_sn_assets_sn", "sn"),
         Index("idx_sn_assets_customer_code", "customer_code"),
         Index("idx_sn_assets_customer_name", "customer_name"),
         Index("idx_sn_assets_material_code", "material_code"),
@@ -23,13 +25,13 @@ class SnAsset(TimestampMixin, Base):
         Index("idx_sn_assets_top_sn", "top_sn"),
         Index("idx_sn_assets_status", "asset_status"),
         Index("idx_sn_assets_source", "source_file_hash", "source_row_no"),
-        Index("idx_sn_assets_external", "source_system", "external_id"),
         Index("idx_sn_assets_source_updated", "source_system", "source_updated_at"),
     )
 
     id: Mapped[int] = pk_column()
+    ins_id: Mapped[int | None] = mapped_column(Integer)
     customer_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
     material_code: Mapped[str] = mapped_column(String(100), nullable=False)
     material_name: Mapped[str | None] = mapped_column(String(255))
     sn: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -48,6 +50,7 @@ class SnAsset(TimestampMixin, Base):
     source_system: Mapped[str] = mapped_column(String(30), nullable=False, server_default="local")
     external_id: Mapped[str | None] = mapped_column(String(191))
     source_updated_at: Mapped[datetime | None] = datetime_column()
+    source_row_hash: Mapped[str | None] = mapped_column(mysql.CHAR(64))
     imported_by_user_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("users.id", name="fk_sn_assets_imported_by"))
     imported_at: Mapped[datetime | None] = datetime_column()
 
@@ -59,7 +62,6 @@ class BoardCard(TimestampMixin, Base):
         Index("idx_board_cards_board_name", "board_name"),
         Index("idx_board_cards_route", "customer_scope", "route_type", "status"),
         Index("idx_board_cards_location", "return_location", "status"),
-        Index("idx_board_cards_material_name", "material_name"),
         Index("idx_board_cards_ship_to_beijing", "need_ship_to_beijing"),
         Index("idx_board_cards_status", "status"),
         Index("idx_board_cards_source", "source_file_hash", "source_row_no"),
@@ -71,10 +73,6 @@ class BoardCard(TimestampMixin, Base):
     return_location: Mapped[str] = mapped_column(String(20), nullable=False)
     route_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="board_rule")
     customer_scope: Mapped[str] = mapped_column(String(20), nullable=False, server_default="domestic")
-    # Compatibility columns. New business logic must use the explicit board/route
-    # fields above; these columns remain for one migration window.
-    material_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    material_name: Mapped[str | None] = mapped_column(String(255))
     need_ship_to_beijing: Mapped[bool] = bool_column(False)
     shipping_address: Mapped[str | None] = mapped_column(String(500))
     shipping_contact: Mapped[str | None] = mapped_column(String(100))
@@ -110,7 +108,7 @@ class CustomerServicePolicy(TimestampMixin, Base):
     effective_from: Mapped[date | None] = mapped_column(mysql.DATE)
     effective_until: Mapped[date | None] = mapped_column(mysql.DATE)
     repair_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default="0")
-    currency: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNY")
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, server_default="RMB")
     tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, server_default="13")
     shipping_fee_text: Mapped[str] = mapped_column(
         String(100),

@@ -26,7 +26,6 @@ class RuleAnalysisResult:
     confidence_score: float
     field_confidences: dict[str, float]
     evidence: dict[str, Any]
-    intent_subtype: str | None = None
     handling_level: str | None = None
     classification_version: str = CLASSIFICATION_VERSION
     classification_reason_code: str | None = None
@@ -34,7 +33,6 @@ class RuleAnalysisResult:
     def to_parse_payload(self) -> dict[str, Any]:
         return {
             "intent_type": self.intent_type,
-            "intent_subtype": self.intent_subtype,
             "handling_level": self.handling_level,
             "classification_version": self.classification_version,
             "classification_confidence": self.classification_confidence,
@@ -49,7 +47,6 @@ class RuleAnalysisResult:
                 **self.evidence,
                 "classification": {
                     "intent_type": self.intent_type,
-                    "intent_subtype": self.intent_subtype,
                     "confidence": self.classification_confidence,
                     "reason": self.classification_reason,
                 },
@@ -61,7 +58,6 @@ class RuleAnalysisResult:
     def summary(self) -> dict[str, Any]:
         return {
             "intent_type": self.intent_type,
-            "intent_subtype": self.intent_subtype,
             "classification_confidence": self.classification_confidence,
             "confidence_score": self.confidence_score,
             "field_keys": sorted(self.fields),
@@ -73,6 +69,11 @@ class RuleAnalysisResult:
 SN_PATTERN = re.compile(r"(?:SN(?:号|號)?|S/N|序列号|设备编号)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,})", re.IGNORECASE)
 LONG_SN_PATTERN = re.compile(r"\b[A-Z0-9]{12,}\b", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+SUPPLEMENT_PHONE_PATTERN = re.compile(
+    r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
+    r"[ \t]*[:：]?[ \t]*(\+?\d[\d \t()\-]{5,28}\d)",
+    re.IGNORECASE,
+)
 HISTORY_MARKER = re.compile(
     r"^(?:-{2,}\s*Original Message\s*-{2,}|原始邮件|发件人[：:]|From\s*:|On .+ wrote:)",
     re.IGNORECASE,
@@ -147,8 +148,6 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
         return "contract_confirmation", 0.93, "邮件属于合同确认业务。"
     if any(term in text for term in ("非我司设备", "其他厂家设备", "第三方设备报价", "third-party equipment quotation", "other vendor quotation")):
         return "third_party_equipment_quote", 0.94, "邮件属于非我司设备报价。"
-    if email.mail_direction == "outbound" and "rma" in text:
-        return "rma_sent", 0.9, "系统外发的 RMA 邮件。"
     if email.in_reply_to or email.references_header:
         new_request_terms = ("另外", "新增", "还有一", "再次报修", "另有", "another unit", "additional", "new repair")
         if any(term in text for term in new_request_terms):
@@ -169,7 +168,7 @@ def classify_email(email: Email, body: str) -> tuple[str, float, str]:
     return "unknown", 0.45, "未命中明确分类规则。"
 
 
-def extract_fields(email: Email) -> dict[str, Any]:
+def extract_fields(email: Email, *, intent_type: str | None = None) -> dict[str, Any]:
     body = clean_email_body(email)
     conversation = normalize_email_body(email.clean_body or email.text_body or body)
     subject = email.subject or ""
@@ -194,6 +193,12 @@ def extract_fields(email: Email) -> dict[str, Any]:
         "contact_email": contact_emails[0] if contact_emails else None,
         "problem_description": problem_description,
     }
+    if intent_type == "customer_supplement":
+        phone_match = SUPPLEMENT_PHONE_PATTERN.search(body)
+        if phone_match:
+            fields["contact_phone"] = re.sub(
+                r"\s+", "", phone_match.group(1).strip()
+            )
     items = [{"line_no": index + 1, "sn": sn, "failure_description": problem_description} for index, sn in enumerate(sns)]
     missing_fields: dict[str, str] = {}
     if not sns:
@@ -233,7 +238,7 @@ def extract_fields(email: Email) -> dict[str, Any]:
 def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     body = clean_email_body(email)
     intent_type, classification_confidence, classification_reason = classify_email(email, body)
-    extracted = extract_fields(email)
+    extracted = extract_fields(email, intent_type=intent_type)
     extracted["missing_fields"] = required_missing_for_values(
         intent_type=intent_type,
         fields=extracted["fields"],
@@ -243,7 +248,6 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     decision = None if intent_type == "irrelevant" else decision_for_intent(intent_type, reason_code="RULE_CANDIDATE")
     return RuleAnalysisResult(
         intent_type=intent_type,
-        intent_subtype="general_irrelevant" if intent_type == "irrelevant" else None,
         classification_confidence=classification_confidence,
         classification_reason=classification_reason,
         body=extracted["body"],

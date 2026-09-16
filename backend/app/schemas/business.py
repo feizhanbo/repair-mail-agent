@@ -20,6 +20,7 @@ class EmailIngestRequest(BaseModel):
     in_reply_to: str | None = Field(default=None, max_length=500)
     references_header: str | None = None
     from_address: str = Field(max_length=500)
+    sender_address: str | None = Field(default=None, max_length=500)
     to_addresses: str | None = None
     cc_addresses: str | None = None
     delivered_to_addresses: str | None = None
@@ -73,6 +74,18 @@ class SapSnSyncApprovalRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class SnSyncConfigUpdateRequest(BaseModel):
+    relay_sqlserver_enabled: bool | None = None
+    relay_sn_sync_enabled: bool | None = None
+    sn_schema: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    sn_table: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    sn_primary_key: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    sn_updated_at_column: str | None = Field(default=None, max_length=128, pattern=r"^$|^[A-Za-z_][A-Za-z0-9_]*$")
+    sn_column_map: dict[str, str] | None = None
+    batch_size: int | None = Field(default=None, ge=1, le=10000)
+    snapshot_max_age_hours: int | None = Field(default=None, ge=1, le=720)
+
+
 class RmaManualPolicyApprovalRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
     confirm_policy_values: Literal[True]
@@ -91,10 +104,10 @@ class TicketReturnRouteManualRequest(BaseModel):
 
 
 class TicketItemUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: int | None = None
     line_no: int | None = Field(default=None, ge=1)
-    material_code: str | None = Field(default=None, max_length=100)
-    material_name: str | None = Field(default=None, max_length=255)
     board_code: str | None = Field(default=None, max_length=100)
     board_name: str | None = Field(default=None, max_length=255)
     sn: str | None = Field(default=None, max_length=100)
@@ -141,11 +154,13 @@ class ManualTaskResolveRequest(BaseModel):
         "keep_manual_review",
         "finish_external_handling",
         "resolve_manual_business",
+        "promote_to_first",
     ] = "keep_manual_review"
+    target_first_intent: Literal["new_repair", "thread_new_repair", "customer_supplement"] | None = None
 
 
 class ManualTaskReparseRequest(BaseModel):
-    mode: Literal["field_extract", "classification_and_extract"] = "field_extract"
+    mode: Literal["field_extract"] = "field_extract"
     reason: str | None = Field(default=None, max_length=500)
 
 
@@ -174,6 +189,7 @@ class ReplySendReconcileRequest(BaseModel):
 
 
 class SnAssetImportItem(BaseModel):
+    ins_id: int | None = Field(default=None, ge=1)
     customer_code: str = Field(max_length=50)
     customer_name: str = Field(max_length=255)
     material_code: str = Field(max_length=100)
@@ -197,15 +213,18 @@ class SnAssetImportRequest(BaseModel):
     source_file_hash: str | None = Field(default=None, max_length=64)
 
 
+class SnAssetUpdateRequest(SnAssetImportItem):
+    reason: str = Field(min_length=3, max_length=500)
+
+
 class BoardCardImportItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     board_code: str | None = Field(default=None, max_length=100)
     board_name: str | None = Field(default=None, max_length=255)
     return_location: Literal["beijing", "tianjin"] | None = None
     route_type: Literal["board_rule", "scope_default"] = "board_rule"
     customer_scope: Literal["domestic", "overseas"] = "domestic"
-    # Deprecated compatibility aliases.
-    material_code: str | None = Field(default=None, max_length=100)
-    material_name: str | None = Field(default=None, max_length=255)
     need_ship_to_beijing: bool | None = None
     shipping_address: str | None = Field(default=None, max_length=500)
     shipping_contact: str | None = Field(default=None, max_length=100)
@@ -220,6 +239,10 @@ class BoardCardImportRequest(BaseModel):
     items: list[BoardCardImportItem]
     source_file_name: str | None = Field(default=None, max_length=255)
     source_file_hash: str | None = Field(default=None, max_length=64)
+
+
+class BoardCardUpdateRequest(BoardCardImportItem):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class CustomerServicePolicyCreateRequest(BaseModel):
@@ -237,7 +260,7 @@ class CustomerServicePolicyCreateRequest(BaseModel):
     effective_from: date | None = None
     effective_until: date | None = None
     repair_price: float = Field(ge=0)
-    currency: str = Field(default="CNY", min_length=1, max_length=10)
+    currency: str = Field(default="RMB", min_length=1, max_length=10)
     tax_rate: float = Field(default=13, ge=0, le=100)
     shipping_fee_text: str = Field(default="one-way charge/单次收费", min_length=1, max_length=100)
     reply_salutation: str | None = Field(default=None, max_length=100)
@@ -266,6 +289,7 @@ class CustomerServicePolicyUpdateRequest(BaseModel):
     hide_company_name: bool | None = None
     force_manual_review: bool | None = None
     enabled: bool | None = None
+    reason: str = Field(default="configuration updated", min_length=3, max_length=500)
 
 
 class SystemConfigUpdateRequest(BaseModel):
@@ -280,6 +304,13 @@ class SystemConfigUpdateRequest(BaseModel):
     auto_send_min_confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)
     max_follow_up: int | None = Field(default=None, ge=1, le=10)
+    imap_fetch_enabled: bool | None = None
+    imap_poll_interval_minutes: int | None = Field(default=None, ge=1, le=1440)
+    imap_folder: str | None = Field(default=None, min_length=1, max_length=255)
+    imap_fetch_limit: int | None = Field(default=None, ge=1, le=1000)
+    imap_unseen_only: bool | None = None
+    imap_max_retries: int | None = Field(default=None, ge=0, le=20)
+    imap_archive_to_oss: bool | None = None
 
 
 class IdsRequest(BaseModel):
