@@ -11,7 +11,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    APP_ENV: str = "dev"
+    APP_ENV: str
     APP_NAME: str = "repair-mail-agent"
     APP_VERSION: str = "0.1.0"
     COMMIT_SHA: str = "unknown"
@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     DEV_DATABASE_URL: str = "mysql+asyncmy://root:change-me-root@127.0.0.1:13307/repair_system_dev"
     DB_SMOKE_DATABASE_URL: str = ""
     DESTRUCTIVE_TEST_DATABASE_ALLOWLIST: list[str] = ["repair_system_test", "AIRMA_test"]
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT_SECONDS: int = 30
+    DB_POOL_RECYCLE_SECONDS: int = 1800
 
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -97,7 +101,7 @@ class Settings(BaseSettings):
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
     AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
-    AI_FULL_LOG_ENABLED: bool = True
+    AI_FULL_LOG_ENABLED: bool = False
     AI_FULL_LOG_RETENTION_DAYS: int = 30
     AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")
     LLM_ROUTES_FILE: str = str(BACKEND_DIR / "config" / "llm_routes.yaml")
@@ -117,6 +121,7 @@ class Settings(BaseSettings):
     OSS_IO_CONCURRENCY: int = 4
     MAIL_IO_CONCURRENCY: int = 2
     FILE_PARSE_CONCURRENCY: int = 2
+    MASTER_DATA_IMPORT_MAX_BYTES: int = 20 * 1024 * 1024
 
     MULTIMODAL_PROVIDER: str = "qwen"
     QWEN_API_KEY: str = ""
@@ -186,7 +191,6 @@ class Settings(BaseSettings):
     RELAY_SQLSERVER_RMA_POLL_INTERVAL_SECONDS: int = 300
     RELAY_SQLSERVER_RMA_TIMEOUT_WORKING_HOURS: int = 8
     RELAY_SUBMIT_UNKNOWN_CONFIRM_SECONDS: int = 300
-    RELAY_SN_SYNC_CRON: str = ""
     RELAY_SN_COUNT_CHANGE_GUARD_PERCENT: float = 5.0
     RELAY_SN_SNAPSHOT_MAX_AGE_HOURS: int = 36
 
@@ -198,11 +202,17 @@ class Settings(BaseSettings):
 
     EMAIL_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
-    MAIL_WORKER_ENABLED: bool = True
-    MAIL_SCHEDULER_IN_API: bool = False
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
     ASYNC_JOB_STALE_SECONDS: int = 900
+    AIRMA_WORKER_ENVIRONMENT: str = "development"
+    AIRMA_WORKER_QUEUE: str = "default"
+    AIRMA_WORKER_LEASE_SECONDS: int = 60
+    AIRMA_WORKER_HEARTBEAT_SECONDS: int = 15
+    AIRMA_JOB_HEARTBEAT_SECONDS: int = 30
+    AIRMA_WATCHDOG_INTERVAL_SECONDS: int = 60
+    AIRMA_SHUTDOWN_GRACE_SECONDS: int = 30
+    AIRMA_EVENT_LOOP_WATCHDOG_SECONDS: int = 90
 
     AUTO_SEND_ENABLED: bool = False
     AUTO_FOLLOWUP_ENABLED: bool = False
@@ -258,9 +268,50 @@ class Settings(BaseSettings):
             return value.replace("mysql+aiomysql://", "mysql+asyncmy://", 1)
         return value
 
+    @field_validator("APP_ENV", "AIRMA_WORKER_ENVIRONMENT", mode="before")
+    @classmethod
+    def validate_environment_name(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"development", "test", "production"}:
+            raise ValueError("environment must be one of: development, test, production")
+        return normalized
+
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self) -> "Settings":
-        if self.APP_ENV.strip().lower() not in {"prod", "production"}:
+        if self.AIRMA_WORKER_ENVIRONMENT != self.APP_ENV:
+            raise ValueError("AIRMA_WORKER_ENVIRONMENT must match APP_ENV")
+        pool_values = {
+            "DB_POOL_SIZE": self.DB_POOL_SIZE,
+            "DB_MAX_OVERFLOW": self.DB_MAX_OVERFLOW,
+            "DB_POOL_TIMEOUT_SECONDS": self.DB_POOL_TIMEOUT_SECONDS,
+            "DB_POOL_RECYCLE_SECONDS": self.DB_POOL_RECYCLE_SECONDS,
+        }
+        invalid_pool = [
+            name
+            for name, value in pool_values.items()
+            if value < (0 if name == "DB_MAX_OVERFLOW" else 1)
+        ]
+        if invalid_pool:
+            raise ValueError(f"invalid database pool settings: {', '.join(invalid_pool)}")
+        oversized_pool = [
+            name
+            for name, value, maximum in (
+                ("DB_POOL_SIZE", self.DB_POOL_SIZE, 100),
+                ("DB_MAX_OVERFLOW", self.DB_MAX_OVERFLOW, 100),
+                ("DB_POOL_TIMEOUT_SECONDS", self.DB_POOL_TIMEOUT_SECONDS, 300),
+                ("DB_POOL_RECYCLE_SECONDS", self.DB_POOL_RECYCLE_SECONDS, 86400),
+            )
+            if value > maximum
+        ]
+        if oversized_pool:
+            raise ValueError(f"database pool settings exceed safe limits: {', '.join(oversized_pool)}")
+        if self.AIRMA_WORKER_HEARTBEAT_SECONDS <= 0 or self.AIRMA_JOB_HEARTBEAT_SECONDS <= 0:
+            raise ValueError("worker heartbeat intervals must be positive")
+        if self.AIRMA_WORKER_LEASE_SECONDS <= self.AIRMA_WORKER_HEARTBEAT_SECONDS * 2:
+            raise ValueError("AIRMA_WORKER_LEASE_SECONDS must exceed twice the heartbeat interval")
+        if self.AIRMA_EVENT_LOOP_WATCHDOG_SECONDS <= self.AIRMA_WORKER_HEARTBEAT_SECONDS * 2:
+            raise ValueError("AIRMA_EVENT_LOOP_WATCHDOG_SECONDS must exceed twice the heartbeat interval")
+        if self.APP_ENV != "production":
             return self
         insecure: list[str] = []
         if len(self.JWT_SECRET) < 32 or "change-me" in self.JWT_SECRET.lower():
@@ -273,8 +324,34 @@ class Settings(BaseSettings):
             insecure.append("CORS_ALLOWED_ORIGINS")
         if not self.TRUSTED_HOSTS or "*" in self.TRUSTED_HOSTS:
             insecure.append("TRUSTED_HOSTS")
+        if self.IMAP_FETCH_ENABLED:
+            if not self.IMAP_HOST or self.IMAP_HOST.endswith("example.com"):
+                insecure.append("IMAP_HOST")
+            if not self.IMAP_USER or self.IMAP_USER.endswith("example.com"):
+                insecure.append("IMAP_USER")
+            if not self.IMAP_PASSWORD:
+                insecure.append("IMAP_PASSWORD")
+            if self.IMAP_ARCHIVE_TO_OSS and (
+                not self.OSS_ACCESS_KEY or not self.OSS_SECRET_KEY
+            ):
+                insecure.append("OSS_CREDENTIALS")
+        if self.AUTO_SEND_ENABLED or self.RMA_AUTO_SEND_ENABLED or self.SMTP_ASYNC_ENABLED:
+            if not self.SMTP_HOST or self.SMTP_HOST.endswith("example.com"):
+                insecure.append("SMTP_HOST")
+            if not self.SMTP_USER or self.SMTP_USER.endswith("example.com"):
+                insecure.append("SMTP_USER")
+            if not self.SMTP_PASSWORD:
+                insecure.append("SMTP_PASSWORD")
+        if self.RELAY_SQLSERVER_ENABLED:
+            relay_values = {
+                "RELAY_SQLSERVER_HOST": self.RELAY_SQLSERVER_HOST,
+                "RELAY_SQLSERVER_DATABASE": self.RELAY_SQLSERVER_DATABASE,
+                "RELAY_SQLSERVER_USER": self.RELAY_SQLSERVER_USER,
+                "RELAY_SQLSERVER_PASSWORD": self.RELAY_SQLSERVER_PASSWORD,
+            }
+            insecure.extend(name for name, value in relay_values.items() if not value)
         if insecure:
-            raise ValueError(f"insecure production settings: {', '.join(insecure)}")
+            raise ValueError(f"insecure production settings: {', '.join(sorted(set(insecure)))}")
         return self
 
     @property

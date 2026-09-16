@@ -3,10 +3,12 @@ from decimal import Decimal
 
 import pytest
 
-from app.integrations.sap_middleware import ExternalSnRecord
-from app.models import ExternalSyncCheckpoint, SapSnStaging, SapSnSyncBatch, SnAsset
+from app.integrations.sap_middleware import ExternalSnRecord, ExternalSnSnapshot
+from app.models import ExternalSyncCheckpoint, JobRunLog, SapSnStaging, SapSnSyncBatch, SnAsset
+from app.services import sap_sn_sync
 from app.services.sap_sn_sync import (
-    apply_sn_sync_batch,
+    _apply_staging_row,
+    advance_sn_sync_job,
     assess_sn_snapshot,
     snapshot_count_change_percent,
 )
@@ -136,7 +138,53 @@ def test_snapshot_count_change_guard_uses_absolute_five_percent_boundary() -> No
 
 
 @pytest.mark.anyio
-async def test_apply_sync_is_idempotent_by_sqlserver_ins_id() -> None:
+async def test_chunked_sync_persists_cursor_between_source_pages(monkeypatch) -> None:
+    checkpoint = ExternalSyncCheckpoint(id=7, sync_name="sqlserver_sn_assets")
+    scalar_results = iter((checkpoint, None))
+    added = []
+
+    class Session:
+        async def scalar(self, _statement):
+            return next(scalar_results)
+
+        async def flush(self):
+            for value in added:
+                if isinstance(value, SapSnSyncBatch) and value.id is None:
+                    value.id = 11
+            return None
+
+        async def get(self, model, identity, **_kwargs):
+            if model is SapSnSyncBatch and identity == 11:
+                return next(value for value in added if isinstance(value, SapSnSyncBatch))
+            return None
+
+        def add(self, value):
+            added.append(value)
+
+    class Adapter:
+        async def inspect_sn_snapshot(self):
+            return ExternalSnSnapshot(source_count=2, max_ins_id=102)
+
+        async def fetch_sn_records_page(self, **kwargs):
+            assert kwargs == {"after_ins_id": None, "max_ins_id": 102, "limit": 500}
+            return [_record("SN101", ins_id=101), _record("SN102", ins_id=102)]
+
+    monkeypatch.setattr(sap_sn_sync, "create_sap_middleware_adapter", Adapter)
+    session = Session()
+    job = JobRunLog(id=5, metadata_json={"user_id": 3})
+
+    initialized = await advance_sn_sync_job(session, job=job, user_id=3)
+    assert initialized == {"status": "chunk_pending", "phase": "stage", "batch_id": 11}
+    assert job.metadata_json["sync_snapshot"]["source_count"] == 2
+
+    staged = await advance_sn_sync_job(session, job=job, user_id=3)
+    assert staged["phase"] == "validate"
+    assert job.metadata_json["sync_cursor"] == 102
+    assert job.processed_count == 2
+    assert len([value for value in added if isinstance(value, SapSnStaging)]) == 2
+
+
+def test_apply_sync_is_idempotent_by_sqlserver_ins_id() -> None:
     batch = SapSnSyncBatch(
         id=1,
         batch_no="B1",
@@ -175,13 +223,7 @@ async def test_apply_sync_is_idempotent_by_sqlserver_ins_id() -> None:
     checkpoint = ExternalSyncCheckpoint(id=4, sync_name="sqlserver_sn_assets")
     session = _ApplySession(batch, staging, asset, checkpoint)
 
-    await apply_sn_sync_batch(
-        session,
-        batch_id=1,
-        user_id=None,
-        reason=None,
-        automatic=True,
-    )
+    _apply_staging_row(session, asset, staging, batch)
 
     assert session.added == []
     assert asset.id == 3

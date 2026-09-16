@@ -14,6 +14,7 @@ from app.integrations.sap_middleware.contracts import (
     ExternalRmaResult,
     ExternalRmaSubmissionItem,
     ExternalSnRecord,
+    ExternalSnSnapshot,
     SapMiddlewareConfigurationError,
     SapTransactionError,
 )
@@ -39,7 +40,7 @@ class TestHttpSapMiddlewareAdapter:
         missing: list[str] = []
         if not settings.RELAY_SQLSERVER_ENABLED:
             missing.append("RELAY_SQLSERVER_ENABLED")
-        if settings.APP_ENV.lower() not in {"dev", "test"}:
+        if settings.APP_ENV not in {"development", "test"}:
             missing.append("TEST_RELAY_ENV_NOT_ALLOWED")
         if not settings.RUN_REAL_MAIL_INTEGRATION_TESTS:
             missing.append("RUN_REAL_MAIL_INTEGRATION_TESTS")
@@ -68,7 +69,13 @@ class TestHttpSapMiddlewareAdapter:
             return ConnectionHealth(False, "unreachable", details={"error": type(exc).__name__})
         return ConnectionHealth(True, "configured", details={"adapter": "test_http"})
 
-    async def fetch_all_sn_records(self) -> Sequence[ExternalSnRecord]:
+    async def inspect_sn_snapshot(self) -> ExternalSnSnapshot:
+        raise SapMiddlewareConfigurationError("TEST_RELAY_HAS_NO_SN_MASTER")
+
+    async def fetch_sn_records_page(
+        self, *, after_ins_id: int | None, max_ins_id: int, limit: int
+    ) -> Sequence[ExternalSnRecord]:
+        del after_ins_id, max_ins_id, limit
         raise SapMiddlewareConfigurationError("TEST_RELAY_HAS_NO_SN_MASTER")
 
     async def submit_rma_batch(self, items: Sequence[ExternalRmaSubmissionItem]) -> None:

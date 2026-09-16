@@ -12,6 +12,7 @@ from uuid import UUID
 from app.config import settings
 from app.integrations.sap_middleware.contracts import (
     ConnectionHealth, ExternalRmaResult, ExternalRmaSubmissionItem, ExternalSnRecord,
+    ExternalSnSnapshot,
     SapMiddlewareConfigurationError, SapSchemaMismatchError, SapSnapshotUnstableError,
     SapTransactionError, SapUnknownCommitStateError,
 )
@@ -174,39 +175,94 @@ class SqlServerSapMiddlewareAdapter:
     async def check_connection(self) -> ConnectionHealth:
         return await asyncio.to_thread(self._check_sync)
 
-    def _fetch_all_sn_sync(self) -> list[ExternalSnRecord]:
+    def _sn_select_contract(self) -> tuple[dict[str, str], str, str]:
         mapping = dict(settings.RELAY_SQLSERVER_SN_COLUMN_MAP or {})
         invalid = sorted(set(mapping) - _SN_LOCAL_FIELDS)
         if invalid:
             raise SapMiddlewareConfigurationError("RELAY_SN_LOCAL_FIELDS_INVALID:" + ",".join(invalid))
+        remote_ins_id = mapping.get("ins_id")
+        if not remote_ins_id:
+            raise SapMiddlewareConfigurationError("RELAY_SN_INS_ID_COLUMN_MISSING")
+        return (
+            mapping,
+            _qualified(settings.RELAY_SQLSERVER_SN_SCHEMA, settings.RELAY_SQLSERVER_SN_TABLE),
+            _identifier(remote_ins_id),
+        )
+
+    def _inspect_sn_snapshot_sync(self) -> ExternalSnSnapshot:
+        _mapping, table, ins_id = self._sn_select_contract()
+        with closing(self._connect()) as connection:
+            row = connection.cursor().execute(
+                f"SELECT COUNT_BIG(1), COUNT_BIG({ins_id}), "
+                f"COUNT_BIG(DISTINCT {ins_id}), MAX({ins_id}) FROM {table}"
+            ).fetchone()
+        source_count = int(row[0] or 0)
+        non_null_count = int(row[1] or 0)
+        distinct_count = int(row[2] or 0)
+        return ExternalSnSnapshot(
+            source_count=source_count,
+            max_ins_id=int(row[3]) if row[3] is not None else None,
+            duplicate_ins_id_count=max(0, non_null_count - distinct_count),
+            null_ins_id_count=max(0, source_count - non_null_count),
+        )
+
+    async def inspect_sn_snapshot(self) -> ExternalSnSnapshot:
+        return await asyncio.to_thread(self._inspect_sn_snapshot_sync)
+
+    @staticmethod
+    def _external_sn_record(
+        row: Any, names: list[str], mapping: dict[str, str]
+    ) -> ExternalSnRecord:
+        raw = dict(zip(names, row, strict=True))
+        values = {local: raw.get(remote) for local, remote in mapping.items()}
+        return ExternalSnRecord(
+            sn=str(values.get("sn") or "").strip().upper(),
+            customer_code=str(values.get("customer_code") or "").strip(),
+            customer_name=str(values.get("customer_name") or "").strip(),
+            material_code=str(values.get("material_code") or "").strip(),
+            ins_id=int(values["ins_id"]) if values.get("ins_id") is not None else None,
+            material_name=str(values.get("material_name") or "").strip() or None,
+            values=values,
+            raw_data=raw,
+        )
+
+    def _fetch_sn_records_page_sync(
+        self, *, after_ins_id: int | None, max_ins_id: int, limit: int
+    ) -> list[ExternalSnRecord]:
+        mapping, table, ins_id = self._sn_select_contract()
         columns = list(dict.fromkeys(mapping.values()))
-        table = _qualified(settings.RELAY_SQLSERVER_SN_SCHEMA, settings.RELAY_SQLSERVER_SN_TABLE)
-        selected = ", ".join(_identifier(v) for v in columns)
-        records: list[ExternalSnRecord] = []
+        selected = ", ".join(_identifier(value) for value in columns)
+        page_size = max(1, min(int(limit), 5000))
         with closing(self._connect()) as connection:
             cursor = connection.cursor()
-            before = int(cursor.execute(f"SELECT COUNT_BIG(1) FROM {table}").fetchone()[0])
-            rows_cursor = cursor.execute(f"SELECT {selected} FROM {table}")
-            names = [str(v[0]) for v in rows_cursor.description]
-            while True:
-                rows = rows_cursor.fetchmany(max(1, min(settings.RELAY_SQLSERVER_BATCH_SIZE, 5000)))
-                if not rows: break
-                for row in rows:
-                    raw = dict(zip(names, row, strict=True))
-                    values = {local: raw.get(remote) for local, remote in mapping.items()}
-                    records.append(ExternalSnRecord(
-                        sn=str(values.get("sn") or "").strip().upper(), customer_code=str(values.get("customer_code") or "").strip(),
-                        customer_name=str(values.get("customer_name") or "").strip(), material_code=str(values.get("material_code") or "").strip(),
-                        ins_id=int(values["ins_id"]) if values.get("ins_id") is not None else None,
-                        material_name=str(values.get("material_name") or "").strip() or None, values=values, raw_data=raw,
-                    ))
-            after = int(cursor.execute(f"SELECT COUNT_BIG(1) FROM {table}").fetchone()[0])
-        if before != after or after != len(records):
-            raise SapSnapshotUnstableError(f"SAP_SN_SNAPSHOT_UNSTABLE:{before}:{len(records)}:{after}")
-        return records
+            if after_ins_id is None:
+                rows_cursor = cursor.execute(
+                    f"SELECT TOP (?) {selected} FROM {table} "
+                    f"WHERE {ins_id} <= ? ORDER BY {ins_id} ASC",
+                    page_size,
+                    int(max_ins_id),
+                )
+            else:
+                rows_cursor = cursor.execute(
+                    f"SELECT TOP (?) {selected} FROM {table} "
+                    f"WHERE {ins_id} > ? AND {ins_id} <= ? ORDER BY {ins_id} ASC",
+                    page_size,
+                    int(after_ins_id),
+                    int(max_ins_id),
+                )
+            names = [str(value[0]) for value in rows_cursor.description]
+            rows = rows_cursor.fetchall()
+        return [self._external_sn_record(row, names, mapping) for row in rows]
 
-    async def fetch_all_sn_records(self) -> Sequence[ExternalSnRecord]:
-        return await asyncio.to_thread(self._fetch_all_sn_sync)
+    async def fetch_sn_records_page(
+        self, *, after_ins_id: int | None, max_ins_id: int, limit: int
+    ) -> Sequence[ExternalSnRecord]:
+        return await asyncio.to_thread(
+            self._fetch_sn_records_page_sync,
+            after_ins_id=after_ins_id,
+            max_ins_id=max_ins_id,
+            limit=limit,
+        )
 
     def _submit_sync(self, items: Sequence[ExternalRmaSubmissionItem]) -> None:
         if not items: raise SapTransactionError("SAP_SUBMISSION_BATCH_EMPTY")

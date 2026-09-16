@@ -160,10 +160,12 @@ class JobRunLog(Base):
         Index("idx_job_run_logs_name_time", "job_name", "started_at"),
         Index("idx_job_run_logs_type_time", "job_type", "started_at"),
         Index("idx_job_run_logs_status", "status", "started_at"),
-        Index("idx_job_run_logs_queue", "status", "next_run_at", "created_at"),
+        Index("idx_job_run_logs_queue", "status", "priority", "next_run_at", "created_at", "id"),
         Index("idx_job_run_logs_resource", "resource_type", "resource_id"),
         Index("idx_job_run_logs_correlation", "correlation_id"),
         UniqueConstraint("idempotency_key", name="uk_job_run_logs_idempotency"),
+        UniqueConstraint("retry_of_job_id", name="uk_job_run_logs_retry_of"),
+        CheckConstraint("priority BETWEEN 0 AND 3", name="priority"),
     )
 
     id: Mapped[int] = pk_column()
@@ -174,6 +176,13 @@ class JobRunLog(Base):
     resource_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True))
     correlation_id: Mapped[str | None] = mapped_column(String(100))
     idempotency_key: Mapped[str | None] = mapped_column(String(191))
+    priority: Mapped[int] = mapped_column(
+        mysql.TINYINT(unsigned=True), nullable=False, server_default="2"
+    )
+    retry_of_job_id: Mapped[int | None] = mapped_column(
+        mysql.BIGINT(unsigned=True),
+        ForeignKey("job_run_logs.id", name="fk_job_run_logs_retry_of", ondelete="SET NULL"),
+    )
     started_at: Mapped[datetime | None] = datetime_column()
     finished_at: Mapped[datetime | None] = datetime_column()
     duration_ms: Mapped[int | None] = mapped_column()
@@ -183,8 +192,10 @@ class JobRunLog(Base):
     attempt_count: Mapped[int] = mapped_column(nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(nullable=False, server_default="3")
     next_run_at: Mapped[datetime | None] = datetime_column()
+    execution_deadline_at: Mapped[datetime | None] = datetime_column()
     locked_at: Mapped[datetime | None] = datetime_column()
     locked_by: Mapped[str | None] = mapped_column(String(100))
+    fencing_token: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True))
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict | None] = mapped_column("metadata", mysql.JSON)
@@ -209,4 +220,23 @@ class JobRunLog(Base):
     output_oss_object: Mapped["OssObject | None"] = relationship(
         "OssObject", foreign_keys=[output_oss_object_id], back_populates="output_jobs", lazy="raise"
     )
+
+
+class WorkerLease(Base):
+    __tablename__ = "worker_leases"
+    __table_args__ = (
+        UniqueConstraint("environment", "queue_name", name="uk_worker_leases_scope"),
+        Index("idx_worker_leases_expiry", "lease_expires_at"),
+    )
+
+    id: Mapped[int] = pk_column()
+    environment: Mapped[str] = mapped_column(String(50), nullable=False)
+    queue_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    app_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(mysql.BIGINT(unsigned=True), nullable=False, server_default="1")
+    heartbeat_at: Mapped[datetime] = datetime_column(nullable=False)
+    lease_expires_at: Mapped[datetime] = datetime_column(nullable=False)
+    created_at: Mapped[datetime] = created_at_column()
+    updated_at: Mapped[datetime] = updated_at_column()
 

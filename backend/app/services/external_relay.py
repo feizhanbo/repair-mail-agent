@@ -16,7 +16,7 @@ from app.integrations.sap_middleware import (
     SapMiddlewareError,
     SapUnknownCommitStateError,
 )
-from app.services.sap_sn_sync import create_sn_sync_batch
+from app.services.jobs import enqueue_job_or_retry_terminal, serialize_job
 
 
 RelayConfigurationError = SapMiddlewareConfigurationError
@@ -72,8 +72,16 @@ async def sync_sn_assets_from_relay(
     del full
     if not settings.RELAY_SQLSERVER_ENABLED:
         return {"status": "disabled", "configured": False, "synced_count": 0}
-    result = await create_sn_sync_batch(session, user_id=user_id)
-    return {**result, "configured": True, "synced_count": result.get("source_count", 0), "full": True}
+    job = await enqueue_job_or_retry_terminal(
+        session,
+        job_type="sap_sn_sync",
+        resource_type="sn_master",
+        resource_id=None,
+        idempotency_key=f"sap_sn_sync:compat:{user_id or 'system'}",
+        metadata={"user_id": user_id, "source": "external_relay_compat"},
+        max_attempts=3,
+    )
+    return {**serialize_job(job), "configured": True, "synced_count": 0, "full": True}
 
 
 async def push_ai_parse_result_to_relay(

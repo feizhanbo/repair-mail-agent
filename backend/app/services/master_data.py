@@ -291,7 +291,12 @@ async def import_sn_assets(
         job.status = "success"
         job.finished_at = utcnow()
     job.success_count = created + updated
-    job.metadata_json = {"created": created, "updated": updated, "source_file_hash": source_file_hash}
+    job.metadata_json = {
+        **(job.metadata_json or {}),
+        "last_chunk_created": created,
+        "last_chunk_updated": updated,
+        "source_file_hash": source_file_hash,
+    }
     await log_operation(
         session,
         user_id=user_id,
@@ -472,9 +477,10 @@ async def import_board_cards(
         job.finished_at = utcnow()
     job.success_count = created + updated
     job.metadata_json = {
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
+        **(job.metadata_json or {}),
+        "last_chunk_created": created,
+        "last_chunk_updated": updated,
+        "last_chunk_skipped": skipped,
         "source_file_hash": source_file_hash,
     }
     await log_operation(

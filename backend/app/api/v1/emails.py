@@ -667,18 +667,15 @@ async def fetch_imap_now(
 ) -> dict:
     if "admin" not in current_user.roles:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="AUTH_FORBIDDEN")
-    result = await imap_fetcher.run_imap_fetch_locked(
-        session,
+    return await fetch_imap_job(
+        session=session,
+        current_user=current_user,
         folder_name=folder_name or settings.IMAP_FOLDER,
         limit=limit or settings.IMAP_FETCH_LIMIT,
         unseen_only=settings.IMAP_UNSEEN_ONLY if unseen_only is None else unseen_only,
         message_id=message_id,
         auto_parse=auto_parse,
-        archive_to_oss=True,
-        user_id=current_user.id,
     )
-    await session.commit()
-    return ok(result, "imap fetched")
 
 
 @router.post("/fetch/jobs")
@@ -756,9 +753,12 @@ async def reparse_email(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> dict:
-    result = await email_service.reparse_email(session, email_id=email_id, user_id=current_user.id, reason=payload.reason)
-    await session.commit()
-    return ok(result, "email reparsed")
+    return await reparse_email_job(
+        email_id=email_id,
+        payload=payload,
+        session=session,
+        current_user=current_user,
+    )
 
 
 @router.post("/{email_id}/reparse/jobs")

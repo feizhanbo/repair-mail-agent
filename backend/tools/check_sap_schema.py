@@ -4,8 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-EXPECTED_REVISION = "b5w0x1y2z3a4"
-EXPECTED_BUSINESS_TABLE_COUNT = 41
+EXPECTED_REVISION = "e8z3a4b5c6d7"
+EXPECTED_BUSINESS_TABLE_COUNT = 42
 
 EXPECTED = {
     "export_sap": {

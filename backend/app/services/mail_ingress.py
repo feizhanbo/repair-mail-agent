@@ -15,6 +15,7 @@ from app.services.email_archival import archive_email_bundle, archive_raw_email
 from app.services.jobs import enqueue_job
 from app.services.mail_precheck import MailPrecheckResult
 from app.services.mail_preclassification import classify_mail, transient_attachment_evidence
+from app.services.worker_fencing import guarded_commit
 
 
 def _needs_transient_evidence(payload: EmailIngestRequest, decision, blobs: list[dict[str, Any]]) -> bool:
@@ -138,7 +139,7 @@ async def process_preclassified_ingress(
         fetch_record.references_header = payload.references_header
         fetch_record.processing_stage = "classifying"
     if callable(getattr(session, "commit", None)):
-        await session.commit()
+        await guarded_commit(session)
 
     thread_id = await email_service.find_existing_thread_anchor(
         session, in_reply_to=payload.in_reply_to, references_header=payload.references_header
@@ -169,7 +170,7 @@ async def process_preclassified_ingress(
     fetch_record.classified_at = utcnow()
     fetch_record.processing_stage = "routing"
     if callable(getattr(session, "commit", None)):
-        await session.commit()
+        await guarded_commit(session)
 
     try:
         return await _persist_classified_mail(
@@ -200,7 +201,7 @@ async def process_preclassified_ingress(
             )
             durable_record.error_message = getattr(exc, "code", exc.__class__.__name__)
             if callable(getattr(session, "commit", None)):
-                await session.commit()
+                await guarded_commit(session)
         raise
 
 
@@ -229,7 +230,7 @@ async def _persist_classified_mail(
             session, payload=payload, raw_eml=raw_eml, raw_file_name=raw_file_name, user_id=user_id
         )
         if callable(getattr(session, "commit", None)):
-            await session.commit()
+            await guarded_commit(session)
         ingest = await email_service.ingest_minimal_email(
             session, payload=payload, intent_type=decision.intent_type,
             handling_level=decision.handling_level, classification_confidence=decision.confidence,
@@ -250,7 +251,7 @@ async def _persist_classified_mail(
         correlation_id=get_correlation_id(),
     )
     if callable(getattr(session, "commit", None)):
-        await session.commit()
+        await guarded_commit(session)
     ingest = await email_service.ingest_email(
         session, payload=payload, user_id=user_id, auto_parse=False, rule_analysis=precheck.rule_analysis
     )

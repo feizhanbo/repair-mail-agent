@@ -71,7 +71,7 @@ async def login(
         value=access_token,
         max_age=settings.JWT_EXPIRE_MINUTES * 60,
         httponly=True,
-        secure=settings.APP_ENV.lower() in {"prod", "production"},
+        secure=settings.APP_ENV == "production",
         samesite="strict",
         path="/api/v1",
     )
@@ -102,7 +102,7 @@ async def logout(
     response.delete_cookie(
         key="repair_mail_session",
         path="/api/v1",
-        secure=settings.APP_ENV.lower() in {"prod", "production"},
+        secure=settings.APP_ENV == "production",
         httponly=True,
         samesite="strict",
     )

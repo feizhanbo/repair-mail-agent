@@ -3,7 +3,7 @@ from app.services.tickets import EMAIL_FIELDS, TICKET_FIELDS
 
 
 def test_phase_one_table_count() -> None:
-    assert len(Base.metadata.tables) == 41
+    assert len(Base.metadata.tables) == 42
 
 
 def test_ticket_serializer_fields_exist_on_ticket_model() -> None:
@@ -58,6 +58,7 @@ def test_phase_one_table_names() -> None:
         "users",
         "workflow_statuses",
         "workflow_transitions",
+        "worker_leases",
     }
 
 

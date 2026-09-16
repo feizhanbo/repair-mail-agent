@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -26,7 +28,9 @@ def _reply(reply_type: str, **overrides: object) -> dict[str, object]:
 
 
 def test_preflight_required_revision_matches_unique_alembic_head() -> None:
-    config = Config("alembic.ini")
+    backend_root = Path(__file__).resolve().parents[1]
+    config = Config(backend_root / "alembic.ini")
+    config.set_main_option("script_location", str(backend_root / "alembic"))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [REQUIRED_DATABASE_REVISION]
 

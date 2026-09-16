@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from app.models import Email, EmailAttachment, JobRunLog, OssObject, ParseResult, RepairTicket
 from app.api.deps import CurrentUser
@@ -399,3 +400,52 @@ async def test_enqueue_job_reuses_idempotency_key() -> None:
     assert first.updated_at is not None
     assert first.metadata_json["body"]["redacted"] is True
     assert len([row for row in session.added if isinstance(row, JobRunLog)]) == 1
+
+
+@pytest.mark.anyio
+async def test_enqueue_job_recovers_same_key_insert_race() -> None:
+    winner = JobRunLog(
+        id=17,
+        job_name="email_parse",
+        job_type="email_parse",
+        status="queued",
+        resource_type="email",
+        resource_id=8,
+        idempotency_key="email_parse:8:race",
+        priority=1,
+        max_attempts=3,
+        metadata_json={},
+    )
+
+    class NestedTransaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+    class RacingSession:
+        def __init__(self) -> None:
+            self.scalar_results = iter((None, winner))
+
+        async def scalar(self, _statement):
+            return next(self.scalar_results)
+
+        def begin_nested(self):
+            return NestedTransaction()
+
+        def add(self, _value) -> None:
+            return None
+
+        async def flush(self) -> None:
+            raise IntegrityError("INSERT", {}, Exception("duplicate idempotency key"))
+
+    result = await enqueue_job(
+        RacingSession(),
+        job_type="email_parse",
+        resource_type="email",
+        resource_id=8,
+        idempotency_key="email_parse:8:race",
+    )
+
+    assert result is winner

@@ -81,7 +81,7 @@ async def assert_gold_replay_environment(session: AsyncSession) -> dict[str, Any
     url = make_url(settings.DATABASE_URL)
     database_name = str(await session.scalar(select(func.database())) or "")
     reasons: list[str] = []
-    if settings.APP_ENV.strip().lower() not in {"dev", "test"}:
+    if settings.APP_ENV not in {"development", "test"}:
         reasons.append("APP_ENV_MUST_BE_DEV_OR_TEST")
     allowed_databases = {name.strip() for name in settings.DESTRUCTIVE_TEST_DATABASE_ALLOWLIST if name.strip()}
     if database_name not in allowed_databases or url.database != database_name:

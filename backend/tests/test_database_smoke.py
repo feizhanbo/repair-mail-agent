@@ -6,17 +6,20 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
+from app.core.sqlalchemy_compat import configure_asyncmy_pre_ping
 
 
-EXPECTED_ALEMBIC_HEAD = "b5w0x1y2z3a4"
-EXPECTED_BUSINESS_TABLE_COUNT = 41
+EXPECTED_ALEMBIC_HEAD = "e8z3a4b5c6d7"
+EXPECTED_BUSINESS_TABLE_COUNT = 42
 REQUIRED_INDEXES = {
     "uk_emails_message_id",
     "uk_emails_source_content_sha256",
     "uk_mail_fetch_records",
     "idx_mail_fetch_records_retry",
     "uk_job_run_logs_idempotency",
+    "uk_job_run_logs_retry_of",
     "idx_job_run_logs_queue",
+    "uk_worker_leases_scope",
     "idx_repair_tickets_sn_validation_status",
     "uk_ticket_relay_export_snapshot",
     "uk_notification_user_state",
@@ -48,6 +51,7 @@ async def test_remote_mysql_schema_via_explicit_ssh_tunnel() -> None:
         database_url = parsed.render_as_string(hide_password=False)
 
     engine = create_async_engine(database_url, pool_pre_ping=True)
+    configure_asyncmy_pre_ping(engine)
     try:
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT 1")) == 1

@@ -122,6 +122,14 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
             continue
         if task.status not in OPEN_LEGACY_STATUSES:
             continue
+        if (
+            task.status == "claimed"
+            and task.claimed_by_user_id in active_operator_ids
+            and task.claimed_at is not None
+        ):
+            # A valid claim is live business ownership, not legacy data to
+            # normalize. Never rewrite it, even in explicit apply mode.
+            continue
         ticket = await session.get(RepairTicket, task.ticket_id)
         owner_id = next(
             (
@@ -138,7 +146,11 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
         if owner_id is None:
             fallback = await choose_available_operator(session)
             owner_id = fallback.id if fallback is not None else None
-        new_status = "pending"
+        new_status = (
+            "assignment_failed"
+            if task.status == "assignment_failed" and owner_id is None
+            else "pending"
+        )
         if task.status != new_status or task.assigned_user_id != owner_id or task.claimed_by_user_id is not None or task.claimed_at is not None:
             counts["normalized_tasks"] += 1
             if len(samples["normalized_tasks"]) < 20:

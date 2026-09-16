@@ -12,6 +12,7 @@ import pytest
 from app.models import ExportSap, JobRunLog, RepairTicket, RepairTicketItem, SnAsset
 from app.services import sap_rma
 from app.services import jobs
+from app.services import job_dispatcher
 from app.services import replies
 from app.config import settings
 from app.integrations.sap_middleware import ExternalRmaResult
@@ -45,9 +46,10 @@ async def test_automatic_smtp_job_allows_system_actor(monkeypatch) -> None:
     execute_send = AsyncMock(return_value={"status": "sent"})
     monkeypatch.setattr(replies, "execute_approved_reply_send", execute_send)
 
-    result = await jobs._execute_job_command(SimpleNamespace(), job)
+    result = await job_dispatcher.dispatch_job(SimpleNamespace(), job)
 
-    assert result == {"status": "sent"}
+    assert result.kind == job_dispatcher.JobOutcomeKind.SUCCESS
+    assert result.payload == {"status": "sent"}
     execute_send.assert_awaited_once()
     assert execute_send.await_args.kwargs == {
         "reply_id": 106,
@@ -283,10 +285,19 @@ async def test_submit_failed_background_job_uses_automatic_backoff(monkeypatch) 
         async def get(self, _model, _identity, **_kwargs):
             return job
 
+        async def scalar(self, _statement):
+            return job
+
     monkeypatch.setattr(
-        jobs,
-        "_execute_job_command",
-        AsyncMock(return_value={"status": "submit_failed", "error_code": "SAP_BATCH_SUBMIT_FAILED"}),
+        job_dispatcher,
+        "dispatch_job",
+        AsyncMock(
+            return_value=job_dispatcher.JobOutcome(
+                kind=job_dispatcher.JobOutcomeKind.FAILED,
+                payload={"status": "submit_failed", "error_code": "SAP_BATCH_SUBMIT_FAILED"},
+                error_code="SAP_BATCH_SUBMIT_FAILED",
+            )
+        ),
     )
     monkeypatch.setattr(jobs, "log_system_event", AsyncMock())
 

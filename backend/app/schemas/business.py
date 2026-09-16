@@ -208,7 +208,7 @@ class SnAssetImportItem(BaseModel):
 
 
 class SnAssetImportRequest(BaseModel):
-    items: list[SnAssetImportItem]
+    items: list[SnAssetImportItem] = Field(max_length=500)
     source_file_name: str | None = Field(default=None, max_length=255)
     source_file_hash: str | None = Field(default=None, max_length=64)
 
@@ -236,7 +236,7 @@ class BoardCardImportItem(BaseModel):
 
 
 class BoardCardImportRequest(BaseModel):
-    items: list[BoardCardImportItem]
+    items: list[BoardCardImportItem] = Field(max_length=500)
     source_file_name: str | None = Field(default=None, max_length=255)
     source_file_hash: str | None = Field(default=None, max_length=64)
 

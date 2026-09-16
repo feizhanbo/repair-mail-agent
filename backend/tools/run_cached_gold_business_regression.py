@@ -858,15 +858,15 @@ def _refresh_runtime_test_doubles(runtime: dict[str, Any], *, relay_port: int) -
     # leave a previously resolved factory path active after lifespan startup.
     from app.integrations.sap_middleware import factory as middleware_factory
     from app.integrations.sap_middleware.test_http import TestHttpSapMiddlewareAdapter
-    from app.services import jobs, relay_jobs, sap_rma
+    from app.services import job_dispatcher, jobs, relay_jobs, sap_rma
 
     _install_fast_job_retry()
 
-    original_execute_job_command = jobs._execute_job_command
+    original_dispatch_job = job_dispatcher.dispatch_job
 
     async def diagnostic_execute_job_command(session: Any, job: Any) -> dict[str, Any]:
         try:
-            return await original_execute_job_command(session, job)
+            return await original_dispatch_job(session, job)
         except Exception as exc:
             if str(getattr(job, "job_type", "")) != "email_parse":
                 raise
@@ -886,11 +886,7 @@ def _refresh_runtime_test_doubles(runtime: dict[str, Any], *, relay_port: int) -
             )
             raise
 
-    jobs._execute_job_command = diagnostic_execute_job_command
-    jobs.execute_claimed_job.__globals__["_execute_job_command"] = diagnostic_execute_job_command
-    app_main_module = sys.modules.get("app.main")
-    if app_main_module is not None:
-        app_main_module.execute_claimed_job = jobs.execute_claimed_job
+    job_dispatcher.dispatch_job = diagnostic_execute_job_command
 
     def local_relay_factory() -> Any:
         runtime["relay_adapter_factory_calls"] = int(
@@ -995,7 +991,6 @@ def _configure_environment(api_port: int, relay_port: int = DEFAULT_RELAY_PORT) 
     os.environ["RELAY_ADAPTER"] = "test_http"
     os.environ["RELAY_SQLSERVER_ENABLED"] = "true"
     os.environ["TEST_RELAY_BASE_URL"] = f"http://127.0.0.1:{relay_port}"
-    os.environ["MAIL_SCHEDULER_IN_API"] = "true"
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 

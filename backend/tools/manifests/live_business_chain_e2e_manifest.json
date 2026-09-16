@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "scenario_id": "live-business-chain-current-mail-20260916",
+  "source_mailbox": "rmatest1@accotest.com",
+  "outbound_recipient_only": "rmatest2@accotest.com",
+  "expected_smtp_send_count": 1,
+  "message": {
+    "uid": "1783057223",
+    "uid_validity": "1",
+    "message_id": "<202609161118016108661@accotest.com>",
+    "raw_sha256": "e85e247c38711b25d7206244dc0de03aaefee37ef407c0b7901fd807c5f3bfd6",
+    "header": {
+      "subject": "板卡维修",
+      "from": "rmatest2@accotest.com",
+      "to": "rmatest1@accotest.com",
+      "cc": "",
+      "date": "Wed, 16 Sep 2026 11:18:02 +0800"
+    },
+    "attachments": []
+  },
+  "gold": {
+    "expected_intent": "new_repair",
+    "expected_fields": {
+      "customer_name": "杰华特微电子股份有限公司",
+      "customer_code": "E2E-JOULWATT-20260805",
+      "contact_person": "刘家利",
+      "contact_phone": "18200517485",
+      "mailing_address": "四川省成都市武侯区金履二路197号富顿中心A座，杰恩国际B一楼"
+    },
+    "expected_final_fields": {
+      "customer_name": "杰华特微电子股份有限公司",
+      "customer_code": "E2E-JOULWATT-20260805",
+      "contact_person": "刘家利",
+      "contact_phone": "18200517485",
+      "mailing_address": "四川省成都市武侯区金履二路197号富顿中心A座，杰恩国际B一楼"
+    },
+    "expected_items": [
+      {
+        "sn": "M81232504500155",
+        "material_code": "Z.SM.8123V120A",
+        "material_name": "FOVI100"
+      }
+    ],
+    "expected_board_items": [
+      {
+        "sn": "M81232504500155",
+        "board_name": "FOVI",
+        "failure_description": "校准Fail"
+      }
+    ],
+    "missing_fields": [],
+    "create_ticket": true,
+    "expected_final_status": "rma_sent",
+    "expected_outbound_count": 1,
+    "send_mode": "auto_rma",
+    "expected_rma_reply_version": "domestic_out_warranty_v1",
+    "temporary_sn_assets": [],
+    "temporary_board_cards": [],
+    "temporary_customer_policies": [],
+    "supplement": null
+  },
+  "sap_fallback": {
+    "rma_no": "2026091601",
+    "call_id": "66666"
+  },
+  "egress": {
+    "text_ai": true,
+    "oss": true,
+    "attachment_ai": false,
+    "real_sqlserver": false
+  },
+  "cleanup": {
+    "database": true,
+    "oss": true,
+    "temporary_master_data": false,
+    "mailboxes": false
+  }
+}

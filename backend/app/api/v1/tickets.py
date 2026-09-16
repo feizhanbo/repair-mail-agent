@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.v1.deletions import raise_deletion_http
 from app.core.database import get_session
+from app.core.request_context import get_correlation_id
 from app.core.response import ok, page
 from app.models import (
     ExportSap,
@@ -55,7 +56,6 @@ from app.services.workflow import transition_ticket
 from app.services.ticket_safety import build_safety_report, validate_and_mark_ready_for_export
 from app.services.jobs import enqueue_job, serialize_job
 from app.services.rma_pdf import TEMPLATE_VERSION as RMA_TEMPLATE_VERSION
-from app.services.sap_rma import poll_export_batch, reconcile_uncertain_submission
 
 router = APIRouter()
 
@@ -464,7 +464,6 @@ async def poll_sap_export(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    del current_user
     ticket = await ticket_service.get_ticket(session, ticket_id)
     export = await session.scalar(
         select(TicketRelayExport)
@@ -475,9 +474,17 @@ async def poll_sap_export(
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
-    result = await poll_export_batch(session, export_id=export.id)
+    job = await enqueue_job(
+        session,
+        job_type="sap_rma_poll",
+        resource_type="ticket_relay_export",
+        resource_id=export.id,
+        idempotency_key=f"sap_rma_poll:manual:{export.id}:{get_correlation_id() or 'job'}",
+        metadata={"user_id": current_user.id, "ticket_id": ticket.id},
+        max_attempts=1,
+    )
     await session.commit()
-    return ok(result, "SAP RMA status polled")
+    return ok(serialize_job(job), "SAP RMA status poll queued")
 
 
 @router.post("/{ticket_id}/sap-export/confirm-late")
@@ -496,14 +503,22 @@ async def confirm_late_sap_result(
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
-    result = await poll_export_batch(
+    job = await enqueue_job(
         session,
-        export_id=export.id,
-        allow_late_result=True,
-        confirmed_by_user_id=current_user.id,
+        job_type="sap_rma_poll",
+        resource_type="ticket_relay_export",
+        resource_id=export.id,
+        idempotency_key=f"sap_rma_poll:confirm_late:{export.id}:{get_correlation_id() or 'job'}",
+        metadata={
+            "user_id": current_user.id,
+            "ticket_id": ticket.id,
+            "allow_late_result": True,
+            "confirmed_by_user_id": current_user.id,
+        },
+        max_attempts=1,
     )
     await session.commit()
-    return ok(result, "late SAP result confirmed")
+    return ok(serialize_job(job), "late SAP result confirmation queued")
 
 
 @router.post("/{ticket_id}/sap-export/reconcile")
@@ -521,14 +536,17 @@ async def reconcile_sap_submission(
     )
     if export is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RELAY_EXPORT_NOT_FOUND")
-    result = await reconcile_uncertain_submission(
+    job = await enqueue_job(
         session,
-        export_id=export.id,
-        reason=payload.reason,
-        user_id=current_user.id,
+        job_type="sap_submit_reconcile",
+        resource_type="ticket_relay_export",
+        resource_id=export.id,
+        idempotency_key=f"sap_submit_reconcile:{export.id}:{get_correlation_id() or 'job'}",
+        metadata={"user_id": current_user.id, "ticket_id": ticket.id, "reason": payload.reason},
+        max_attempts=1,
     )
     await session.commit()
-    return ok(result, "uncertain SAP submission reconciled")
+    return ok(serialize_job(job), "uncertain SAP submission reconciliation queued")
 
 
 @router.post("/{ticket_id}/sap-export/lines/{line_id}/reconcile", deprecated=True)

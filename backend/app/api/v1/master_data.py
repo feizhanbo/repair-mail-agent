@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.core.database import get_session
+from app.core.request_context import get_correlation_id
 from app.core.response import ok, page
 from app.models import SapSnSyncBatch
 from app.schemas.business import (
@@ -26,10 +27,10 @@ from app.schemas.business import (
 from app.services.audit import log_operation
 from app.services.external_relay import relay_configuration_status
 from app.services.runtime_config import apply_runtime_config, load_runtime_config, persist_runtime_config, read_runtime_config
-from app.services.sap_sn_sync import create_sn_sync_batch, serialize_sync_batch
+from app.services.sap_sn_sync import serialize_sync_batch
 from app.services import customer_policies
 from app.services import master_data as master_data_service
-from app.services.jobs import enqueue_job, serialize_job
+from app.services.jobs import enqueue_job, enqueue_job_or_retry_terminal, serialize_job
 from app.services.storage import StorageConfigurationError, StorageUploadError, upload_bytes_to_oss
 
 router = APIRouter()
@@ -95,10 +96,18 @@ async def start_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await create_sn_sync_batch(session, user_id=current_user.id)
-    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="SN full snapshot requested from master-data page", after_data=result)
+    job = await enqueue_job(
+        session,
+        job_type="sap_sn_sync",
+        resource_type="sn_master",
+        resource_id=None,
+        idempotency_key=f"sap_sn_sync:manual:{get_correlation_id() or 'job'}",
+        metadata={"user_id": current_user.id, "source": "master_data"},
+        max_attempts=3,
+    )
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_queued", target_type="job_run", target_id=job.id, description="SN full snapshot queued from master-data page", after_data={"job_id": job.id})
     await session.commit()
-    return ok(result, "SN snapshot synchronized")
+    return ok(serialize_job(job), "SN snapshot queued")
 
 
 @router.get("/sn-sync/latest", deprecated=True, description="Compatibility alias; use /system/sn-sync/latest.")
@@ -325,23 +334,17 @@ async def import_sn_assets(
     return ok(result, "sn assets imported")
 
 
-@router.post("/sn-assets/import-file")
+@router.post(
+    "/sn-assets/import-file",
+    deprecated=True,
+    description="Compatibility endpoint; file imports are always queued.",
+)
 async def import_sn_assets_file(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
-    content = await file.read()
-    items, file_hash = await asyncio.to_thread(master_data_service.parse_sn_assets_xlsx, content)
-    result = await master_data_service.import_sn_assets(
-        session,
-        items=items,
-        source_file_name=file.filename,
-        source_file_hash=file_hash,
-        user_id=current_user.id,
-    )
-    await session.commit()
-    return ok(result, "sn assets file imported")
+    return await _queue_master_data_file(session, current_user, file, kind="sn_assets")
 
 
 @router.post("/sn-assets/import-file/jobs")
@@ -496,27 +499,17 @@ async def import_board_cards(
     return ok(result, "board cards imported")
 
 
-@router.post("/board-cards/import-file")
+@router.post(
+    "/board-cards/import-file",
+    deprecated=True,
+    description="Compatibility endpoint; file imports are always queued.",
+)
 async def import_board_cards_file(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
     file: UploadFile = File(...),
 ) -> dict:
-    content = await file.read()
-    items, file_hash = await asyncio.to_thread(
-        master_data_service.parse_board_cards_file,
-        content,
-        filename=file.filename,
-    )
-    result = await master_data_service.import_board_cards(
-        session,
-        items=items,
-        source_file_name=file.filename,
-        source_file_hash=file_hash,
-        user_id=current_user.id,
-    )
-    await session.commit()
-    return ok(result, "board cards file imported")
+    return await _queue_master_data_file(session, current_user, file, kind="board_cards")
 
 
 @router.post("/board-cards/import-file/jobs")
@@ -543,11 +536,18 @@ async def _queue_master_data_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MASTER_DATA_FILE_TYPE_NOT_SUPPORTED",
         )
-    content = await file.read()
+    content = await file.read(settings.MASTER_DATA_IMPORT_MAX_BYTES + 1)
     if not content:
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="XLSX_FILE_EMPTY")
+    if len(content) > settings.MASTER_DATA_IMPORT_MAX_BYTES:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="MASTER_DATA_FILE_TOO_LARGE",
+        )
     import hashlib
 
     file_hash = hashlib.sha256(content).hexdigest()
@@ -564,7 +564,7 @@ async def _queue_master_data_file(
         from fastapi import HTTPException, status
 
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OSS_ARCHIVAL_FAILED") from exc
-    job = await enqueue_job(
+    job = await enqueue_job_or_retry_terminal(
         session,
         job_type="master_data_import",
         resource_type="master_data",

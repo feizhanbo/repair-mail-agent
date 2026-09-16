@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.config import settings
 from app.core.database import get_session
+from app.core.request_context import get_correlation_id
 from app.core.response import ok
 from app.integrations.llm_gateway import public_llm_routes
 from app.ai.prompts import PROMPTS
@@ -20,9 +21,10 @@ from app.services.common import model_to_dict
 from app.services.external_relay import relay_configuration_status
 from app.services.mail_test_preflight import MailTestPreflightError, run_mail_test_preflight
 from app.services.mail_safety import test_mail_configuration_reasons
+from app.services.jobs import enqueue_job, serialize_job
 from app.services.rma_test_preflight import build_rma_test_preflight
 from app.services.runtime_config import apply_runtime_config, load_runtime_config, persist_runtime_config, read_runtime_config
-from app.services.sap_sn_sync import apply_sn_sync_batch, create_sn_sync_batch, serialize_sync_batch
+from app.services.sap_sn_sync import serialize_sync_batch
 from app.services.storage import find_orphan_oss_objects
 
 router = APIRouter()
@@ -33,10 +35,18 @@ async def start_sap_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await create_sn_sync_batch(session, user_id=current_user.id)
-    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="SN full snapshot requested through compatibility endpoint", after_data=result)
+    job = await enqueue_job(
+        session,
+        job_type="sap_sn_sync",
+        resource_type="sn_master",
+        resource_id=None,
+        idempotency_key=f"sap_sn_sync:manual:{get_correlation_id() or 'job'}",
+        metadata={"user_id": current_user.id, "source": "system_compat"},
+        max_attempts=3,
+    )
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_queued", target_type="job_run", target_id=job.id, description="SN full snapshot queued through compatibility endpoint", after_data={"job_id": job.id})
     await session.commit()
-    return ok(result, "SAP SN full snapshot completed")
+    return ok(serialize_job(job), "SAP SN full snapshot queued")
 
 
 @router.get("/sap-sn-sync/{batch_id}")
@@ -59,17 +69,28 @@ async def approve_sap_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    try:
-        result = await apply_sn_sync_batch(
-            session,
-            batch_id=batch_id,
-            user_id=current_user.id,
-            reason=payload.reason,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    batch = await session.get(SapSnSyncBatch, batch_id, with_for_update=True)
+    if batch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAP_SN_SYNC_BATCH_NOT_FOUND")
+    if batch.status != "awaiting_approval":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SAP_SN_SYNC_BATCH_NOT_APPLICABLE")
+    job = await enqueue_job(
+        session,
+        job_type="sap_sn_sync",
+        resource_type="sn_sync_batch",
+        resource_id=batch.id,
+        idempotency_key=f"sap_sn_sync:apply:{batch.id}",
+        metadata={
+            "sync_phase": "apply",
+            "sync_batch_id": batch.id,
+            "sync_apply_cursor": 0,
+            "user_id": current_user.id,
+            "approval_reason": payload.reason,
+        },
+        max_attempts=3,
+    )
     await session.commit()
-    return ok(result, "SAP SN snapshot applied")
+    return ok(serialize_job(job), "SAP SN snapshot application queued")
 
 
 def _config_payload() -> dict:
@@ -320,10 +341,18 @@ async def start_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
     current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
-    result = await create_sn_sync_batch(session, user_id=current_user.id)
-    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="用户从系统配置页面执行SN同步", after_data=result)
+    job = await enqueue_job(
+        session,
+        job_type="sap_sn_sync",
+        resource_type="sn_master",
+        resource_id=None,
+        idempotency_key=f"sap_sn_sync:manual:{get_correlation_id() or 'job'}",
+        metadata={"user_id": current_user.id, "source": "system"},
+        max_attempts=3,
+    )
+    await log_operation(session, user_id=current_user.id, operation_type="sn_sync_queued", target_type="job_run", target_id=job.id, description="用户从系统配置页面排队执行SN同步", after_data={"job_id": job.id})
     await session.commit()
-    return ok(result, "SN snapshot synchronized")
+    return ok(serialize_job(job), "SN snapshot queued")
 
 
 @router.get("/sn-sync/latest")

@@ -11,7 +11,7 @@ from app.models.integrations import (
     TicketRma,
     TicketRmaItem,
 )
-from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog
+from app.models.logs import AiCallLog, JobRunLog, OperationLog, SystemEventLog, WorkerLease
 from app.models.mail import Email, EmailAttachment, EmailThread, EmailTicketLink
 from app.models.mail_fetch import MailFetchRecord
 from app.models.mail_transport import EmailOutbox, MailboxSyncState, MailDeliveryEvent
@@ -66,5 +66,6 @@ __all__ = [
     "OperationLog",
     "SystemEventLog",
     "JobRunLog",
+    "WorkerLease",
 ]
 

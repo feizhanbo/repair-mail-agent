@@ -50,6 +50,16 @@ class ExternalSnRecord:
 
 
 @dataclass(frozen=True)
+class ExternalSnSnapshot:
+    """Stable keyset bounds captured before a chunked SN sync starts."""
+
+    source_count: int
+    max_ins_id: int | None
+    duplicate_ins_id_count: int = 0
+    null_ins_id_count: int = 0
+
+
+@dataclass(frozen=True)
 class ExternalRmaSubmissionItem:
     request_id: UUID
     sn: str
@@ -70,7 +80,11 @@ class ExternalRmaResult:
 class SapMiddlewareAdapter(Protocol):
     async def check_connection(self) -> ConnectionHealth: ...
 
-    async def fetch_all_sn_records(self) -> Sequence[ExternalSnRecord]: ...
+    async def inspect_sn_snapshot(self) -> ExternalSnSnapshot: ...
+
+    async def fetch_sn_records_page(
+        self, *, after_ins_id: int | None, max_ins_id: int, limit: int
+    ) -> Sequence[ExternalSnRecord]: ...
 
     async def submit_rma_batch(self, items: Sequence[ExternalRmaSubmissionItem]) -> None: ...
 

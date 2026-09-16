@@ -10,8 +10,17 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.core.sqlalchemy_compat import configure_asyncmy_pre_ping
 
-engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=False)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+)
+configure_asyncmy_pre_ping(engine)
 logger = logging.getLogger(__name__)
 _SPACE = re.compile(r"\s+")
 
