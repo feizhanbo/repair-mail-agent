@@ -22,6 +22,7 @@ def test_production_settings_accept_explicit_secure_boundary_values() -> None:
         DATABASE_URL="mysql+asyncmy://repair:strong-password@db:3306/repair",
         JWT_SECRET="a-secure-production-secret-with-32-characters",
         DEFAULT_ADMIN_PASSWORD="a-strong-bootstrap-password",
+        DEFAULT_OPERATOR_PASSWORD="a-strong-operator-password",
         CORS_ALLOWED_ORIGINS=["https://repair.example.com"],
         TRUSTED_HOSTS=["repair.example.com"],
     )

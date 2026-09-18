@@ -10,7 +10,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.database import AsyncSessionLocal, engine
 from app.core.security import hash_password
-from app.models import ReplyTemplate, Role, User, UserRole, WorkflowStatus, WorkflowTransition
+from app.models import ReplyTemplate, Role, SystemConfig, User, UserRole, WorkflowStatus, WorkflowTransition
+
+
+SYSTEM_CONFIG_SEEDS: tuple[dict[str, Any], ...] = (
+    {"config_key": "auto_send_enabled", "config_group": "business_automation", "value_type": "boolean", "config_value": True},
+    {"config_key": "auto_followup_enabled", "config_group": "business_automation", "value_type": "boolean", "config_value": True},
+    {"config_key": "auto_apply_min_confidence", "config_group": "business_automation", "value_type": "number", "config_value": 0.85},
+    {"config_key": "auto_send_min_confidence", "config_group": "business_automation", "value_type": "number", "config_value": 0.85},
+    {"config_key": "confidence_threshold", "config_group": "business_automation", "value_type": "number", "config_value": 0.7},
+    {"config_key": "max_follow_up", "config_group": "business_automation", "value_type": "integer", "config_value": 3},
+    {"config_key": "relay_sqlserver_enabled", "config_group": "sn_sync", "value_type": "boolean", "config_value": False},
+    {"config_key": "relay_sn_sync_enabled", "config_group": "sn_sync", "value_type": "boolean", "config_value": False},
+    {"config_key": "sn_schema", "config_group": "sn_sync", "value_type": "string", "config_value": "dbo"},
+    {"config_key": "sn_table", "config_group": "sn_sync", "value_type": "string", "config_value": ""},
+    {"config_key": "sn_primary_key", "config_group": "sn_sync", "value_type": "string", "config_value": ""},
+    {"config_key": "sn_updated_at_column", "config_group": "sn_sync", "value_type": "string", "config_value": ""},
+    {"config_key": "sn_column_map", "config_group": "sn_sync", "value_type": "object", "config_value": {}},
+    {"config_key": "batch_size", "config_group": "sn_sync", "value_type": "integer", "config_value": 500},
+    {"config_key": "snapshot_max_age_hours", "config_group": "sn_sync", "value_type": "integer", "config_value": 36},
+    {"config_key": "imap_fetch_enabled", "config_group": "mail_fetch", "value_type": "boolean", "config_value": False},
+    {"config_key": "imap_poll_interval_minutes", "config_group": "mail_fetch", "value_type": "integer", "config_value": 5},
+    {"config_key": "imap_folder", "config_group": "mail_fetch", "value_type": "string", "config_value": "INBOX"},
+    {"config_key": "imap_fetch_limit", "config_group": "mail_fetch", "value_type": "integer", "config_value": 10},
+    {"config_key": "imap_unseen_only", "config_group": "mail_fetch", "value_type": "boolean", "config_value": True},
+    {"config_key": "imap_max_retries", "config_group": "mail_fetch", "value_type": "integer", "config_value": 3},
+    {"config_key": "imap_archive_to_oss", "config_group": "mail_fetch", "value_type": "boolean", "config_value": True},
+)
+
+OPERATOR_SEEDS: tuple[dict[str, str], ...] = (
+    {"username": "miya", "real_name": "Miya Fang", "email": "miya.fang@accotest.com", "department": "RMA"},
+    {"username": "demi", "real_name": "Demi Wang", "email": "demi.wang@accotest.com", "department": "RMA"},
+)
 
 
 WORKFLOW_STATUSES: tuple[dict[str, Any], ...] = (
@@ -499,19 +530,6 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
         ),
     },
     {
-        "template_code": "rma_attachment_disabled_receipt_zh",
-        "template_name": "RMA 附件未启用受理回复",
-        "template_type": "rma_attachment_disabled_receipt",
-        "language": "zh-CN",
-        "version": "v1",
-        "subject_template": "Re: {{ original_subject }}",
-        "body_template": (
-            "您好，{{ contact_person }}：\n\n"
-            "我们已收到并确认您的报修申请。RMA 维修授权单附件当前未启用自动发送，"
-            "后续将由工作人员继续处理。\n\n谢谢。"
-        ),
-    },
-    {
         "template_code": "rma_overseas_in_warranty_en",
         "template_name": "Overseas RMA - In Warranty",
         "template_type": "rma_authorization_overseas_in_warranty",
@@ -647,18 +665,6 @@ REPLY_TEMPLATES: tuple[dict[str, Any], ...] = (
             "We will contact you in this email thread if additional information is required."
         ),
     },
-    {
-        "template_code": "rma_attachment_disabled_receipt_en",
-        "template_name": "RMA Attachment Disabled Receipt",
-        "template_type": "rma_attachment_disabled_receipt",
-        "language": "en-US",
-        "version": "v1",
-        "subject_template": "Re: {{ original_subject }}",
-        "body_template": (
-            "Dear {{ contact_person }},\n\nWe have received your repair request. Automatic delivery of the "
-            "RMA authorization attachment is currently disabled and our team will continue handling it."
-        ),
-    },
 )
 
 
@@ -754,6 +760,50 @@ async def _seed_default_admin(session: AsyncSession, admin_role: Role) -> User:
     return user
 
 
+async def _seed_operators(session: AsyncSession, operator_role: Role) -> int:
+    for values in OPERATOR_SEEDS:
+        user = await _get_one(
+            session,
+            User,
+            or_(User.username == values["username"], User.email == values["email"]),
+        )
+        if user is None:
+            user = User(
+                username=values["username"],
+                password_hash=hash_password(settings.DEFAULT_OPERATOR_PASSWORD),
+                real_name=values["real_name"],
+                email=values["email"],
+                phone=None,
+                department=values["department"],
+                status="active",
+            )
+            session.add(user)
+        else:
+            _apply_values(user, values, values.keys())
+        await session.flush()
+        existing_role = await _get_one(
+            session,
+            UserRole,
+            UserRole.user_id == user.id,
+            UserRole.role_id == operator_role.id,
+        )
+        if existing_role is None:
+            session.add(UserRole(user_id=user.id, role_id=operator_role.id))
+    return len(OPERATOR_SEEDS)
+
+
+async def _seed_system_configs(session: AsyncSession) -> int:
+    for values in SYSTEM_CONFIG_SEEDS:
+        existing = await _get_one(
+            session,
+            SystemConfig,
+            SystemConfig.config_key == values["config_key"],
+        )
+        if existing is None:
+            session.add(SystemConfig(**values))
+    return len(SYSTEM_CONFIG_SEEDS)
+
+
 async def _seed_reply_templates(session: AsyncSession, creator_user_id: int) -> int:
     for values in REPLY_TEMPLATES:
         template = await _get_one(
@@ -786,6 +836,8 @@ async def seed_database() -> dict[str, Any]:
             transition_count = await _seed_workflow_transitions(session)
             roles = await _seed_roles(session)
             admin_user = await _seed_default_admin(session, roles["admin"])
+            operator_count = await _seed_operators(session, roles["operator"])
+            system_config_count = await _seed_system_configs(session)
             template_count = await _seed_reply_templates(session, admin_user.id)
 
     return {
@@ -794,6 +846,8 @@ async def seed_database() -> dict[str, Any]:
         "roles": len(roles),
         "reply_templates": template_count,
         "default_admin": settings.DEFAULT_ADMIN_USERNAME,
+        "operators": operator_count,
+        "system_configs": system_config_count,
     }
 
 

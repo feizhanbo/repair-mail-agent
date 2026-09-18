@@ -16,7 +16,6 @@ import { hasAnyRole } from '../utils/roles';
 type ConfigForm = {
   auto_send_enabled: boolean;
   auto_followup_enabled: boolean;
-  rma_auto_send_enabled: boolean;
   auto_apply_min_confidence: number;
   auto_send_min_confidence: number;
   confidence_threshold: number;
@@ -157,7 +156,6 @@ export default function SystemPage() {
       configForm.setFieldsValue({
         auto_send_enabled: configQuery.data.auto_send_enabled,
         auto_followup_enabled: configQuery.data.auto_followup_enabled,
-        rma_auto_send_enabled: configQuery.data.rma_auto_send_enabled,
         auto_apply_min_confidence: configQuery.data.auto_apply_min_confidence,
         auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
         confidence_threshold: configQuery.data.confidence_threshold,
@@ -321,9 +319,6 @@ export default function SystemPage() {
           <Form.Item label="缺失必填字段自动追问" name="auto_followup_enabled" valuePropName="checked">
             <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_followup_enabled} />
           </Form.Item>
-          <Form.Item label="自动附带 RMA 授权单" name="rma_auto_send_enabled" valuePropName="checked">
-            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.rma_auto_send_enabled} />
-          </Form.Item>
           <Form.Item label="置信度阈值" name="confidence_threshold" rules={[{ required: true }]}>
             <InputNumber min={0} max={1} step={0.01} precision={2} />
           </Form.Item>
@@ -406,7 +401,6 @@ export default function SystemPage() {
           <Descriptions.Item label="应用">{info?.app ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="环境">{info?.env ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="普通回复自动发送">{info?.auto_send_enabled ? '开启' : '关闭'}</Descriptions.Item>
-          <Descriptions.Item label="RMA 自动发送">{info?.rma_auto_send_enabled ? '开启' : '关闭'}</Descriptions.Item>
           <Descriptions.Item label="追问上限">{info?.max_follow_up ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="置信度阈值">{info?.confidence_threshold ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="自动采纳安全阈值">{info?.auto_apply_min_confidence ?? '-'}</Descriptions.Item>

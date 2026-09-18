@@ -78,19 +78,6 @@ async def _create_database(nodb_url: str, db_name: str) -> None:
         await engine.dispose()
 
 
-async def _check_seed_data(db_url: str) -> bool:
-    engine = create_async_engine(db_url)
-    try:
-        async with engine.connect() as conn:
-            result = await conn.execute(text("SELECT COUNT(*) FROM workflow_statuses"))
-            count = result.scalar_one_or_none()
-            return count is not None and count > 0
-    except Exception:
-        return False
-    finally:
-        await engine.dispose()
-
-
 async def _import_sn_assets_from_xlsx() -> dict:
     try:
         from openpyxl import load_workbook
@@ -266,22 +253,13 @@ async def _main() -> None:
             raise SystemExit(1) from exc
         print("  Database created.")
 
-        print("Running Alembic migrations...")
-        await _run_subprocess("alembic upgrade head", str(BACKEND_DIR), env)
-
-        print("Running seed data...")
-        await _run_subprocess("python -m app.seed", str(BACKEND_DIR), env)
     else:
-        print(f"Database '{db_name}' already exists, checking seed data...")
-        has_seed = await _check_seed_data(test_db_url)
-        if not has_seed:
-            print("Seed data not found, running migration and seed...")
-            print("  Running Alembic migrations...")
-            await _run_subprocess("alembic upgrade head", str(BACKEND_DIR), env)
-            print("  Running seed data...")
-            await _run_subprocess("python -m app.seed", str(BACKEND_DIR), env)
-        else:
-            print("Seed data already present, skipping migration/seed.")
+        print(f"Database '{db_name}' already exists.")
+
+    print("Running Alembic migrations...")
+    await _run_subprocess("alembic upgrade head", str(BACKEND_DIR), env)
+    print("Running idempotent seed data...")
+    await _run_subprocess("python -m app.seed", str(BACKEND_DIR), env)
 
     sn_result = await _import_sn_assets_from_xlsx()
     board_result = await _import_board_cards_from_xls()

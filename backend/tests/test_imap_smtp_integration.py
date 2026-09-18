@@ -206,7 +206,6 @@ def phase_config_enable_auto_send() -> bool:
 
     data = resp.get("data", {})
     _ok(f"auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     return True
 
 
@@ -295,7 +294,6 @@ def phase_create_draft(ticket: dict) -> dict | None:
     _ok(f"  send_status       = {reply.get('send_status')}")
     _ok(f"  generate_source   = {reply.get('generate_source')}")
     _ok(f"  auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"  rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
 
     if reply.get("send_status") == "sent":
         _ok("🎉 草稿已自动发送 (auto_send 生效)!")
@@ -354,7 +352,6 @@ def phase_config_reset() -> bool:
 
     data = resp.get("data", {})
     _ok(f"auto_send_enabled = {data.get('auto_send_enabled')}")
-    _ok(f"rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     return True
 
 
@@ -370,7 +367,6 @@ def phase_verify_config() -> None:
     data = resp.get("data", {})
     print(f"{IDENT}当前配置:")
     print(f"{IDENT}  auto_send_enabled = {data.get('auto_send_enabled')}")
-    print(f"{IDENT}  rma_auto_send_enabled = {data.get('rma_auto_send_enabled')}")
     print(f"{IDENT}  smtp_configured   = {data.get('integrations', {}).get('smtp_configured')}")
     print(f"{IDENT}  imap_configured   = {data.get('integrations', {}).get('imap_configured')}")
 

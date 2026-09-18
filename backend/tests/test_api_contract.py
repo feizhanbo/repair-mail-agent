@@ -664,10 +664,8 @@ def test_operator_and_admin_can_queue_imap_fetch_with_server_defaults(monkeypatc
     assert session.committed is True
 
 
-def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(settings, "RUNTIME_CONFIG_PATH", str(tmp_path / "runtime_config.json"))
+def test_admin_can_patch_system_config(monkeypatch) -> None:
     monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", False)
-    monkeypatch.setattr(settings, "RMA_AUTO_SEND_ENABLED", True)
     monkeypatch.setattr(settings, "CONFIDENCE_THRESHOLD", 0.8)
     monkeypatch.setattr(settings, "MAX_FOLLOW_UP", 2)
     async def passed_preflight() -> dict:
@@ -675,7 +673,6 @@ def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     current = {
         **system_api.read_runtime_config(),
         "auto_send_enabled": False,
-        "rma_auto_send_enabled": True,
         "confidence_threshold": 0.8,
         "max_follow_up": 2,
     }
@@ -691,18 +688,25 @@ def test_admin_can_patch_system_config(monkeypatch, tmp_path) -> None:
     with make_client(roles=["admin"]) as client:
         response = client.patch(
             "/api/v1/system/config",
-            json={"auto_send_enabled": True, "rma_auto_send_enabled": False, "auto_send_min_confidence": 0.88, "confidence_threshold": 0.91, "max_follow_up": 3},
+            json={"auto_send_enabled": True, "auto_send_min_confidence": 0.88, "confidence_threshold": 0.91, "max_follow_up": 3},
         )
 
     payload = response.json()
     assert response.status_code == 200
     assert payload["data"]["auto_send_enabled"] is True
-    assert payload["data"]["rma_auto_send_enabled"] is False
-    # Compatibility output remains for one release, but new writes use the two canonical booleans.
     assert payload["data"]["reply_send_mode"] == "auto_send"
     assert payload["data"]["auto_send_min_confidence"] == 0.88
     assert payload["data"]["confidence_threshold"] == 0.91
     assert payload["data"]["max_follow_up"] == 3
+
+
+def test_removed_rma_runtime_switch_is_rejected() -> None:
+    with make_client(roles=["admin"]) as client:
+        response = client.patch(
+            "/api/v1/system/config",
+            json={"rma_auto_send_enabled": False},
+        )
+    assert response.status_code == 422
 
 
 def test_mail_preflight_failure_preserves_safe_stage_details(monkeypatch) -> None:

@@ -379,7 +379,7 @@ export const api = {
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
   mailTestPreflight: () => postData<MailTestPreflightResult>('/system/mail-test/preflight'),
-  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'auto_followup_enabled' | 'rma_auto_send_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up' | 'imap_fetch_enabled' | 'imap_poll_interval_minutes' | 'imap_folder' | 'imap_fetch_limit' | 'imap_unseen_only' | 'imap_max_retries' | 'imap_archive_to_oss'>>) =>
+  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'auto_followup_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up' | 'imap_fetch_enabled' | 'imap_poll_interval_minutes' | 'imap_folder' | 'imap_fetch_limit' | 'imap_unseen_only' | 'imap_max_retries' | 'imap_archive_to_oss'>>) =>
     patchData<SystemConfig>('/system/config', body),
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
   createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>

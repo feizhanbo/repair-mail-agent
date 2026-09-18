@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import settings
 from app.models import Email, User
-from app.services.routing import choose_system_owner, detect_language
+from app.services.routing import choose_scope_owner, choose_system_owner, detect_language
 
 
 class Result:
@@ -39,17 +38,22 @@ def _email(body: str) -> Email:
 
 
 @pytest.mark.anyio
-async def test_language_codes_drive_miya_and_demi_routes(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "ROUTING_DOMESTIC_USERNAME", "miya")
-    monkeypatch.setattr(settings, "ROUTING_FOREIGN_USERNAME", "demi")
+async def test_language_does_not_assign_owner_before_customer_scope() -> None:
+    zh_owner, zh_language, zh_reason = await choose_system_owner(Session(None), _email("设备报修"))
+    en_owner, en_language, en_reason = await choose_system_owner(Session(None), _email("Repair request"))
 
-    zh_owner, zh_language, zh_reason = await choose_system_owner(Session(User(id=11, username="miya", status="active")), _email("设备报修"))
-    en_owner, en_language, en_reason = await choose_system_owner(Session(User(id=12, username="demi", status="active")), _email("Repair request"))
+    assert (zh_owner, zh_language) == (None, "zh-CN")
+    assert "customer_scope:unresolved" in zh_reason
+    assert (en_owner, en_language) == (None, "en-US")
+    assert "customer_scope:unresolved" in en_reason
 
-    assert (zh_owner, zh_language) == (11, "zh-CN")
-    assert "username:miya" in zh_reason
-    assert (en_owner, en_language) == (12, "en-US")
-    assert "username:demi" in en_reason
+
+@pytest.mark.anyio
+async def test_customer_scope_drives_miya_and_demi_routes() -> None:
+    miya = User(id=11, username="miya", status="active")
+    demi = User(id=12, username="demi", status="active")
+    assert (await choose_scope_owner(Session(miya), "domestic")).id == 11
+    assert (await choose_scope_owner(Session(demi), "overseas")).id == 12
 
 
 def test_unknown_language_uses_domestic_fallback_code() -> None:
@@ -57,10 +61,5 @@ def test_unknown_language_uses_domestic_fallback_code() -> None:
 
 
 @pytest.mark.anyio
-async def test_missing_required_operator_does_not_randomly_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "ROUTING_DOMESTIC_USERNAME", "miya")
-    owner, language, reason = await choose_system_owner(Session(None), _email("设备报修"))
-
-    assert owner is None
-    assert language == "zh-CN"
-    assert "required_username_unavailable:miya" in reason
+async def test_unknown_scope_does_not_randomly_fallback() -> None:
+    assert await choose_scope_owner(Session(User(id=99, username="other", status="active")), None) is None

@@ -9,6 +9,8 @@ from app.integrations.ai_provider import AiProviderError
 from app.schemas.business import EmailIngestRequest
 from app.services import mail_preclassification
 from app.integrations.llm_gateway import LlmTask
+from app.models import Email
+from app.services.parser import analyze_email_rules
 
 
 @pytest.fixture
@@ -90,6 +92,30 @@ def test_preclassification_context_uses_real_latest_reply_and_thread_summary() -
     assert context["latest_reply_segment"] == "补充 SN001"
     assert "SN999" in context["body"]
     assert context["thread_summary"]["thread_id"] == 9
+
+
+def test_rule_analysis_exposes_only_whitelisted_ai_signals() -> None:
+    email = Email(
+        mailbox_account="rma@example.com",
+        message_id="<signals@example.com>",
+        from_address="customer@example.com",
+        in_reply_to="<parent@example.com>",
+        text_body="补充报修信息，SN: SECRET123456，请安排维修。",
+        clean_body="补充报修信息，SN: SECRET123456，请安排维修。",
+    )
+    signals = analyze_email_rules(email).ai_classification_signals()
+
+    assert set(signals) == {"has_reply_chain", "body_has_sn", "matched_keywords"}
+    assert signals["has_reply_chain"] is True
+    assert signals["body_has_sn"] is True
+    assert "报修" in signals["matched_keywords"]
+    assert "SECRET123456" not in repr(signals)
+
+
+def test_preclassification_context_accepts_exact_rule_signal_shape() -> None:
+    signals = {"has_reply_chain": True, "body_has_sn": True, "matched_keywords": ["报修", "维修"]}
+    context = mail_preclassification._context(_payload(), rule_signals=signals)
+    assert context["rule_signals"] == signals
 
 
 @pytest.mark.anyio

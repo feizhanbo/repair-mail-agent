@@ -168,6 +168,7 @@ async def create_manual_task_if_missing(
         owner = await choose_available_operator(
             session,
             existing.assigned_user_id or assigned_user_id or ticket.assigned_user_id,
+            allow_fallback=False,
         )
         if owner is not None and (existing.status == "assignment_failed" or existing.assigned_user_id != owner.id):
             from app.services.notifications import resolve_notifications_for_target
@@ -196,7 +197,7 @@ async def create_manual_task_if_missing(
         return existing
 
     sticky_assignee = assigned_user_id or ticket.assigned_user_id
-    owner = await choose_available_operator(session, sticky_assignee)
+    owner = await choose_available_operator(session, sticky_assignee, allow_fallback=False)
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
@@ -271,7 +272,7 @@ async def create_email_manual_task_if_missing(
     )
     if existing is not None:
         return existing
-    owner = await choose_available_operator(session, None)
+    owner = await choose_available_operator(session, None, allow_fallback=False)
     task = ManualReviewTask(
         ticket_id=None,
         email_id=email.id,

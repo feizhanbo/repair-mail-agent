@@ -26,9 +26,20 @@ class RuleAnalysisResult:
     confidence_score: float
     field_confidences: dict[str, float]
     evidence: dict[str, Any]
+    has_reply_chain: bool
+    body_has_sn: bool
+    matched_keywords: list[str]
     handling_level: str | None = None
     classification_version: str = CLASSIFICATION_VERSION
     classification_reason_code: str | None = None
+
+    def ai_classification_signals(self) -> dict[str, Any]:
+        """Return the only rule-analysis fields allowed into AI classification."""
+        return {
+            "has_reply_chain": self.has_reply_chain,
+            "body_has_sn": self.body_has_sn,
+            "matched_keywords": list(self.matched_keywords),
+        }
 
     def to_parse_payload(self) -> dict[str, Any]:
         return {
@@ -68,6 +79,20 @@ class RuleAnalysisResult:
 
 SN_PATTERN = re.compile(r"(?:SN(?:号|號)?|S/N|序列号|设备编号)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,})", re.IGNORECASE)
 LONG_SN_PATTERN = re.compile(r"\b[A-Z0-9]{12,}\b", re.IGNORECASE)
+MAIL_CLASSIFICATION_KEYWORDS = (
+    "是否", "请确认", "保修状态", "保修期", "质保", "warranty", "out of warranty",
+    "上门维修", "现场维修", "现场服务", "on-site", "onsite service", "field service",
+    "元器件更换", "器件替换", "零部件更换", "物料替换", "component replacement", "parts replacement",
+    "维修完成已发出", "维修完成已寄出", "设备已寄回", "repaired unit shipped",
+    "维修设备已收到", "修好的设备已收到", "使用正常", "received the repaired",
+    "我们收到货了", "请入库", "收到待维修设备", "待修设备已收到", "received the unit for repair",
+    "发票", "开票", "invoice", "合同确认", "合同条款", "合同附件", "contract confirmation", "contract terms",
+    "非我司设备", "其他厂家设备", "第三方设备报价", "third-party equipment quotation",
+    "另外", "新增", "再次报修", "另有", "another unit", "additional", "new repair",
+    "修改rma", "修改 sn", "修改sn", "撤销", "取消维修", "地址改为", "进度", "异议", "change rma", "cancel repair", "repair status",
+    "补充", "sn", "s/n", "序列号", "故障", "地址", "电话", "fault", "serial", "address",
+    "退订", "unsubscribe", "广告", "newsletter", "报修", "维修", "repair", "rma",
+)
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 SUPPLEMENT_PHONE_PATTERN = re.compile(
     r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
@@ -237,6 +262,12 @@ def extract_fields(email: Email, *, intent_type: str | None = None) -> dict[str,
 
 def analyze_email_rules(email: Email) -> RuleAnalysisResult:
     body = clean_email_body(email)
+    full_body = normalize_email_body(email.clean_body or email.text_body or html_to_text(email.html_body) or body)
+    latest = extract_latest_reply_segment(full_body)
+    normalized_body = full_body.casefold()
+    has_reply_chain = bool(email.in_reply_to or email.references_header or (latest and latest != full_body))
+    body_has_sn = bool(SN_PATTERN.search(full_body) or LONG_SN_PATTERN.search(full_body))
+    matched_keywords = [term for term in MAIL_CLASSIFICATION_KEYWORDS if term.casefold() in normalized_body][:20]
     intent_type, classification_confidence, classification_reason = classify_email(email, body)
     extracted = extract_fields(email, intent_type=intent_type)
     extracted["missing_fields"] = required_missing_for_values(
@@ -258,6 +289,9 @@ def analyze_email_rules(email: Email) -> RuleAnalysisResult:
         confidence_score=min(float(extracted["confidence_score"]), classification_confidence),
         field_confidences=extracted["field_confidences"],
         evidence=extracted["evidence"],
+        has_reply_chain=has_reply_chain,
+        body_has_sn=body_has_sn,
+        matched_keywords=list(dict.fromkeys(matched_keywords)),
         handling_level=decision.handling_level if decision else None,
         classification_reason_code=decision.reason_code if decision else "MAILBOX_ADMISSION_IRRELEVANT",
     )

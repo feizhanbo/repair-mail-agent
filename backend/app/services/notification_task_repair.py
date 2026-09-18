@@ -10,7 +10,7 @@ from app.models import ManualReviewTask, NotificationEvent, NotificationUserStat
 from app.services.audit import create_notification
 from app.services.common import utcnow
 from app.services.notifications import event_requires_attention, resolve_notifications_for_target
-from app.services.routing import choose_available_operator
+from app.services.routing import choose_scope_owner
 
 
 OPEN_LEGACY_STATUSES = ("pending", "assigned", "claimed", "assignment_failed")
@@ -123,6 +123,8 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
         if task.status not in OPEN_LEGACY_STATUSES:
             continue
         ticket = await session.get(RepairTicket, task.ticket_id)
+        if task.status == "claimed" and task.claimed_by_user_id in active_operator_ids:
+            continue
         owner_id = next(
             (
                 candidate
@@ -136,10 +138,10 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
             None,
         )
         if owner_id is None:
-            fallback = await choose_available_operator(session)
-            owner_id = fallback.id if fallback is not None else None
-        new_status = "pending"
-        if task.status != new_status or task.assigned_user_id != owner_id or task.claimed_by_user_id is not None or task.claimed_at is not None:
+            scope_owner = await choose_scope_owner(session, ticket.customer_scope if ticket else None)
+            owner_id = scope_owner.id if scope_owner is not None else None
+        new_status = "assigned" if task.status == "assigned" and owner_id is not None else "pending"
+        if task.status != new_status or task.assigned_user_id != owner_id:
             counts["normalized_tasks"] += 1
             if len(samples["normalized_tasks"]) < 20:
                 samples["normalized_tasks"].append(task.id)
@@ -150,8 +152,6 @@ async def repair_notification_and_task_data(session: AsyncSession, *, apply: boo
             if apply:
                 task.status = new_status
                 task.assigned_user_id = owner_id
-                task.claimed_by_user_id = None
-                task.claimed_at = None
                 if owner_id is not None:
                     await resolve_notifications_for_target(
                         session,

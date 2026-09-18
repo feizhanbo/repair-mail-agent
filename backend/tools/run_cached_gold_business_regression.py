@@ -995,7 +995,6 @@ def _configure_environment(api_port: int, relay_port: int = DEFAULT_RELAY_PORT) 
     os.environ["RELAY_ADAPTER"] = "test_http"
     os.environ["RELAY_SQLSERVER_ENABLED"] = "true"
     os.environ["TEST_RELAY_BASE_URL"] = f"http://127.0.0.1:{relay_port}"
-    os.environ["MAIL_SCHEDULER_IN_API"] = "true"
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 
@@ -1202,10 +1201,6 @@ def _runtime(args: argparse.Namespace) -> dict[str, Any]:
         "ai_cache_schema": AI_CACHE_SCHEMA,
     }
 
-    async def no_scheduled_mailbox_scan() -> None:
-        return None
-
-    app_main._scheduled_imap_fetch = no_scheduled_mailbox_scan
     return {
         "settings": settings,
         "app_main": app_main,

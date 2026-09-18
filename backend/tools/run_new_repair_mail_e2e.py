@@ -414,7 +414,6 @@ def run() -> int:
                 client,
                 auto_send_enabled=True,
                 auto_followup_enabled=True,
-                rma_auto_send_enabled=True,
             ),
         )
         complete_email_id = fetch_exact_message(client, complete_message_id)
@@ -489,7 +488,6 @@ def run() -> int:
         safe_values = {
             "auto_send_enabled": bool(initial.get("auto_send_enabled")),
             "auto_followup_enabled": bool(initial.get("auto_followup_enabled")),
-            "rma_auto_send_enabled": bool(initial.get("rma_auto_send_enabled")),
         }
         try:
             final_config = patch_config(client, **safe_values)
@@ -500,12 +498,10 @@ def run() -> int:
             "initial_config": {
                 "auto_send_enabled": initial.get("auto_send_enabled"),
                 "auto_followup_enabled": initial.get("auto_followup_enabled"),
-                "rma_auto_send_enabled": initial.get("rma_auto_send_enabled"),
             },
             "final_config": {
                 "auto_send_enabled": final_config.get("auto_send_enabled"),
                 "auto_followup_enabled": final_config.get("auto_followup_enabled"),
-                "rma_auto_send_enabled": final_config.get("rma_auto_send_enabled"),
                 "restore_failed": final_config.get("restore_failed"),
             },
             "evidence": evidence,

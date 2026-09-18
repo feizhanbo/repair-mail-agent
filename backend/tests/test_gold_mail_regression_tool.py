@@ -432,7 +432,6 @@ def test_set_and_verify_runtime_switches_detects_drift(monkeypatch) -> None:
         lambda _client: {
             "auto_send_enabled": False,
             "auto_followup_enabled": False,
-            "rma_auto_send_enabled": False,
         },
     )
 
@@ -441,7 +440,6 @@ def test_set_and_verify_runtime_switches_detects_drift(monkeypatch) -> None:
             object(),
             auto_send_enabled=True,
             auto_followup_enabled=False,
-            rma_auto_send_enabled=False,
         )
 
     assert exc.value.code == "RUNTIME_SEND_SWITCH_DRIFT"
@@ -524,7 +522,6 @@ def test_config_restore_includes_relay_runtime_switch(monkeypatch) -> None:
         {
             "auto_send_enabled": False,
             "auto_followup_enabled": True,
-            "rma_auto_send_enabled": False,
             "relay_sqlserver_enabled": True,
         },
         None,

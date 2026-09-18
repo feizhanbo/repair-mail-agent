@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -13,7 +11,6 @@ from app.models import SystemConfig
 CONFIG_KEYS = {
     "auto_send_enabled",
     "auto_followup_enabled",
-    "rma_auto_send_enabled",
     "auto_apply_min_confidence",
     "auto_send_min_confidence",
     "confidence_threshold",
@@ -37,9 +34,8 @@ CONFIG_KEYS = {
 }
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
-    "auto_send_enabled": False,
-    "auto_followup_enabled": False,
-    "rma_auto_send_enabled": True,
+    "auto_send_enabled": True,
+    "auto_followup_enabled": True,
     "auto_apply_min_confidence": 0.85,
     "auto_send_min_confidence": 0.85,
     "confidence_threshold": 0.7,
@@ -64,7 +60,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
 
 CONFIG_GROUPS = {
     "business_automation": {
-        "auto_send_enabled", "auto_followup_enabled", "rma_auto_send_enabled",
+        "auto_send_enabled", "auto_followup_enabled",
         "auto_apply_min_confidence", "auto_send_min_confidence", "confidence_threshold", "max_follow_up",
     },
     "sn_sync": {
@@ -80,18 +76,12 @@ CONFIG_GROUPS = {
 _runtime_cache: dict[str, Any] | None = None
 
 
-def _path() -> Path:
-    return Path(settings.RUNTIME_CONFIG_PATH)
-
-
 def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
     legacy_auto_send = values.get("reply_send_mode") == "auto_send"
-    legacy_rma_disabled = values.get("rma_authorization_enabled") is False
     merged = {
         **DEFAULT_RUNTIME_CONFIG,
         "auto_send_enabled": bool(settings.AUTO_SEND_ENABLED),
         "auto_followup_enabled": bool(settings.AUTO_FOLLOWUP_ENABLED),
-        "rma_auto_send_enabled": bool(settings.RMA_AUTO_SEND_ENABLED),
         "auto_apply_min_confidence": float(settings.AUTO_APPLY_MIN_CONFIDENCE),
         "auto_send_min_confidence": float(settings.AUTO_SEND_MIN_CONFIDENCE),
         "confidence_threshold": float(settings.CONFIDENCE_THRESHOLD),
@@ -116,11 +106,8 @@ def _coerce_config(values: dict[str, Any]) -> dict[str, Any]:
     }
     if "auto_send_enabled" not in values and legacy_auto_send:
         merged["auto_send_enabled"] = True
-    if "rma_auto_send_enabled" not in values and legacy_rma_disabled:
-        merged["rma_auto_send_enabled"] = False
     merged["auto_send_enabled"] = bool(merged["auto_send_enabled"])
     merged["auto_followup_enabled"] = bool(merged["auto_followup_enabled"])
-    merged["rma_auto_send_enabled"] = bool(merged["rma_auto_send_enabled"])
     merged["auto_apply_min_confidence"] = max(0.0, min(1.0, float(merged["auto_apply_min_confidence"])))
     merged["auto_send_min_confidence"] = max(0.0, min(1.0, float(merged["auto_send_min_confidence"])))
     merged["confidence_threshold"] = max(0.0, min(1.0, float(merged["confidence_threshold"])))
@@ -144,10 +131,8 @@ def apply_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
     config = _coerce_config(values)
     settings.AUTO_SEND_ENABLED = bool(config["auto_send_enabled"])
     settings.AUTO_FOLLOWUP_ENABLED = bool(config["auto_followup_enabled"])
-    settings.RMA_AUTO_SEND_ENABLED = bool(config["rma_auto_send_enabled"])
     # Deprecated compatibility values are derived from the canonical switches.
     settings.REPLY_SEND_MODE = "auto_send" if settings.AUTO_SEND_ENABLED else "human_review"
-    settings.RMA_AUTHORIZATION_ENABLED = settings.RMA_AUTO_SEND_ENABLED
     settings.AUTO_APPLY_MIN_CONFIDENCE = float(config["auto_apply_min_confidence"])
     settings.AUTO_SEND_MIN_CONFIDENCE = float(config["auto_send_min_confidence"])
     settings.CONFIDENCE_THRESHOLD = float(config["confidence_threshold"])
@@ -175,24 +160,11 @@ def apply_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
 def read_runtime_config() -> dict[str, Any]:
     if _runtime_cache is not None:
         return dict(_runtime_cache)
-    return apply_runtime_config(_read_legacy_file())
-
-
-def _read_legacy_file() -> dict[str, Any]:
-    path = _path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    return data
+    return apply_runtime_config({})
 
 
 def write_runtime_config(values: dict[str, Any]) -> dict[str, Any]:
-    """Deprecated test compatibility helper; production updates use persist_runtime_config()."""
+    """Test compatibility helper; production updates use persist_runtime_config()."""
     return apply_runtime_config({**read_runtime_config(), **{key: value for key, value in values.items() if key in CONFIG_KEYS}})
 
 
@@ -213,19 +185,9 @@ def _value_type(value: Any) -> str:
 
 
 async def load_runtime_config(session: AsyncSession, *, bootstrap: bool = True) -> dict[str, Any]:
+    del bootstrap
     rows = (await session.execute(select(SystemConfig))).scalars().all()
     stored = {row.config_key: row.config_value for row in rows if row.config_key in CONFIG_KEYS}
-    if not rows and bootstrap:
-        config = _coerce_config(_read_legacy_file())
-        for key, value in config.items():
-            session.add(SystemConfig(
-                config_key=key,
-                config_group=_group_for_key(key),
-                value_type=_value_type(value),
-                config_value=value,
-            ))
-        await session.flush()
-        stored = config
     return apply_runtime_config(stored)
 
 

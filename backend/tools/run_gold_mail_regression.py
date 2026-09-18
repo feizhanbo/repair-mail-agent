@@ -150,12 +150,10 @@ def _set_and_verify_config(
     *,
     auto_send_enabled: bool,
     auto_followup_enabled: bool,
-    rma_auto_send_enabled: bool,
 ) -> dict[str, Any]:
     expected = {
         "auto_send_enabled": auto_send_enabled,
         "auto_followup_enabled": auto_followup_enabled,
-        "rma_auto_send_enabled": rma_auto_send_enabled,
     }
     patch_config(client, **expected)
     actual = current_config(client)
@@ -208,7 +206,6 @@ def _restore_config_without_masking_primary_error(
             client,
             auto_send_enabled=bool(initial.get("auto_send_enabled")),
             auto_followup_enabled=bool(initial.get("auto_followup_enabled")),
-            rma_auto_send_enabled=bool(initial.get("rma_auto_send_enabled")),
             relay_sqlserver_enabled=bool(initial.get("relay_sqlserver_enabled")),
         )
     except Exception as exc:
@@ -1255,7 +1252,6 @@ def _classify_suite_once(path: Path, confirm_suite: str) -> dict[str, Any]:
             client,
             auto_send_enabled=False,
             auto_followup_enabled=False,
-            rma_auto_send_enabled=False,
             relay_sqlserver_enabled=False,
         )
         # Relay export is toggled through the sn-sync config endpoint; disable
@@ -2327,7 +2323,6 @@ def _run_suite_unlocked(
             client,
             auto_send_enabled=False,
             auto_followup_enabled=False,
-            rma_auto_send_enabled=False,
         )
         # Disable relay export while the suite runs so ready_for_export
         # tickets do not enqueue async relay_ticket_export jobs that would
@@ -2376,7 +2371,6 @@ def _run_suite_unlocked(
                 expected_switches = {
                     "auto_send_enabled": mode in {"auto_rma", "followup_then_rma", "manual_review_then_rma"},
                     "auto_followup_enabled": mode in {"auto_followup", "followup_then_rma"},
-                    "rma_auto_send_enabled": mode in {"auto_rma", "followup_then_rma", "manual_review_then_rma"},
                 }
                 _set_and_verify_config(client, **expected_switches)
                 email_id, fetch_result = _fetch_system_message(
@@ -2526,7 +2520,6 @@ def _run_suite_unlocked(
                         client,
                         auto_send_enabled=False,
                         auto_followup_enabled=False,
-                        rma_auto_send_enabled=False,
                     )
                 except Exception as exc:
                     case["issues"] = sorted(
@@ -2652,7 +2645,6 @@ def _run_suite_unlocked(
                     client,
                     auto_send_enabled=False,
                     auto_followup_enabled=False,
-                    rma_auto_send_enabled=False,
                 )
             except Exception as exc:
                 result["runtime_restore_error"] = type(exc).__name__

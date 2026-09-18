@@ -36,8 +36,8 @@ async def enqueue_scheduled_imap() -> None:
             idempotency_key=f"imap_fetch:scheduled:{settings.IMAP_USER}:{settings.IMAP_FOLDER}:{bucket.isoformat()}",
             metadata={
                 "folder_name": settings.IMAP_FOLDER,
-                "limit": settings.IMAP_INCREMENTAL_LIMIT,
-                "unseen_only": False,
+                "limit": settings.IMAP_FETCH_LIMIT,
+                "unseen_only": settings.IMAP_UNSEEN_ONLY,
                 "auto_parse": True,
             },
         )

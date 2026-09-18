@@ -293,9 +293,10 @@ class CustomerServicePolicyUpdateRequest(BaseModel):
 
 
 class SystemConfigUpdateRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     auto_send_enabled: bool | None = None
     auto_followup_enabled: bool | None = None
-    rma_auto_send_enabled: bool | None = None
     reply_send_mode: Literal["human_review", "auto_send"] | None = Field(
         default=None,
         json_schema_extra={"deprecated": True},

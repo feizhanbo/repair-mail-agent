@@ -26,7 +26,7 @@ from app.services.storage import (
 
 
 async def main() -> None:
-    if settings.IMAP_FETCH_ENABLED or settings.AUTO_SEND_ENABLED or settings.RMA_AUTO_SEND_ENABLED:
+    if settings.IMAP_FETCH_ENABLED or settings.AUTO_SEND_ENABLED:
         raise RuntimeError("EXTERNAL_SMOKE_REQUIRES_ALL_MAIL_SEND_AND_FETCH_SWITCHES_OFF")
 
     marker = uuid.uuid4().hex

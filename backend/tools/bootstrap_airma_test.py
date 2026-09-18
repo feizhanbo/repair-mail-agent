@@ -34,7 +34,6 @@ def _run(command: list[str], *, database_url: str, smoke: bool = False) -> None:
     environment["DATABASE_URL"] = database_url
     environment["IMAP_FETCH_ENABLED"] = "false"
     environment["AUTO_SEND_ENABLED"] = "false"
-    environment["RMA_AUTO_SEND_ENABLED"] = "false"
     if smoke:
         environment["DB_SMOKE_DATABASE_URL"] = database_url
     subprocess.run(command, cwd=BACKEND_DIR, env=environment, check=True)

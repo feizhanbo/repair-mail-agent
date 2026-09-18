@@ -2465,7 +2465,7 @@ async def create_and_send_rma_authorization(
             reason="RMA_BRANDING_POLICY_CONFLICT",
         )
     customer_policy = policy_lines[0] if policy_lines else {}
-    attach_rma = bool(settings.RMA_AUTO_SEND_ENABLED)
+    attach_rma = True
     manual_special_reasons: list[str] = []
     if str(customer_policy.get("policy_type") or "") == "special_out_of_warranty":
         manual_special_reasons.append("SPECIAL_OUT_OF_WARRANTY_PRICE")

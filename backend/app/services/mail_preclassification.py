@@ -54,7 +54,12 @@ class MailPreclassificationDecision:
     classification_version: str = PRECLASSIFICATION_PROMPT_VERSION
 
 
-def _context(payload: EmailIngestRequest, *, thread_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+def _context(
+    payload: EmailIngestRequest,
+    *,
+    thread_summary: dict[str, Any] | None = None,
+    rule_signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     body = normalize_email_body(payload.text_body or html_to_text(payload.html_body))
     latest = extract_latest_reply_segment(body)
     return {
@@ -71,6 +76,11 @@ def _context(payload: EmailIngestRequest, *, thread_summary: dict[str, Any] | No
         "in_reply_to": payload.in_reply_to,
         "references": payload.references_header,
         "thread_summary": thread_summary or {},
+        "rule_signals": rule_signals or {
+            "has_reply_chain": False,
+            "body_has_sn": False,
+            "matched_keywords": [],
+        },
         "attachments": [
             {
                 "file_name": item.get("file_name"),
@@ -141,8 +151,9 @@ async def classify_mail(
     mail_fetch_record_id: int | None = None,
     thread_summary: dict[str, Any] | None = None,
     attachment_evidence: list[dict[str, Any]] | None = None,
+    rule_signals: dict[str, Any] | None = None,
 ) -> MailPreclassificationDecision:
-    context = _context(payload, thread_summary=thread_summary)
+    context = _context(payload, thread_summary=thread_summary, rule_signals=rule_signals)
     if attachment_evidence:
         context["attachment_evidence"] = attachment_evidence
     audit_context = dict(context)

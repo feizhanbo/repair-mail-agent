@@ -1103,7 +1103,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             client,
             auto_send_enabled=False,
             auto_followup_enabled=False,
-            rma_auto_send_enabled=True,
         )
         preflight = client.data("POST", "/api/v1/system/mail-test/preflight")
         assert_database_preflight(preflight)
@@ -1180,7 +1179,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 client,
                 auto_send_enabled=True,
                 auto_followup_enabled=True,
-                rma_auto_send_enabled=True,
             )
             existing_detail = client.data("GET", f"/api/v1/tickets/{ticket_id}")
             existing_ticket = existing_detail.get("ticket") or {}
@@ -1528,7 +1526,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 client,
                 auto_send_enabled=True,
                 auto_followup_enabled=True,
-                rma_auto_send_enabled=True,
             )
             email_id = fetch_exact_message(client, message_id)
             completed = wait_for_ticket(
@@ -1566,7 +1563,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 client,
                 auto_send_enabled=False,
                 auto_followup_enabled=True,
-                rma_auto_send_enabled=True,
             )
             archived = find_email(client, target["message_id"])
             email_id = (
@@ -1697,7 +1693,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
                 client,
                 auto_send_enabled=True,
                 auto_followup_enabled=True,
-                rma_auto_send_enabled=True,
             )
             archived = find_email(client, supplement_message_id)
             supplement_email_id = (
@@ -1777,7 +1772,6 @@ def execute_phase(path: Path, *, phase: str, resume: bool) -> dict[str, Any]:
             client,
             auto_send_enabled=bool(initial.get("auto_send_enabled")),
             auto_followup_enabled=bool(initial.get("auto_followup_enabled")),
-            rma_auto_send_enabled=bool(initial.get("rma_auto_send_enabled")),
         )
 
 

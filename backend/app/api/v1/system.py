@@ -79,7 +79,6 @@ def _config_payload() -> dict:
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
         "auto_followup_enabled": runtime["auto_followup_enabled"],
-        "rma_auto_send_enabled": runtime["rma_auto_send_enabled"],
         "reply_send_mode": "auto_send" if runtime["auto_send_enabled"] else "human_review",
         "auto_apply_min_confidence": runtime["auto_apply_min_confidence"],
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
@@ -92,7 +91,7 @@ def _config_payload() -> dict:
         "imap_unseen_only": runtime["imap_unseen_only"],
         "imap_max_retries": runtime["imap_max_retries"],
         "imap_archive_to_oss": runtime["imap_archive_to_oss"],
-        "environment_note": "仅允许测试邮箱发送；普通回复是主控，自动追问独立，RMA 开关只控制授权单附件。",
+        "environment_note": "仅允许测试邮箱发送；普通回复和自动追问分别受数据库开关控制，符合条件的 RMA 固定附带授权单。",
         "mail_test_static_ready": not mail_test_reasons,
         "mail_test_static_reasons": mail_test_reasons,
         "integrations": {
@@ -240,7 +239,7 @@ async def update_config(
     current = await load_runtime_config(session)
     enabling_send = any(
         values.get(key) is True and not bool(current.get(key))
-        for key in ("auto_send_enabled", "auto_followup_enabled", "rma_auto_send_enabled")
+        for key in ("auto_send_enabled", "auto_followup_enabled")
     ) or (values.get("reply_send_mode") == "auto_send" and not current["auto_send_enabled"])
     if enabling_send:
         try:

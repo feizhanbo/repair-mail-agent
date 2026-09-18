@@ -207,12 +207,12 @@ def test_seed_contains_all_runtime_reply_templates() -> None:
         "followup",
         "sn_invalid",
         "manual_review",
-        "rma_attachment_disabled_receipt",
     ):
         assert (template_type, "zh-CN") in keys
         assert (template_type, "en-US") in keys
     assert ("rma_authorization_domestic_in_warranty", "zh-CN") in keys
     assert ("rma_authorization_domestic_out_of_warranty", "zh-CN") in keys
+    assert not any(template_type == "rma_attachment_disabled_receipt" for template_type, _language in keys)
     assert ("rma_authorization_overseas_in_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_out_of_warranty", "en-US") in keys
     assert ("rma_authorization_overseas_st_pickup", "en-US") in keys

@@ -100,27 +100,21 @@ def test_smtp_preflight_returns_masked_stage_and_stable_error(monkeypatch: pytes
 
 
 @pytest.mark.parametrize(
-    ("ordinary_enabled", "followup_enabled", "rma_attachment_enabled"),
+    ("ordinary_enabled", "followup_enabled"),
     [
-        (False, False, False),
-        (False, False, True),
-        (False, True, False),
-        (False, True, True),
-        (True, False, False),
-        (True, False, True),
-        (True, True, False),
-        (True, True, True),
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
     ],
 )
 def test_all_three_switch_combinations_keep_ordinary_and_followup_independent(
     monkeypatch: pytest.MonkeyPatch,
     ordinary_enabled: bool,
     followup_enabled: bool,
-    rma_attachment_enabled: bool,
 ) -> None:
     monkeypatch.setattr(settings, "AUTO_SEND_ENABLED", ordinary_enabled)
     monkeypatch.setattr(settings, "AUTO_FOLLOWUP_ENABLED", followup_enabled)
-    monkeypatch.setattr(settings, "RMA_AUTO_SEND_ENABLED", rma_attachment_enabled)
     monkeypatch.setattr(settings, "SMTP_USER", "rmatest1@accotest.com")
     monkeypatch.setattr(settings, "SMTP_RECIPIENT_WHITELIST", ["rmatest2@accotest.com"])
     ordinary = ReplyRecord(reply_type="receipt", to_addresses="rmatest2@accotest.com", cc_addresses=None)

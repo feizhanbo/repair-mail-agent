@@ -78,7 +78,6 @@ services:
       LOG_DIR: /app/logs/runtime
       LOG_FILE_ENABLED: "true"
       MAIL_WORKER_ENABLED: "true"
-      MAIL_SCHEDULER_IN_API: "false"
     volumes:
       - ./logs:/app/logs
     networks:

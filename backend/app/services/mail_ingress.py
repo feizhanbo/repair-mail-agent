@@ -144,15 +144,21 @@ async def process_preclassified_ingress(
         session, in_reply_to=payload.in_reply_to, references_header=payload.references_header
     )
     thread_summary = await email_service.build_thread_classification_summary(session, thread_id=thread_id)
+    signal_builder = getattr(precheck.rule_analysis, "ai_classification_signals", None)
+    rule_signals = signal_builder() if callable(signal_builder) else None
     decision = await classify_mail(
-        payload, session=session, mail_fetch_record_id=fetch_record.id, thread_summary=thread_summary
+        payload,
+        session=session,
+        mail_fetch_record_id=fetch_record.id,
+        thread_summary=thread_summary,
+        rule_signals=rule_signals,
     )
     if _needs_transient_evidence(payload, decision, attachment_blobs):
         evidence = transient_attachment_evidence(attachment_blobs)
         if evidence:
             decision = await classify_mail(
                 payload, session=session, mail_fetch_record_id=fetch_record.id,
-                thread_summary=thread_summary, attachment_evidence=evidence,
+                thread_summary=thread_summary, attachment_evidence=evidence, rule_signals=rule_signals,
             )
 
     fetch_record.intent_type = decision.intent_type

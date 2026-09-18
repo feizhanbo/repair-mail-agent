@@ -20,6 +20,7 @@ from app.core.repair_items import normalize_board_code, normalize_board_name
 from app.services.audit import log_operation
 from app.services.common import to_plain, utcnow
 from app.services.customer_policies import resolve_customer_policy
+from app.services.routing import route_ticket_by_customer_scope
 from app.services.sn_master_resolution import RESOLVED, resolved_asset_from_snapshot
 from app.services.workflow import OPEN_TASK_STATUSES, create_manual_task_if_missing
 
@@ -148,6 +149,7 @@ async def resolve_and_snapshot_ticket_policy(
     ticket.service_policy_id = snapshot.get("policy_id")
     ticket.policy_resolution_status = "resolved"
     ticket.policy_snapshot = snapshot
+    await route_ticket_by_customer_scope(session, ticket=ticket, user_id=user_id)
     has_special_rma_rules = bool(
         str(snapshot.get("policy_type") or "") == "special_out_of_warranty"
         or str(snapshot.get("currency") or "RMB").upper() not in {"RMB", "CNY"}
@@ -617,7 +619,11 @@ async def override_ticket_policy(
         description=reason,
         after_data=snapshot,
     )
+    routing = None
+    if ticket.customer_scope in {"domestic", "overseas"}:
+        routing = await route_ticket_by_customer_scope(session, ticket=ticket, user_id=user_id)
     return {
         "status": ticket.policy_resolution_status,
         "policy": snapshot,
+        "routing": routing,
     }

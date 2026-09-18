@@ -8,7 +8,7 @@ const LABELS: Record<string, string> = {
   parse_results: '解析结果', tickets: '工单', repair_tickets: '工单',
   email_ticket_links: '邮件工单关联', replies: '回复记录', reply_records: '回复记录',
   manual_review_tasks: '人工复核任务', operation_logs: '审计记录', oss_objects: '存储文件',
-  auto_send_enabled: '普通回复自动发送', auto_followup_enabled: '自动追问', rma_auto_send_enabled: 'RMA 自动发送',
+  auto_send_enabled: '普通回复自动发送', auto_followup_enabled: '自动追问',
   auto_apply_min_confidence: '自动应用最低置信度', auto_send_min_confidence: '自动发送最低置信度',
   confidence_threshold: '人工复核置信度阈值', max_follow_up: '最大追问次数',
   imap_fetch_enabled: '自动收取邮件', imap_poll_interval_minutes: '轮询周期（分钟）',

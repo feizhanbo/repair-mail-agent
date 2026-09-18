@@ -7,11 +7,11 @@ import pytest
 from app.api.v1.system import _config_payload
 from app.config import settings
 from app.services.runtime_config import _coerce_config
+from app.seed import OPERATOR_SEEDS, SYSTEM_CONFIG_SEEDS
 
 
 def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
 ) -> None:
     secret_values = {
         "qwen": "not-a-real-qwen-secret",
@@ -20,7 +20,6 @@ def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
         "oss_access": "not-a-real-oss-access-key",
         "oss_secret": "not-a-real-oss-secret-key",
     }
-    monkeypatch.setattr(settings, "RUNTIME_CONFIG_PATH", str(tmp_path / "runtime_config.json"))
     monkeypatch.setattr(settings, "AI_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "AI_API_KEY", "")
     monkeypatch.setattr(settings, "QWEN_API_KEY", secret_values["qwen"])
@@ -58,23 +57,31 @@ def test_legacy_send_settings_map_to_canonical_switches() -> None:
     config = _coerce_config(
         {
             "reply_send_mode": "auto_send",
-            "rma_authorization_enabled": False,
         }
     )
 
     assert config["auto_send_enabled"] is True
-    assert config["rma_auto_send_enabled"] is False
 
 
-def test_canonical_send_settings_override_legacy_values() -> None:
+def test_canonical_send_setting_overrides_legacy_value() -> None:
     config = _coerce_config(
         {
             "auto_send_enabled": False,
-            "rma_auto_send_enabled": True,
             "reply_send_mode": "auto_send",
-            "rma_authorization_enabled": False,
         }
     )
 
     assert config["auto_send_enabled"] is False
-    assert config["rma_auto_send_enabled"] is True
+    assert "rma_auto_send_enabled" not in config
+
+
+def test_seed_contains_complete_database_runtime_catalog_and_scope_owners() -> None:
+    configs = {item["config_key"]: item for item in SYSTEM_CONFIG_SEEDS}
+    assert len(configs) == 22
+    assert configs["auto_send_enabled"]["config_value"] is True
+    assert configs["auto_followup_enabled"]["config_value"] is True
+    assert "rma_auto_send_enabled" not in configs
+    assert {(item["username"], item["email"]) for item in OPERATOR_SEEDS} == {
+        ("miya", "miya.fang@accotest.com"),
+        ("demi", "demi.wang@accotest.com"),
+    }

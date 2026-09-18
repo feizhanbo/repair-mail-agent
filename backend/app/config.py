@@ -192,14 +192,9 @@ class Settings(BaseSettings):
 
     INTERNAL_EMAIL_DOMAINS: list[str] = ["accotest.com"]
     DEVICE_RECEIPT_TRUSTED_SENDERS: list[str] = []
-    ROUTING_DOMESTIC_USERNAME: str = "miya"
-    ROUTING_FOREIGN_USERNAME: str = "demi"
-    RMA_AUTO_SEND_ENABLED: bool = True
-
     EMAIL_ASYNC_ENABLED: bool = False
     SMTP_ASYNC_ENABLED: bool = False
     MAIL_WORKER_ENABLED: bool = True
-    MAIL_SCHEDULER_IN_API: bool = False
     IMPORT_EXPORT_ASYNC_ENABLED: bool = False
     ASYNC_JOB_POLL_SECONDS: int = 5
     ASYNC_JOB_STALE_SECONDS: int = 900
@@ -212,9 +207,6 @@ class Settings(BaseSettings):
     SMTP_RECIPIENT_WHITELIST: list[str] = []
     MAX_FOLLOW_UP: int = 3
     CONFIDENCE_THRESHOLD: float = 0.7
-    RUNTIME_CONFIG_PATH: str = str(BACKEND_DIR / "config" / "runtime_config.json")
-
-    RMA_AUTHORIZATION_ENABLED: bool = True
     RMA_PDF_TEMPLATE_PATH: str = str(
         BACKEND_DIR / "app" / "resources" / "rma_pdf" / "rma_authorization_auto_v3_1.pdf"
     )
@@ -250,6 +242,7 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_PASSWORD: str = "change-me-admin"
     DEFAULT_ADMIN_REAL_NAME: str = "System Administrator"
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
+    DEFAULT_OPERATOR_PASSWORD: str = "change-me-operator"
 
     @field_validator("DATABASE_URL", "DEV_DATABASE_URL", "DB_SMOKE_DATABASE_URL", mode="before")
     @classmethod
@@ -269,6 +262,8 @@ class Settings(BaseSettings):
             insecure.append("DATABASE_URL")
         if len(self.DEFAULT_ADMIN_PASSWORD) < 12 or "change-me" in self.DEFAULT_ADMIN_PASSWORD.lower():
             insecure.append("DEFAULT_ADMIN_PASSWORD")
+        if len(self.DEFAULT_OPERATOR_PASSWORD) < 12 or "change-me" in self.DEFAULT_OPERATOR_PASSWORD.lower():
+            insecure.append("DEFAULT_OPERATOR_PASSWORD")
         if not self.CORS_ALLOWED_ORIGINS or "*" in self.CORS_ALLOWED_ORIGINS:
             insecure.append("CORS_ALLOWED_ORIGINS")
         if not self.TRUSTED_HOSTS or "*" in self.TRUSTED_HOSTS:

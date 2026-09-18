@@ -917,7 +917,6 @@ export type SystemInfo = {
   env: string;
   auto_send_enabled: boolean;
   auto_followup_enabled: boolean;
-  rma_auto_send_enabled: boolean;
   /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
   auto_apply_min_confidence: number;
@@ -935,7 +934,6 @@ export type SystemInfo = {
 export type SystemConfig = {
   auto_send_enabled: boolean;
   auto_followup_enabled: boolean;
-  rma_auto_send_enabled: boolean;
   /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
   auto_apply_min_confidence: number;

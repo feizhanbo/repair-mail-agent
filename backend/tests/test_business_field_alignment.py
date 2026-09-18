@@ -249,7 +249,12 @@ async def test_domestic_code_with_two_locations_requires_manual() -> None:
 
 
 @pytest.mark.anyio
-async def test_policy_resolution_confirms_customer_and_snapshots_scope() -> None:
+async def test_policy_resolution_confirms_customer_and_snapshots_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def route_by_scope(_session, *, ticket, user_id=None):
+        del user_id
+        return {"status": "routed", "customer_scope": ticket.customer_scope}
+
+    monkeypatch.setattr(business_resolution, "route_ticket_by_customer_scope", route_by_scope)
     ticket = RepairTicket(
         id=1,
         ticket_no="T1",
