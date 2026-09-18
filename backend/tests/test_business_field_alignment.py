@@ -530,19 +530,22 @@ async def test_sap_submission_uses_export_frozen_master_snapshot() -> None:
 
 
 @pytest.mark.parametrize(
-    ("policy_type", "expected"),
+    ("policy_type", "customer_scope", "expected"),
     [
-        ("permanent_free", "free"),
-        ("annual_free", "annual_contract"),
-        ("special_out_of_warranty", "chargeable"),
-        ("unknown", "manual_confirmation"),
+        ("permanent_free", "domestic", "free"),
+        ("annual_free", "domestic", "annual_contract"),
+        ("special_out_of_warranty", "overseas", "chargeable"),
+        ("default", "domestic", "chargeable"),
+        ("default", "overseas", "manual_confirmation"),
+        ("unknown", "domestic", "manual_confirmation"),
     ],
 )
 def test_policy_type_maps_to_explicit_charge_status(
     policy_type: str,
+    customer_scope: str,
     expected: str,
 ) -> None:
-    assert customer_policies.charge_status_for_policy_type(policy_type) == expected
+    assert customer_policies.charge_status_for_policy_type(policy_type, customer_scope) == expected
 
 
 @pytest.mark.anyio

@@ -59,11 +59,12 @@ CHARGE_STATUSES = {"free", "annual_contract", "chargeable", "manual_confirmation
 CUSTOMER_SCOPES = {"domestic", "overseas"}
 
 
-def charge_status_for_policy_type(policy_type: str) -> str:
+def charge_status_for_policy_type(policy_type: str, customer_scope: str | None = None) -> str:
     return {
         "permanent_free": "free",
         "annual_free": "annual_contract",
         "special_out_of_warranty": "chargeable",
+        "default": "chargeable" if customer_scope == "domestic" else "manual_confirmation",
     }.get(policy_type, "manual_confirmation")
 
 
@@ -74,7 +75,8 @@ def serialize_policy(policy: CustomerServicePolicy) -> dict[str, Any]:
 def _validate_policy_values(values: dict[str, Any]) -> None:
     policy_type = str(values.get("policy_type") or "")
     charge_status = str(
-        values.get("charge_status") or charge_status_for_policy_type(policy_type)
+        values.get("charge_status")
+        or charge_status_for_policy_type(policy_type, str(values.get("customer_scope") or ""))
     )
     customer_scope = values.get("customer_scope")
     effective_from = values.get("effective_from")
@@ -173,7 +175,10 @@ async def create_policy(
         payload["currency"] = "RMB"
     payload["charge_status"] = str(
         payload.get("charge_status")
-        or charge_status_for_policy_type(str(payload.get("policy_type") or ""))
+        or charge_status_for_policy_type(
+            str(payload.get("policy_type") or ""),
+            str(payload.get("customer_scope") or ""),
+        )
     )
     if not payload["customer_code"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="POLICY_CUSTOMER_CODE_REQUIRED")
@@ -217,9 +222,10 @@ async def update_policy(
     before = serialize_policy(policy)
     merged = dict(before)
     merged.update({key: value for key, value in values.items() if key in POLICY_MUTABLE_FIELDS})
-    if "policy_type" in values and "charge_status" not in values:
+    if ({"policy_type", "customer_scope"} & values.keys()) and "charge_status" not in values:
         merged["charge_status"] = charge_status_for_policy_type(
-            str(merged.get("policy_type") or "")
+            str(merged.get("policy_type") or ""),
+            str(merged.get("customer_scope") or ""),
         )
     if "currency" in merged:
         merged["currency"] = str(merged["currency"] or "").strip().upper()

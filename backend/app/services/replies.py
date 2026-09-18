@@ -2465,7 +2465,6 @@ async def create_and_send_rma_authorization(
             reason="RMA_BRANDING_POLICY_CONFLICT",
         )
     customer_policy = policy_lines[0] if policy_lines else {}
-    attach_rma = True
     manual_special_reasons: list[str] = []
     if str(customer_policy.get("policy_type") or "") == "special_out_of_warranty":
         manual_special_reasons.append("SPECIAL_OUT_OF_WARRANTY_PRICE")
@@ -2488,7 +2487,7 @@ async def create_and_send_rma_authorization(
         customer_policy.get("manual_approved")
         or (rma_record.policy_snapshot or {}).get("manual_send_only")
     )
-    reply_type = "rma_authorization" if attach_rma else "receipt"
+    reply_type = "rma_authorization"
     existing = await session.scalar(
         select(ReplyRecord)
         .where(
@@ -2499,7 +2498,7 @@ async def create_and_send_rma_authorization(
         .order_by(ReplyRecord.id.desc())
     )
     if existing is not None:
-        if existing.send_status == "sent" and attach_rma:
+        if existing.send_status == "sent":
             ticket.rma_status = "sent"
             if ticket.current_status_code == "ready_for_export":
                 await transition_ticket(
@@ -2548,29 +2547,18 @@ async def create_and_send_rma_authorization(
             task_type="rma_reply_parent_required",
             reason=str(exc.detail),
         )
-    if attach_rma:
-        try:
-            template_type, reply_template_version = _rma_reply_template_type(ticket)
-        except RmaReplyRuleError as exc:
-            return await _rma_manual_review(session, ticket=ticket, task_type=exc.task_type, reason=exc.reason)
-        template = await _select_template(session, template_type, reply_language)
-        if template is None:
-            return await _rma_manual_review(
-                session,
-                ticket=ticket,
-                task_type="rma_reply_template_missing",
-                reason=f"REPLY_TEMPLATE_NOT_FOUND:{template_type}:{reply_language}",
-            )
-    else:
-        template = await _select_template(session, "rma_attachment_disabled_receipt", reply_language)
-        if template is None:
-            return await _rma_manual_review(
-                session,
-                ticket=ticket,
-                task_type="rma_reply_template_missing",
-                reason=f"REPLY_TEMPLATE_NOT_FOUND:rma_attachment_disabled_receipt:{reply_language}",
-            )
-        reply_template_version = template.version
+    try:
+        template_type, reply_template_version = _rma_reply_template_type(ticket)
+    except RmaReplyRuleError as exc:
+        return await _rma_manual_review(session, ticket=ticket, task_type=exc.task_type, reason=exc.reason)
+    template = await _select_template(session, template_type, reply_language)
+    if template is None:
+        return await _rma_manual_review(
+            session,
+            ticket=ticket,
+            task_type="rma_reply_template_missing",
+            reason=f"REPLY_TEMPLATE_NOT_FOUND:{template_type}:{reply_language}",
+        )
     try:
         subject, body, html_body, base_template, history_hash, render_hash = await _render_reply_templates(
             session,
@@ -2594,38 +2582,37 @@ async def create_and_send_rma_authorization(
             task_type="rma_reply_base_template_missing",
             reason=str(exc.detail),
         )
-    if attach_rma:
-        ticket.rma_status = "generating"
-        try:
-            data = await build_rma_pdf_data(
-                session,
-                ticket_id=ticket.id,
-                safety_snapshot=ticket.safety_check_snapshot,
-                rma_no=rma_record.rma_no,
-            )
-            pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=False)
-            file_name = rma_pdf_file_name(data)
-            subject = file_name.removesuffix(".pdf")
-            render_hash = _render_hash(
-                subject=subject,
-                plain=body,
-                html_body=html_body,
-                history_hash=history_hash,
-            )
-            pdf_object = await upload_bytes_to_oss(
-                session,
-                content=pdf_content,
-                original_file_name=file_name,
-                content_type="application/pdf",
-                source_type="rma_authorization_pdf",
-                user_id=user_id,
-            )
-            rma_record.pdf_oss_object_id = pdf_object.id
-            rma_record.pdf_sha256 = hashlib.sha256(pdf_content).hexdigest()
-            rma_record.pdf_validation_status = "passed"
-            rma_record.pdf_archive_status = "staged"
-        except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
-            return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
+    ticket.rma_status = "generating"
+    try:
+        data = await build_rma_pdf_data(
+            session,
+            ticket_id=ticket.id,
+            safety_snapshot=ticket.safety_check_snapshot,
+            rma_no=rma_record.rma_no,
+        )
+        pdf_content = await asyncio.to_thread(render_rma_pdf, data, test_only=False)
+        file_name = rma_pdf_file_name(data)
+        subject = file_name.removesuffix(".pdf")
+        render_hash = _render_hash(
+            subject=subject,
+            plain=body,
+            html_body=html_body,
+            history_hash=history_hash,
+        )
+        pdf_object = await upload_bytes_to_oss(
+            session,
+            content=pdf_content,
+            original_file_name=file_name,
+            content_type="application/pdf",
+            source_type="rma_authorization_pdf",
+            user_id=user_id,
+        )
+        rma_record.pdf_oss_object_id = pdf_object.id
+        rma_record.pdf_sha256 = hashlib.sha256(pdf_content).hexdigest()
+        rma_record.pdf_validation_status = "passed"
+        rma_record.pdf_archive_status = "staged"
+    except (RmaPdfError, StorageConfigurationError, StorageUploadError) as exc:
+        return await _rma_manual_review(session, ticket=ticket, task_type="rma_generation_failed", reason=str(exc)[:100])
     reply = ReplyRecord(
         ticket_id=ticket.id,
         related_email_id=related_email.id if related_email else None,
@@ -2645,7 +2632,7 @@ async def create_and_send_rma_authorization(
         generate_source="template",
         rma_pdf_oss_object_id=pdf_object.id if pdf_object else None,
         reply_template_version=reply_template_version,
-        rma_template_version=RMA_TEMPLATE_VERSION if attach_rma else None,
+        rma_template_version=RMA_TEMPLATE_VERSION,
         rma_pdf_data_snapshot=(
             rma_pdf_snapshot(data, pdf_content=pdf_content, oss_object_id=pdf_object.id)
             if data is not None and pdf_content is not None and pdf_object is not None
@@ -2682,19 +2669,19 @@ async def create_and_send_rma_authorization(
         await create_manual_task_if_missing(
             session,
             ticket=ticket,
-            task_type="rma_reply_review" if attach_rma else "rma_attachment_disabled",
+            task_type="rma_reply_review",
             trigger_reason=(
                 "特殊客户政策已由人工确认，RMA PDF 和模板回复已生成；"
                 "必须由操作员在系统内复核后批准发送。"
                 if manual_send_only
                 else "普通回复自动发送已关闭，需要人工审核新报修回复。"
             ),
-            priority="high" if attach_rma else "normal",
+            priority="high",
             email_id=related_email.id if related_email else None,
         )
         return {"status": "pending_review", "ticket_id": ticket.id, "reply_id": reply.id, "idempotent_reuse": False}
 
-    ticket.rma_status = "sending" if attach_rma else "manual_review"
+    ticket.rma_status = "sending"
     await _send_reply_record(session, reply=reply, user_id=user_id, auto=True, prepare_only=True)
     if reply.send_status == "approved_pending_send":
         return {
@@ -2704,16 +2691,6 @@ async def create_and_send_rma_authorization(
             "idempotent_reuse": False,
         }
     if reply.send_status == "sent":
-        if not attach_rma:
-            ticket.rma_status = "manual_review"
-            await create_manual_task_if_missing(
-                session,
-                ticket=ticket,
-                task_type="rma_attachment_disabled",
-                trigger_reason="新报修确认已发送，但 RMA 授权单附件未发送。",
-                priority="normal",
-                email_id=related_email.id if related_email else None,
-            )
         await log_operation(
             session,
             user_id=user_id,
@@ -2730,7 +2707,7 @@ async def create_and_send_rma_authorization(
             },
         )
         return {
-            "status": "succeeded" if attach_rma else "reply_sent_rma_pending",
+            "status": "succeeded",
             "ticket_id": ticket.id,
             "reply_id": reply.id,
             "idempotent_reuse": False,
