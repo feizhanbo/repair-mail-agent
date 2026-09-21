@@ -44,11 +44,14 @@ class RelayControl(BaseModel):
     scenario: str = "normal"
     delay_seconds: int = Field(default=0, ge=0, le=31_536_000)
     rma_no: str | None = None
+    call_id_start: str | None = None
 
     @model_validator(mode="after")
     def validate_rma_no(self) -> "RelayControl":
         if self.rma_no is not None and not re.fullmatch(r"\d{10}|INVALID-RMA", self.rma_no):
             raise ValueError("TEST_RELAY_RMA_NO_INVALID")
+        if self.call_id_start is not None and not re.fullmatch(r"\d{6}", self.call_id_start):
+            raise ValueError("TEST_RELAY_CALL_ID_INVALID")
         return self
 
 
@@ -151,7 +154,14 @@ class TestRelayStore:
                 "idempotent_reuse": True,
             }
         record_id = int(db.execute("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM records").fetchone()["id"])
-        call_id = f"{self.call_id_namespace:09d}{record_id:09d}"
+        call_id_start = self._setting(db, "default_call_id_start", "").strip()
+        if call_id_start:
+            call_id_value = int(call_id_start) + record_id - 1
+            if call_id_value > 999_999:
+                raise RuntimeError("TEST_RELAY_CALL_ID_SEQUENCE_EXHAUSTED")
+            call_id = f"{call_id_value:06d}"
+        else:
+            call_id = f"{self.call_id_namespace:09d}{record_id:09d}"
         scenario = self._setting(db, "default_scenario", "normal")
         delay = int(self._setting(db, "default_delay_seconds", "0"))
         ticket_key = str(payload.ticket_id or payload.relay_export_id or request_id)
@@ -265,6 +275,13 @@ class TestRelayStore:
                 )
             else:
                 db.execute("DELETE FROM settings WHERE key = 'default_rma_no'")
+            if control.call_id_start:
+                db.execute(
+                    "INSERT OR REPLACE INTO settings(key, value) VALUES ('default_call_id_start', ?)",
+                    (control.call_id_start,),
+                )
+            else:
+                db.execute("DELETE FROM settings WHERE key = 'default_call_id_start'")
         return control.model_dump()
 
     def update(self, call_id: str, control: RelayControl) -> dict[str, Any] | None:

@@ -98,12 +98,28 @@ async def upload_bytes_to_oss(
     object_key = _object_key(source_type=source_type, original_file_name=original_file_name, sha256_hash=sha256_hash)
     existing = await session.scalar(select(OssObject).where(OssObject.bucket == settings.OSS_BUCKET, OssObject.object_key == object_key))
     metadata_requires_reupload = False
+    physical_object_missing = False
     if existing is not None and existing.upload_status == "success":
         if not content_type or existing.content_type == content_type:
-            return existing
-        metadata_requires_reupload = True
-        existing.upload_status = "pending"
-        existing.content_type = content_type
+            try:
+                async with _oss_semaphore:
+                    exists = await asyncio.to_thread(
+                        _build_bucket(
+                            endpoint=settings.OSS_ENDPOINT,
+                            bucket_name=settings.OSS_BUCKET,
+                        ).object_exists,
+                        object_key,
+                    )
+            except Exception:
+                exists = False
+            if exists:
+                return existing
+            physical_object_missing = True
+            existing.upload_status = "pending"
+        else:
+            metadata_requires_reupload = True
+            existing.upload_status = "pending"
+            existing.content_type = content_type
 
     safe_name = _safe_file_name(original_file_name)
     if existing is None:
@@ -124,7 +140,11 @@ async def upload_bytes_to_oss(
         await session.flush()
     else:
         oss_object = existing
-        if oss_object.upload_status == "pending" and not metadata_requires_reupload:
+        if (
+            oss_object.upload_status == "pending"
+            and not metadata_requires_reupload
+            and not physical_object_missing
+        ):
             try:
                 async with _oss_semaphore:
                     exists = await asyncio.to_thread(

@@ -632,6 +632,7 @@ async def validate_and_mark_ready_for_export(
                 to_status_code="manual_review",
                 trigger_event="manual_review_required",
                 user_id=user_id,
+                operator_type="user" if user_id is not None else "system",
                 reason=failure_reason,
                 manual_task_type="export_safety_failed",
                 manual_task_priority="high",
@@ -647,11 +648,9 @@ async def validate_and_mark_ready_for_export(
             )
         return {"ticket_id": ticket.id, "status": "safety_failed", "report": report, "jobs": []}
 
-    # A human "enter ready for export" decision is the explicit resolution of
-    # the parse-time missing/conflict markers.  The safety report above is the
-    # authoritative re-check; retaining those historical markers would let the
-    # ticket transition to ready_for_export and then make the RMA PDF worker
-    # reject the same ticket as unresolved.
+    # Resolving a manual task explicitly supersedes its historical parse-time
+    # missing/conflict markers.  The safety report above remains the
+    # authoritative technical gate for both human- and system-initiated flows.
     if resolving_task_id is not None:
         ticket.missing_fields = {}
         ticket.conflict_fields = {}
@@ -663,6 +662,7 @@ async def validate_and_mark_ready_for_export(
             to_status_code="ready_for_export",
             trigger_event="validation_passed" if ticket.current_status_code == "parsed" else "manual_resolved",
             user_id=user_id,
+            operator_type="user" if user_id is not None else "system",
             reason=reason or "SN and all outbound fields passed the export safety gate",
             metadata={
                 "safety_check_hash": report["snapshot_hash"],

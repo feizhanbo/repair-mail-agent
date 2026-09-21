@@ -127,7 +127,6 @@ class Settings(BaseSettings):
     RELAY_BASE_URL: str = ""
     RELAY_API_KEY: str = ""
     RELAY_SN_SYNC_ENABLED: bool = False
-    RELAY_PUSH_ENABLED: bool = False
     RELAY_TIMEOUT_SECONDS: float = 10.0
     RELAY_ADAPTER: str = "sqlserver"
     TEST_RELAY_BASE_URL: str = ""

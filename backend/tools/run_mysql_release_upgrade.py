@@ -32,7 +32,7 @@ from app.config import settings
 
 EXPECTED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 EXPECTED_LOCAL_PORT = 13307
-EXPECTED_HEAD = "d7y2z3a4b5c6"
+EXPECTED_HEAD = "e8z3a4b5c6d7"
 CRITICAL_TABLES = (
     "emails",
     "email_attachments",

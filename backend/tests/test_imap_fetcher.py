@@ -152,7 +152,7 @@ class MultiUidImapClient(FakeImapClient):
         raise AssertionError(command)
 
 
-def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_uid_search_leaves_self_filtering_to_payload_precheck(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple] = []
 
     class SearchClient:
@@ -166,11 +166,33 @@ def test_uid_search_excludes_self_for_batch_but_not_exact_recovery(monkeypatch: 
     client = SearchClient()
 
     assert imap_fetcher._uid_search(client, message_id=None, start_uid=101) == ["101"]
-    assert calls[-1] == ("SEARCH", None, "UID", "101:*", "NOT", "FROM", "rmatest1@accotest.com")
+    assert calls[-1] == ("SEARCH", None, "UID", "101:*")
     assert imap_fetcher._uid_search(client, message_id=None, since_date="01-Aug-2026") == ["101"]
-    assert calls[-1] == ("SEARCH", None, "SINCE", "01-Aug-2026", "NOT", "FROM", "rmatest1@accotest.com")
+    assert calls[-1] == ("SEARCH", None, "SINCE", "01-Aug-2026")
     assert imap_fetcher._uid_search(client, message_id="<recover@example.com>", unseen_only=False) == ["101"]
     assert calls[-2] == ("SEARCH", None, "HEADER", "Message-ID", "<recover@example.com>")
+
+
+def test_initial_sync_filters_exact_internal_date_boundary() -> None:
+    class BoundaryClient:
+        def uid(self, command: str, uid: str, *args):
+            assert command == "FETCH"
+            assert args == ("(INTERNALDATE)",)
+            value = {
+                "100": "20-Sep-2026 11:59:59 +0800",
+                "101": "20-Sep-2026 12:00:00 +0800",
+                "102": "20-Sep-2026 04:00:01 +0000",
+            }[uid]
+            return "OK", [(f'{uid} (INTERNALDATE "{value}")'.encode(), b"")]
+
+    selected, excluded = imap_fetcher._uids_at_or_after_boundary(
+        BoundaryClient(),
+        ["100", "101", "102"],
+        datetime(2026, 9, 20, 12, 0, 0),
+    )
+
+    assert selected == ["101", "102"]
+    assert excluded == ["100"]
 
 
 def test_uid_search_filters_reference_header_false_positive() -> None:

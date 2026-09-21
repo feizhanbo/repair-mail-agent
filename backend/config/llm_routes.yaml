@@ -8,8 +8,7 @@ profiles:
 
 tasks:
   mail_classification:
-    primary: {profile: deepseek, model: deepseek-chat}
-    fallback: {profile: qwen, model: qwen-plus}
+    primary: {profile: qwen, model: qwen3.7-plus}
     temperature: 0.0
     timeout_seconds: 30
     max_retries: 2
@@ -17,10 +16,9 @@ tasks:
     requires_json: true
     requires_vision: false
   repair_field_extract:
-    primary: {profile: deepseek, model: deepseek-chat}
-    fallback: {profile: qwen, model: qwen-plus}
+    primary: {profile: qwen, model: qwen3.7-plus}
     temperature: 0.1
-    timeout_seconds: 30
+    timeout_seconds: 120
     max_retries: 2
     max_output_tokens: 8192
     requires_json: true

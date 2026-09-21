@@ -317,8 +317,37 @@ async def resolve_item_return_route(
                 message = "BOARD_CODE_ROUTE_CONFLICT"
             else:
                 message = "BOARD_CODE_NOT_FOUND"
+                material_name = _normalized_name(item.material_name)
+                if material_name:
+                    candidates = list(
+                        (
+                            await session.execute(
+                                select(BoardCard).where(
+                                    BoardCard.customer_scope == "domestic",
+                                    BoardCard.route_type == "board_rule",
+                                    BoardCard.status == "active",
+                                )
+                            )
+                        ).scalars()
+                    )
+                    name_matches = [
+                        candidate
+                        for candidate in candidates
+                        if len(_normalized_name(candidate.board_name)) >= 4
+                        and _normalized_name(candidate.board_name) in material_name
+                    ]
+                    if len(name_matches) == 1:
+                        row = name_matches[0]
+                        source = "domestic_material_name_match"
+                        message = None
+                        board_code = normalize_board_code(row.board_code)
+                        board_name = normalize_board_name(row.board_name)
+                        item.board_code = board_code
+                        item.board_name = board_name
+                    elif len(name_matches) > 1:
+                        message = "MATERIAL_NAME_BOARD_MATCH_DUPLICATED"
             if row is not None:
-                source = "domestic_board_match"
+                source = source or "domestic_board_match"
         elif row is None and message is None and board_name:
             matches = list(
                 (

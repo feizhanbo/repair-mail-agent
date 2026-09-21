@@ -194,6 +194,12 @@ BASE_WORKFLOW_TRANSITIONS: tuple[dict[str, Any], ...] = (
     {
         "from_status_code": "manual_review",
         "to_status_code": "parsed",
+        "trigger_event": "reparse_validation_passed",
+        "condition_desc": "重解析已消除低置信或分类不一致，恢复完整技术校验。",
+    },
+    {
+        "from_status_code": "manual_review",
+        "to_status_code": "parsed",
         "trigger_event": "manual_resolved",
         "condition_desc": "人工修正后回到解析态。",
         "require_manual": True,

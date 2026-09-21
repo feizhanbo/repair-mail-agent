@@ -25,7 +25,7 @@ from app.core.repair_items import (
 from app.core.request_context import get_correlation_id
 from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse
 from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
-from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem, SnAsset
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
@@ -172,6 +172,9 @@ def _sanitize_customer_return_fields(
     if not body:
         return
     context = _return_context(body)
+    structured_attachment_fields = set(
+        evidence.get("structured_attachment_fields") or []
+    )
     rejected: list[str] = []
     accepted: list[str] = []
     for name in ("mailing_address", "contact_person", "contact_phone"):
@@ -179,7 +182,9 @@ def _sanitize_customer_return_fields(
         if not value:
             continue
         value_present = value.casefold() in context.casefold()
-        if name == "mailing_address":
+        if name in structured_attachment_fields:
+            supported = True
+        elif name == "mailing_address":
             supported = bool(
                 context
                 and (
@@ -201,10 +206,22 @@ def _sanitize_customer_return_fields(
                 )
             )
         else:
+            adjacent_to_contact = bool(
+                context
+                and fields.get("contact_person")
+                and re.search(
+                    rf"{re.escape(str(fields['contact_person']).strip())}\s*[:：]?\s*{re.escape(value)}",
+                    context,
+                    re.IGNORECASE,
+                )
+            )
             supported = bool(
                 context
                 and value_present
-                and _FIELD_LABEL_PATTERNS[name].search(context)
+                and (
+                    _FIELD_LABEL_PATTERNS[name].search(context)
+                    or adjacent_to_contact
+                )
             )
         if not supported:
             fields.pop(name, None)
@@ -951,6 +968,7 @@ def _structured_attachment_business_data(
     """Map deterministic attachment parser output to canonical ticket fields."""
     field_aliases = {
         "customer_name": "customer_name",
+        "company_name": "customer_name",
         "contact_person": "contact_person",
         "contact_email": "contact_email",
         "contact_phone": "contact_phone",
@@ -978,6 +996,15 @@ def _structured_attachment_business_data(
                 value = attachment_fields.get(source_name)
                 if value is not None and str(value).strip() and target_name not in fields:
                     fields[target_name] = value
+            if "customer_name" not in fields:
+                company_address = str(attachment_fields.get("company_address") or "").strip()
+                first_line = company_address.splitlines()[0].strip() if company_address else ""
+                if first_line and re.search(
+                    r"(?:有限公司|公司|集团|Inc\.?|Ltd\.?)$",
+                    first_line,
+                    re.IGNORECASE,
+                ):
+                    fields["customer_name"] = first_line
         attachment_items = payload.get("extracted_items")
         if not isinstance(attachment_items, list):
             continue
@@ -996,6 +1023,7 @@ def _structured_attachment_business_data(
                 "failure_description": (
                     normalized_item.get("failure_description")
                     or normalized_item.get("failure_information")
+                    or raw_item.get("failure")
                 ),
                 "failure_information": normalized_item.get("failure_information"),
                 "data_info": normalized_item.get("data"),
@@ -1057,6 +1085,7 @@ def _merge_attachment_business_data(
 
     evidence = dict(parsed.evidence or {})
     evidence["structured_attachment_source_ids"] = source_ids
+    evidence["structured_attachment_fields"] = sorted(attachment_fields)
     parsed.extracted_fields = fields
     parsed.extracted_items = items
     parsed.conflict_fields = conflicts
@@ -1487,6 +1516,7 @@ async def create_ai_parse_candidate(
     )
     if not isinstance(parsed, AiExtractResponse) or ai_log is None:
         return None
+    ai_original_intent = normalize_intent(parsed.intent_type)
     locked_intent = normalize_intent(email.intent_type)
     locked_decision = decision_for_intent(locked_intent, reason_code=email.classification_reason_code or "PRECLASSIFICATION_LOCKED")
     # Field extraction is downstream of the authoritative preclassification.
@@ -1495,6 +1525,35 @@ async def create_ai_parse_candidate(
     # model.
     parsed.intent_type = locked_decision.intent_type
     parsed = await _enrich_ai_quality(session, parsed=parsed, email=email, attachments=attachments)
+    classification_alignment = {
+        "rule_intent": locked_decision.intent_type,
+        "ai_intent": ai_original_intent,
+        "matched": ai_original_intent == locked_decision.intent_type,
+    }
+    parsed.evidence = {
+        **(parsed.evidence or {}),
+        "classification_alignment": classification_alignment,
+    }
+    if not classification_alignment["matched"]:
+        parsed.conflict_fields = {
+            **(parsed.conflict_fields or {}),
+            "intent_type": (
+                "规则分类与 AI 原始分类不一致："
+                f"rule={locked_decision.intent_type}, ai={ai_original_intent}"
+            ),
+        }
+        mismatch_direction = "核对规则分类与 AI 原始分类不一致。"
+        existing_direction = str(parsed.manual_review_direction or "").strip()
+        parsed.manual_review_direction = (
+            f"{existing_direction}；{mismatch_direction}"
+            if existing_direction
+            else mismatch_direction
+        )
+        parsed.evidence["manual_review_direction"] = parsed.manual_review_direction
+        confidence_basis = dict(parsed.evidence.get("confidence_basis") or {})
+        confidence_basis["has_conflict_fields"] = True
+        confidence_basis["classification_alignment_matched"] = False
+        parsed.evidence["confidence_basis"] = confidence_basis
     parsed.handling_level = locked_decision.handling_level
     parsed.classification_version = email.classification_version or CLASSIFICATION_VERSION
     parsed.classification_reason_code = email.classification_reason_code or locked_decision.reason_code

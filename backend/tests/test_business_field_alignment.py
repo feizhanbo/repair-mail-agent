@@ -151,6 +151,30 @@ async def test_domestic_route_uses_board_code_when_material_code_is_different() 
 
 
 @pytest.mark.anyio
+async def test_domestic_route_uses_unique_authoritative_material_name_fallback() -> None:
+    ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
+    item = RepairTicketItem(
+        id=2,
+        ticket_id=1,
+        line_no=1,
+        material_code="Z.SM.8123V120A",
+        material_name="浮动8路电压电流源(FOVI100)_A StationSM 8123 Rev1.20",
+        board_code="FOVI",
+        board_name="浮动8路电压电流源(FOVI100)_A StationSM 8123 Rev1.20",
+    )
+    route = board("M8123", "tianjin", name="FOVI100")
+
+    result = await business_resolution.resolve_item_return_route(
+        QueueSession(execute_rows=[[], [route]]), ticket=ticket, item=item
+    )
+
+    assert result["status"] == "resolved"
+    assert result["route_source"] == "domestic_material_name_match"
+    assert item.board_code == "M8123"
+    assert item.matched_board_card_id == route.id
+
+
+@pytest.mark.anyio
 async def test_domestic_code_with_one_location_resolves_and_snapshots() -> None:
     ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
     item = RepairTicketItem(

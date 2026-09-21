@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from email.utils import parseaddr
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -23,7 +23,7 @@ from app.core.email_classification import (
     decision_for_intent,
     normalize_intent,
 )
-from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, MailFetchRecord, ParseResult, RepairTicket, RepairTicketItem
+from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, MailFetchRecord, ManualReviewTask, ParseResult, RepairTicket, RepairTicketItem
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import attachment_type, parse_attachment
@@ -37,6 +37,7 @@ from app.services.parser import (
     normalize_email_body,
 )
 from app.services.replies import create_reply_draft
+from app.services.notifications import resolve_notifications_for_target
 from app.services.ticket_safety import validate_and_mark_ready_for_export
 from app.services.tickets import (
     EMAIL_FIELDS,
@@ -45,7 +46,10 @@ from app.services.tickets import (
     serialize_email,
     serialize_parse_result,
 )
-from app.services.workflow import create_email_manual_task_if_missing, create_manual_task_if_missing
+from app.services.workflow import OPEN_TASK_STATUSES, create_email_manual_task_if_missing, create_manual_task_if_missing, transition_ticket
+
+
+ReparseTriggerSource = Literal["initial_ingress", "manual", "system_retry"]
 
 
 def attachment_file_size_kb(file_size: int | None) -> int | None:
@@ -727,6 +731,7 @@ async def ingest_email(
             user_id=user_id,
             reason="复用归档前规则解析结果并提交 AI 判断。",
             rule_parse_result_id=rule_parse.id,
+            trigger_source="initial_ingress",
         )
     return result
 
@@ -923,6 +928,90 @@ async def _try_create_reply_draft(
         return {"created": False, "error_code": error_code}
 
 
+async def _latest_ai_parse_result(
+    session: AsyncSession,
+    *,
+    email_id: int,
+) -> ParseResult | None:
+    return await session.scalar(
+        select(ParseResult)
+        .where(
+            ParseResult.email_id == email_id,
+            ParseResult.parser_type == "ai",
+        )
+        .order_by(ParseResult.created_at.desc(), ParseResult.id.desc())
+        .limit(1)
+    )
+
+
+async def _require_system_reparse_eligibility(
+    session: AsyncSession,
+    *,
+    email_id: int,
+) -> ParseResult:
+    previous = await _latest_ai_parse_result(session, email_id=email_id)
+    if previous is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SYSTEM_REPARSE_NOT_ELIGIBLE",
+        )
+    alignment = (previous.evidence or {}).get("classification_alignment")
+    classification_mismatch = isinstance(alignment, dict) and alignment.get("matched") is False
+    low_confidence = float(previous.confidence_score or 0) < float(
+        settings.AUTO_APPLY_MIN_CONFIDENCE
+    )
+    if not low_confidence and not classification_mismatch:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SYSTEM_REPARSE_NOT_ELIGIBLE",
+        )
+    return previous
+
+
+async def _resolve_recovered_ai_review_tasks(
+    session: AsyncSession,
+    *,
+    ticket: RepairTicket,
+    email_id: int,
+    user_id: int | None,
+) -> list[int]:
+    tasks = list(
+        (
+            await session.execute(
+                select(ManualReviewTask).where(
+                    ManualReviewTask.ticket_id == ticket.id,
+                    ManualReviewTask.email_id == email_id,
+                    ManualReviewTask.task_type == "ai_review_required",
+                    ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                )
+            )
+        ).scalars().all()
+    )
+    if not tasks:
+        return []
+    now = utcnow()
+    for task in tasks:
+        task.status = "resolved"
+        task.resolved_by_user_id = user_id
+        task.resolved_at = now
+        task.resolution = "重解析结果已满足自动采纳条件，系统恢复技术校验流程。"
+        await log_operation(
+            session,
+            user_id=user_id,
+            operation_type="manual_task_auto_resolved",
+            target_type="manual_review_task",
+            target_id=task.id,
+            description=task.resolution,
+            after_data={"email_id": email_id, "ticket_id": ticket.id},
+        )
+        await resolve_notifications_for_target(
+            session,
+            target_type="manual_review_task",
+            target_id=task.id,
+        )
+    return [task.id for task in tasks]
+
+
 async def reparse_email(
     session: AsyncSession,
     *,
@@ -932,10 +1021,23 @@ async def reparse_email(
     durable_attachment_stages: bool = False,
     rule_parse_result_id: int | None = None,
     mode: str = "field_extract",
+    trigger_source: ReparseTriggerSource | None = None,
 ) -> dict[str, Any]:
     email = await session.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EMAIL_NOT_FOUND")
+
+    resolved_trigger_source: ReparseTriggerSource = trigger_source or (
+        "initial_ingress"
+        if rule_parse_result_id is not None
+        else ("manual" if user_id is not None else "system_retry")
+    )
+    previous_ai_parse: ParseResult | None = None
+    if resolved_trigger_source == "system_retry":
+        previous_ai_parse = await _require_system_reparse_eligibility(
+            session,
+            email_id=email.id,
+        )
 
     conversation_body = normalize_email_body(email.text_body or html_to_text(email.html_body) or email.clean_body)
     email.clean_body = conversation_body
@@ -996,6 +1098,8 @@ async def reparse_email(
         after_data={
             "parse_result_id": rule_parse.id,
             "mode": "reuse_pre_archive_rule" if rule_parse_result_id else "explicit_reparse",
+            "trigger_source": resolved_trigger_source,
+            "previous_ai_parse_result_id": previous_ai_parse.id if previous_ai_parse else None,
         },
     )
 
@@ -1219,6 +1323,49 @@ async def reparse_email(
             if ticket_id is not None:
                 applied_ticket = await session.get(RepairTicket, ticket_id)
                 if (
+                    ai_parse.intent_type in AUTO_INTENTS
+                    and applied_ticket is not None
+                    and applied_ticket.current_status_code == "manual_review"
+                ):
+                    resolved_task_ids = await _resolve_recovered_ai_review_tasks(
+                        session,
+                        ticket=applied_ticket,
+                        email_id=email.id,
+                        user_id=user_id,
+                    )
+                    remaining_task_id = await session.scalar(
+                        select(ManualReviewTask.id)
+                        .where(
+                            ManualReviewTask.ticket_id == applied_ticket.id,
+                            ManualReviewTask.status.in_(OPEN_TASK_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if remaining_task_id is None:
+                        await transition_ticket(
+                            session,
+                            ticket=applied_ticket,
+                            to_status_code="parsed",
+                            trigger_event="reparse_validation_passed",
+                            user_id=user_id,
+                            operator_type="user" if user_id is not None else "system",
+                            reason="重解析已消除低置信或分类不一致，恢复完整技术校验。",
+                            metadata={
+                                "parse_result_id": ai_parse.id,
+                                "email_id": email.id,
+                                "resolved_task_ids": resolved_task_ids,
+                            },
+                        )
+                    else:
+                        ai_applied = {
+                            **ai_applied,
+                            "export_validation": {
+                                "status": "awaiting_manual_resolution",
+                                "reason": "NON_PARSE_MANUAL_TASKS_UNRESOLVED",
+                                "blocking_task_id": remaining_task_id,
+                            },
+                        }
+                if (
                     applied_ticket
                     and applied_ticket.current_status_code == "need_customer_info"
                     and bool(ai_parse.missing_fields)
@@ -1233,17 +1380,13 @@ async def reparse_email(
                 elif (
                     ai_parse.intent_type in AUTO_INTENTS
                     and applied_ticket is not None
-                    and applied_ticket.current_status_code == "manual_review"
+                    and applied_ticket.current_status_code != "manual_review"
                 ):
-                    ai_applied = {
-                        **ai_applied,
-                        "export_validation": {
-                            "status": "awaiting_manual_resolution",
-                            "reason": "MANUAL_REVIEW_REPARSE_REQUIRES_EXPLICIT_RESOLUTION",
-                        },
-                    }
-                elif ai_parse.intent_type in AUTO_INTENTS:
-                    validated = await validate_and_mark_ready_for_export(session, ticket_id=ticket_id, user_id=None)
+                    validated = await validate_and_mark_ready_for_export(
+                        session,
+                        ticket_id=ticket_id,
+                        user_id=user_id,
+                    )
                     ai_applied = {**ai_applied, "export_validation": validated}
                     if validated.get("status") != "ready_for_export":
                         validation_reason = "SN 核心校验或完整安全校验未通过，AI 结果已保留但不得进入可导出状态。"

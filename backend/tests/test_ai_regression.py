@@ -27,6 +27,7 @@ from app.services.ai import (
     ai_log_diagnostics,
     _normalize_customer_mailing_address,
     _problem_description_from_latest_reply,
+    _resolve_email_sn_assets,
     create_ai_parse_candidate,
 )
 
@@ -75,6 +76,24 @@ def test_problem_description_fallback_ignores_negated_problem_statement() -> Non
     email = Email(text_body="No issue was found during selfcheck.")
 
     assert _problem_description_from_latest_reply(email) is None
+
+
+@pytest.mark.anyio
+async def test_resolve_email_sn_assets_uses_master_data_model() -> None:
+    asset = SimpleNamespace(
+        sn="M81252101025023",
+        asset_status="valid",
+    )
+
+    class Session:
+        async def scalar(self, statement):
+            params = statement.compile().params
+            value = next(iter(params.values()), "")
+            return asset if str(value).upper() == asset.sn else None
+
+    email = Email(clean_body="SN M81252101025023 selfcheck FAIL")
+
+    assert await _resolve_email_sn_assets(Session(), email) == [asset]
 
 
 @pytest.mark.anyio
@@ -145,6 +164,15 @@ async def test_field_extraction_quality_uses_locked_preclassification_intent(
         "I am preparing to send SVI40 which is detected FAIL on selfcheck."
     )
     assert "problem_description" not in candidate.missing_fields
+    assert candidate.evidence["classification_alignment"] == {
+        "rule_intent": "new_repair",
+        "ai_intent": "unknown",
+        "matched": False,
+    }
+    assert "intent_type" in candidate.conflict_fields
+    assert "规则分类与 AI 原始分类不一致" in candidate.evidence["manual_review_direction"]
+    assert candidate.evidence["confidence_basis"]["has_conflict_fields"] is True
+    assert candidate.evidence["confidence_basis"]["classification_alignment_matched"] is False
 
 
 def test_customer_mailing_address_removes_only_adjacent_municipality_duplicate() -> None:
@@ -290,6 +318,44 @@ async def test_enrichment_keeps_explicit_english_post_repair_address_block() -> 
     assert enriched.evidence["quality_controls"][
         "explicit_customer_return_context"
     ]["allowed"] is True
+
+
+@pytest.mark.anyio
+async def test_enrichment_keeps_phone_adjacent_to_explicit_return_recipient() -> None:
+    class Session:
+        async def scalar(self, _statement):
+            return SimpleNamespace(sn="M81232504500155", asset_status="valid")
+
+    email = Email(
+        id=75,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 9, 20, 13, 36),
+        clean_body=(
+            "板卡需要维修，SN M81232504500155，校准Fail。\n"
+            "寄回地址：四川省成都市武侯区测试路1号，收件人：刘家利18200517485"
+        ),
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={
+            "customer_name": "测试客户有限公司",
+            "contact_person": "刘家利",
+            "contact_phone": "18200517485",
+            "mailing_address": "四川省成都市武侯区测试路1号",
+            "problem_description": "校准Fail",
+        },
+        extracted_items=[
+            {"sn": "M81232504500155", "failure_description": "校准Fail"}
+        ],
+        missing_fields={},
+        confidence_score=0.9,
+    )
+
+    enriched = await _enrich_ai_quality(Session(), parsed=parsed, email=email, attachments=[])
+
+    assert enriched.extracted_fields["contact_phone"] == "18200517485"
+    assert "contact_phone" not in enriched.missing_fields
 
 
 @pytest.mark.anyio
@@ -472,6 +538,59 @@ def test_structured_xlsx_fields_fill_ai_omissions_without_making_phone_required(
     assert merged.extracted_items[0]["sn"] == "M8123260108000171"
     assert merged.extracted_items[0]["line_no"] == 1
     assert merged.evidence["structured_attachment_source_ids"] == [30]
+
+
+@pytest.mark.anyio
+async def test_structured_repair_form_fields_survive_body_signature_filter() -> None:
+    class Session:
+        async def scalar(self, _statement):
+            return SimpleNamespace(sn="DB20292104080005", asset_status="valid")
+
+    email = Email(
+        id=76,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+        sent_at=datetime(2026, 9, 20, 13, 50),
+        clean_body="附件是维修资料卡，请安排维修。",
+    )
+    attachment = EmailAttachment(
+        id=33,
+        email_id=76,
+        file_name="repair.xlsx",
+        parse_status="parsed",
+        extracted_json={
+            "extracted_fields": {
+                "company_address": "测试半导体有限公司\n江苏省测试路1号",
+                "contact_person": "任浩",
+                "contact_phone": "13358157560",
+                "return_address": "江苏省江阴市测试大道78号",
+            },
+            "extracted_items": [
+                {
+                    "sn": "DB20292104080005",
+                    "name": "小子板",
+                    "failure": "site40K_FO_LT fail",
+                }
+            ],
+        },
+    )
+    parsed = AiExtractResponse(
+        intent_type="new_repair",
+        extracted_fields={},
+        extracted_items=[],
+        missing_fields={},
+        confidence_score=0.9,
+    )
+
+    enriched = await _enrich_ai_quality(
+        Session(), parsed=parsed, email=email, attachments=[attachment]
+    )
+
+    assert enriched.extracted_fields["customer_name"] == "测试半导体有限公司"
+    assert enriched.extracted_fields["contact_person"] == "任浩"
+    assert enriched.extracted_fields["contact_phone"] == "13358157560"
+    assert enriched.extracted_fields["mailing_address"] == "江苏省江阴市测试大道78号"
+    assert not enriched.missing_fields
 
 
 def test_multi_sn_merge_compares_canonical_sets_not_row_order() -> None:

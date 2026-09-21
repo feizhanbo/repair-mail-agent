@@ -339,7 +339,12 @@ def _rma_reply_template_type(ticket: RepairTicket) -> tuple[str, str]:
     for check in checks:
         warranty_start = _warranty_date_from_validation_check(check, "warranty_start_date")
         warranty_end = _warranty_date_from_validation_check(check, "warranty_end_date")
-        if not request_date or not warranty_start or not warranty_end or warranty_start > warranty_end or request_date < warranty_start:
+        if (
+            not request_date
+            or not warranty_end
+            or (warranty_start is not None and warranty_start > warranty_end)
+            or (warranty_start is not None and request_date < warranty_start)
+        ):
             raise RmaReplyRuleError("warranty_status_unknown", "RMA_WARRANTY_STATUS_UNKNOWN")
         warranty_flags.add(request_date <= warranty_end)
     if len(warranty_flags) != 1:

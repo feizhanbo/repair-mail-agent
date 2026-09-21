@@ -559,6 +559,22 @@ async def _finalize_database_delete(
     return job
 
 
+def _oss_deletion_operations_query(audit_log_id: int):
+    # The replay cleanup can execute inline while the background worker has
+    # already claimed the same durable deletion job.  Use a locking/current
+    # read for every operation row so the waiter observes the committed
+    # "succeeded" status instead of a repeatable-read snapshot and cannot
+    # delete a newly re-uploaded content-addressed object.
+    return (
+        select(ExternalOperationRecord)
+        .where(
+            ExternalOperationRecord.operation_type == "oss_delete",
+            ExternalOperationRecord.operation_key.like(f"delete:{audit_log_id}:%"),
+        )
+        .with_for_update()
+    )
+
+
 async def process_oss_deletion_operation(session: AsyncSession, audit_log_id: int) -> dict[str, Any]:
     audit = await session.get(OperationLog, audit_log_id, with_for_update=True)
     if audit is None or audit.operation_type not in {"attachment_deleted", "email_deleted", "ticket_deleted", "gold_test_replay_reset"}:
@@ -566,10 +582,7 @@ async def process_oss_deletion_operation(session: AsyncSession, audit_log_id: in
     operations = list(
         (
             await session.execute(
-                select(ExternalOperationRecord).where(
-                    ExternalOperationRecord.operation_type == "oss_delete",
-                    ExternalOperationRecord.operation_key.like(f"delete:{audit.id}:%"),
-                )
+                _oss_deletion_operations_query(audit.id)
             )
         ).scalars().all()
     )

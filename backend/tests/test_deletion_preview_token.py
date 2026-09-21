@@ -30,3 +30,9 @@ def test_preview_hash_is_stable_and_changes_with_closure() -> None:
     changed = deletions._canonical_hash({"resource_id": 1, "counts": {"email": 2}})
     assert first == reordered
     assert first != changed
+
+
+def test_oss_deletion_operation_query_locks_rows_for_current_read() -> None:
+    statement = deletions._oss_deletion_operations_query(42)
+
+    assert statement._for_update_arg is not None

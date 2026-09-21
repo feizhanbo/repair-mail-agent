@@ -419,7 +419,6 @@ export default function SystemPage() {
           <Descriptions.Item label="多模态 Provider">{String(integrations.multimodal_provider ?? '-')}</Descriptions.Item>
           <Descriptions.Item label="Qwen VL 模型">{String(integrations.qwen_vl_model ?? '-')}</Descriptions.Item>
           <Descriptions.Item label="SN 中转同步">{integrations.relay_sn_sync_enabled ? '开启' : '关闭'}</Descriptions.Item>
-          <Descriptions.Item label="解析结果推送">{integrations.relay_push_enabled ? '开启' : '关闭'}</Descriptions.Item>
           <Descriptions.Item label="中转配置">{integrations.relay_configured ? '已配置' : '未配置'}</Descriptions.Item>
         </Descriptions>
       </SectionPanel>

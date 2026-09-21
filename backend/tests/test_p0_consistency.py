@@ -118,6 +118,60 @@ async def test_existing_oss_object_is_reuploaded_when_content_type_changes(monke
     assert existing.upload_status == "success"
 
 
+@pytest.mark.anyio
+async def test_existing_success_metadata_reuploads_when_physical_object_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    content = b"original eml"
+    existing = OssObject(
+        bucket="test-bucket",
+        endpoint="test-endpoint",
+        object_key=_object_key(
+            source_type="raw_eml",
+            original_file_name="mail.eml",
+            sha256_hash=__import__("hashlib").sha256(content).hexdigest(),
+        ),
+        original_file_name="mail.eml",
+        safe_file_name="mail.eml",
+        content_type="message/rfc822",
+        file_size=len(content),
+        sha256_hash=__import__("hashlib").sha256(content).hexdigest(),
+        source_type="raw_eml",
+        upload_status="success",
+    )
+    session.scalar_results.append(existing)
+    calls = {"head": 0, "put": 0}
+
+    class Bucket:
+        def object_exists(self, _key):
+            calls["head"] += 1
+            return False
+
+        def put_object(self, _key, _content, *, headers=None):
+            del headers
+            calls["put"] += 1
+            return SimpleNamespace(etag="recovered-etag")
+
+    monkeypatch.setattr(storage, "_oss_configured", lambda: True)
+    monkeypatch.setattr(storage, "_build_bucket", lambda **_kwargs: Bucket())
+    monkeypatch.setattr(storage.settings, "OSS_BUCKET", "test-bucket")
+    monkeypatch.setattr(storage.settings, "OSS_ENDPOINT", "test-endpoint")
+
+    result = await storage.upload_bytes_to_oss(
+        session,
+        content=content,
+        original_file_name="mail.eml",
+        content_type="message/rfc822",
+        source_type="raw_eml",
+    )
+
+    assert result is existing
+    assert calls == {"head": 1, "put": 1}
+    assert existing.upload_status == "success"
+    assert existing.etag == "recovered-etag"
+
+
 def test_log_payload_redacts_secrets_content_and_signed_query() -> None:
     payload = sanitize_log_payload(
         {

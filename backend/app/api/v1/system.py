@@ -115,7 +115,6 @@ def _config_payload() -> dict:
             "smtp_async_enabled": settings.SMTP_ASYNC_ENABLED,
             "import_export_async_enabled": settings.IMPORT_EXPORT_ASYNC_ENABLED,
             "relay_sn_sync_enabled": settings.RELAY_SN_SYNC_ENABLED,
-            "relay_push_enabled": settings.RELAY_PUSH_ENABLED,
             "relay_configured": bool(settings.RELAY_BASE_URL and settings.RELAY_API_KEY),
             "sqlserver_relay": relay_configuration_status(),
         },

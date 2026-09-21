@@ -43,6 +43,7 @@ NON_RETRYABLE_ERROR_PARTS = {
     "NOT_FOUND", "NOT_SUPPORTED", "REQUIRED", "INVALID", "FORBIDDEN",
     "RECIPIENT_NOT_ALLOWED", "SELECTION", "FOLLOWUP_LIMIT", "TOO_LARGE",
     "TOO_MANY", "ENCRYPTED", "CORRUPT", "UNCERTAIN", "TERMINAL",
+    "NOT_ELIGIBLE",
 }
 JOB_FIELDS = (
     "id", "job_name", "job_type", "status", "resource_type", "resource_id",
@@ -217,6 +218,11 @@ async def _execute_job_command(session: AsyncSession, job: JobRunLog) -> dict[st
                 else None
             ),
             mode="field_extract",
+            trigger_source=(
+                "initial_ingress"
+                if job.job_type == "email_parse"
+                else ("manual" if user_id is not None else "system_retry")
+            ),
         )
     if job.job_type == "imap_fetch":
         from app.services.imap_fetcher import run_imap_fetch_locked

@@ -41,7 +41,7 @@ def test_system_payload_reports_split_ai_configuration_without_exposing_secrets(
     integrations = payload["integrations"]
     assert integrations["ai_configured"] is True
     assert integrations["text_ai_configured"] is True
-    assert integrations["text_ai_provider"] == "deepseek"
+    assert integrations["text_ai_provider"] == "qwen"
     assert integrations["multimodal_ai_configured"] is True
     assert integrations["multimodal_provider"] == "qwen"
     assert integrations["imap_configured"] is True

@@ -26,14 +26,15 @@ def test_public_routes_are_task_specific_and_do_not_expose_keys(monkeypatch: pyt
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-secret")
     routes = llm_gateway.public_llm_routes()
     serialized = json.dumps(routes)
-    assert routes["mail_classification"]["primary"]["profile"] == "deepseek"
+    assert routes["mail_classification"]["primary"] == {"profile": "qwen", "model": "qwen3.7-plus"}
+    assert routes["mail_classification"].get("fallback") is None
     assert routes["attachment_visual_parse"]["primary"]["profile"] == "qwen"
     assert "deepseek-secret" not in serialized
     assert "qwen-secret" not in serialized
 
 
 @pytest.mark.anyio
-async def test_transient_primary_failure_uses_configured_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_transient_classification_failure_retries_without_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "AI_API_KEY", "deepseek-key")
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
     seen: list[str] = []
@@ -47,25 +48,20 @@ async def test_transient_primary_failure_uses_configured_fallback(monkeypatch: p
 
         async def ainvoke(self, _messages):
             seen.append(self.model)
-            if self.model == "deepseek-chat":
-                raise TimeoutError("timeout")
-            raw = SimpleNamespace(content=json.dumps({"value": "fallback"}), response_metadata={}, usage_metadata={}, id="ok")
-            return {"raw": raw, "parsed": {"value": "fallback"}, "parsing_error": None}
+            raise TimeoutError("timeout")
 
     async def no_sleep(_seconds):
         return None
 
     monkeypatch.setattr(llm_gateway, "ChatOpenAI", FakeChat)
     monkeypatch.setattr(llm_gateway.asyncio, "sleep", no_sleep)
-    completion = await llm_gateway.invoke_structured(
-        task=LlmTask.MAIL_CLASSIFICATION,
-        messages=[{"role": "user", "content": "json"}],
-        response_model=RequiredOutput,
-    )
-    assert completion.parsed.value == "fallback"
-    assert completion.fallback_used is True
-    assert completion.provider_name == "qwen"
-    assert seen == ["deepseek-chat"] * 3 + ["qwen-plus"]
+    with pytest.raises(AiProviderError):
+        await llm_gateway.invoke_structured(
+            task=LlmTask.MAIL_CLASSIFICATION,
+            messages=[{"role": "user", "content": "json"}],
+            response_model=RequiredOutput,
+        )
+    assert seen == ["qwen3.7-plus"] * 3
 
 
 @pytest.mark.anyio
@@ -93,4 +89,4 @@ async def test_invalid_json_does_not_cross_provider(monkeypatch: pytest.MonkeyPa
             messages=[{"role": "user", "content": "json"}],
             response_model=RequiredOutput,
         )
-    assert seen == ["deepseek-chat"]
+    assert seen == ["qwen3.7-plus"]

@@ -7,10 +7,11 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,9 +105,14 @@ def _uid_search(
         # parsing the actual Message-ID header before the ingestion loop.
         typ, data = client.uid("SEARCH", None, "HEADER", "Message-ID", message_id)
     elif start_uid is not None:
-        typ, data = client.uid("SEARCH", None, "UID", f"{max(1, start_uid)}:*", "NOT", "FROM", settings.IMAP_USER)
+        # Self-sent mail is rejected by the deterministic payload precheck.
+        # Do not rely on provider-specific compound SEARCH behaviour here:
+        # the rmatest IMAP service has returned an empty result for a valid
+        # ``SINCE ... NOT FROM ...`` query while ``SINCE`` alone returned the
+        # expected customer mail.
+        typ, data = client.uid("SEARCH", None, "UID", f"{max(1, start_uid)}:*")
     elif since_date:
-        typ, data = client.uid("SEARCH", None, "SINCE", since_date, "NOT", "FROM", settings.IMAP_USER)
+        typ, data = client.uid("SEARCH", None, "SINCE", since_date)
     else:
         raise ImapConfigurationError("IMAP_SYNC_BOUNDARY_REQUIRED")
     if typ != "OK":
@@ -162,6 +168,37 @@ def _uid_fetch_internal_date(client: imaplib.IMAP4_SSL, uid: str) -> datetime | 
         except (UnicodeDecodeError, ValueError):
             logger.warning("Invalid IMAP INTERNALDATE", extra={"event": "imap_internaldate_invalid", "imap_uid": uid})
     return None
+
+
+def _uids_at_or_after_boundary(
+    client: imaplib.IMAP4_SSL,
+    uids: list[str],
+    boundary: datetime,
+) -> tuple[list[str], list[str]]:
+    """Apply the exact initial-sync timestamp after IMAP's day-only SEARCH.
+
+    RFC IMAP ``SINCE`` compares only the date portion of INTERNALDATE. The
+    configured boundary is a real timestamp, so candidates from the boundary
+    date must be checked locally. A missing/unparseable INTERNALDATE is kept
+    for normal ingestion rather than silently dropping customer mail.
+    """
+
+    local_boundary = boundary
+    if local_boundary.tzinfo is None:
+        local_boundary = local_boundary.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    boundary_utc = local_boundary.astimezone(timezone.utc)
+    selected: list[str] = []
+    before_boundary: list[str] = []
+    for uid in uids:
+        internal_date = _uid_fetch_internal_date(client, uid)
+        if internal_date is None:
+            selected.append(uid)
+            continue
+        if internal_date.astimezone(timezone.utc) >= boundary_utc:
+            selected.append(uid)
+        else:
+            before_boundary.append(uid)
+    return selected, before_boundary
 
 
 def _uid_validity(client: imaplib.IMAP4_SSL) -> int:
@@ -521,6 +558,15 @@ async def fetch_imap_emails(
                     message_id=None,
                     since_date=imap_since_date(sync_state.initial_sync_start_at),
                 )
+                uids, before_boundary_uids = await _mail_io(
+                    _uids_at_or_after_boundary,
+                    client,
+                    uids,
+                    sync_state.initial_sync_start_at,
+                )
+                # Advance discovery over deliberately excluded earlier mail so
+                # an empty post-boundary mailbox does not rescan it forever.
+                record_discovery(sync_state, before_boundary_uids)
             else:
                 uids = await _mail_io(
                     _uid_search,
@@ -532,6 +578,11 @@ async def fetch_imap_emails(
                 **dict(job.metadata_json or {}),
                 "sync_mode": sync_state.sync_mode,
                 "uid_validity_result": validity_result,
+                "initial_boundary_filtered_count": (
+                    len(before_boundary_uids)
+                    if sync_state.sync_mode in {"initializing", "rebaseline"}
+                    else 0
+                ),
             }
         else:
             uids = await _mail_io(_uid_search, client, message_id=message_id)

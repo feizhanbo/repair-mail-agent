@@ -4,6 +4,9 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
+from pydantic import ValidationError
+
 from app.integrations.sap_middleware.test_http import _json_payload_value
 from tools.test_relay_server import RelayBatch, RelayControl, RelayRecord, TestRelayStore
 
@@ -83,6 +86,29 @@ def test_default_control_can_lock_a_gold_rma_before_submission(tmp_path) -> None
         row["rma_no"]
         for row in store.query(["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"])
     } == {"2026081201"}
+
+
+def test_default_control_generates_six_digit_call_ids_from_requested_start(tmp_path) -> None:
+    store = TestRelayStore(tmp_path / "six-digit-call-id.sqlite3")
+    store.configure(RelayControl(call_id_start="567809"))
+    first = store.create(RelayRecord(
+        RequestID="55555555-5555-4555-8555-555555555555",
+        ticket_id=89, ticket_item_id=1, sn="SN-CALL-1",
+    ))
+    second = store.create(RelayRecord(
+        RequestID="66666666-6666-4666-8666-666666666666",
+        ticket_id=89, ticket_item_id=2, sn="SN-CALL-2",
+    ))
+
+    assert first["remote_record_key"] == "567809"
+    assert second["remote_record_key"] == "567810"
+
+
+def test_call_id_control_rejects_non_six_digit_values() -> None:
+    with pytest.raises(ValidationError, match="TEST_RELAY_CALL_ID_INVALID"):
+        RelayControl(call_id_start="56780")
+
+
 def test_test_http_payload_conversion_is_lossless_and_json_safe() -> None:
     request_id = UUID("12345678-1234-5678-1234-567812345678")
     converted = _json_payload_value(
