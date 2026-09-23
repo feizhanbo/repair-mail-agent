@@ -22,7 +22,7 @@ class MailTestPreflightError(RuntimeError):
         self.result = result
 
 
-REQUIRED_DATABASE_REVISION = "e8z3a4b5c6d7"
+REQUIRED_DATABASE_REVISION = "a0b5c6d7e8f9"
 
 
 class SmtpPreflightStageError(RuntimeError):

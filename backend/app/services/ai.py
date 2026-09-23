@@ -15,6 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.ai.prompts import PROMPTS, REPAIR_FIELD_EXTRACT, REPLY_DRAFT
+from app.ai.schemas import (
+    AttachmentContentEvidence,
+    AttachmentParseResult,
+    ExistingTicketContext,
+    MailPreclassificationResponse,
+    RepairExtractionInput,
+    RepairExtractionResult,
+    RepairThreadContext,
+)
 from app.core.email_classification import CLASSIFICATION_VERSION, decision_for_intent, normalize_intent
 from app.core.repair_items import (
     canonical_sn,
@@ -23,9 +32,9 @@ from app.core.repair_items import (
     normalize_repair_items,
 )
 from app.core.request_context import get_correlation_id
-from app.integrations.ai_provider import AiExtractResponse, AiProviderError, AiReplyDraftResponse
+from app.integrations.ai_provider import AiProviderError, AiReplyDraftResponse, NormalizedRepairCandidate
 from app.integrations.llm_gateway import LlmTask, invoke_structured, llm_task_configured
-from app.models import AiCallLog, Email, EmailAttachment, EmailThread, OssObject, ParseResult, RepairTicket, RepairTicketItem, SnAsset
+from app.models import AiCallLog, Email, EmailAttachment, EmailThread, ParseResult, RepairTicket, RepairTicketItem, SnAsset
 from app.services.business_rules import required_missing_for_values
 from app.services.common import sha256_text, to_plain, utcnow
 from app.services.logging_safety import safe_error_code
@@ -329,10 +338,65 @@ def _write_jsonl(record: dict[str, Any]) -> tuple[str, int, str]:
     return log_path.as_posix(), line_no, sha256_text(line)
 
 
+async def persist_ai_normalized_result(
+    *,
+    trace_id: str,
+    stage: str,
+    normalized_result: Any,
+    prompt_version: str,
+    schema_version: str,
+    parser_version: str,
+    email_id: int | None = None,
+    attachment_id: int | None = None,
+) -> tuple[str, int, str]:
+    """Append the backend-owned final result separately from the raw model response."""
+
+    plain_result = to_plain(normalized_result)
+    record: dict[str, Any] = {
+        "record_type": "ai_normalized_result",
+        "trace_id": trace_id,
+        "stage": stage,
+        "prompt_version": prompt_version,
+        "schema_version": schema_version,
+        "parser_version": parser_version,
+        "email_id": email_id,
+        "attachment_id": attachment_id,
+        "normalized_metadata": _payload_metadata(plain_result if isinstance(plain_result, dict) else {"value": plain_result}),
+        "created_at": utcnow().isoformat(),
+    }
+    if settings.AI_FULL_LOG_ENABLED:
+        record["normalized_result"] = sanitize_ai_detail(plain_result)
+    async with _ai_log_file_lock:
+        return await asyncio.to_thread(_write_jsonl, record)
+
+
 def _key_result(call_type: str, parsed: BaseModel | None) -> dict[str, Any] | None:
     if parsed is None:
         return None
     data = parsed.model_dump()
+    if isinstance(parsed, MailPreclassificationResponse):
+        return {
+            "intent": str(parsed.intent),
+            "reason_code": str(parsed.reason_code),
+            "candidate_count": len(parsed.candidates),
+            "needs_attachment_content": parsed.needs_attachment_content,
+            "evidence_count": len(parsed.evidence),
+        }
+    if isinstance(parsed, AttachmentContentEvidence):
+        return {
+            "candidate_field_count": len(parsed.candidate_fields),
+            "candidate_item_count": len(parsed.candidate_items),
+            "evidence_count": len(parsed.evidence),
+            "warning_count": len(parsed.warnings),
+            "has_ocr_text": bool(parsed.ocr_text),
+        }
+    if isinstance(parsed, RepairExtractionResult):
+        return {
+            "field_keys": sorted(name for name, value in data["fields"].items() if value is not None),
+            "item_count": len(data["items"]),
+            "conflict_count": len(data["conflicts"]),
+            "manual_review_suggested": bool(data["manual_review_suggestion"]["required"]),
+        }
     if call_type == "field_extract":
         return {
             "intent_type": data.get("intent_type"),
@@ -362,6 +426,8 @@ def _confidence(parsed: BaseModel | None) -> float | None:
     if parsed is None:
         return None
     value = getattr(parsed, "confidence_score", None)
+    if value is None:
+        value = getattr(parsed, "confidence", None)
     if value is None:
         return None
     return max(0.0, min(1.0, float(value)))
@@ -403,8 +469,8 @@ def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, i
 
 def _ai_call_context(call_type: str) -> tuple[str, str]:
     mapping = {
-        "field_extract": ("邮件级 DeepSeek 结构化解析", "抽取业务字段和明细"),
-        "generate_reply_draft": ("DeepSeek 回复草稿生成", "生成客户回复草稿"),
+        "field_extract": ("邮件级 Qwen 结构化解析", "抽取业务字段和明细"),
+        "generate_reply_draft": ("Qwen 回复草稿生成", "生成客户回复草稿"),
         "attachment_text_parse": ("Qwen 文本类附件解析", "解析文本、表格或文档附件"),
         "attachment_visual_parse": ("Qwen 图片/PDF 多模态解析", "解析图片或扫描 PDF 附件"),
     }
@@ -466,10 +532,13 @@ async def persist_ai_log(
     job_run_id: int | None = None,
     mail_fetch_record_id: int | None = None,
     correlation_id: str | None = None,
-    provider_name: str = "deepseek",
+    provider_name: str = "qwen",
     model_name: str | None = None,
     prompt_version: str | None = None,
     prompt_hash: str | None = None,
+    schema_version: str | None = None,
+    parser_version: str | None = None,
+    structured_output_method: str | None = None,
     route_name: str | None = None,
     route_attempt: int = 1,
     fallback_used: bool = False,
@@ -486,6 +555,9 @@ async def persist_ai_log(
         "call_type": call_type,
         "prompt_version": prompt_version,
         "prompt_hash": prompt_hash,
+        "schema_version": schema_version,
+        "parser_version": parser_version,
+        "structured_output_method": structured_output_method,
         "route_name": route_name,
         "route_attempt": route_attempt,
         "fallback_used": fallback_used,
@@ -535,6 +607,9 @@ async def persist_ai_log(
         model_name=model_name,
         prompt_version=prompt_version,
         prompt_hash=prompt_hash,
+        schema_version=schema_version,
+        parser_version=parser_version,
+        structured_output_method=structured_output_method,
         route_name=route_name,
         route_attempt=route_attempt,
         fallback_used=fallback_used,
@@ -566,6 +641,9 @@ async def persist_ai_log(
             "provider": provider_name,
             "model": model_name,
             "prompt_version": prompt_version,
+            "schema_version": schema_version,
+            "parser_version": parser_version,
+            "structured_output_method": structured_output_method,
             "route_name": route_name,
             "fallback": fallback_used,
             "attempt": attempt_count,
@@ -641,6 +719,9 @@ def _ai_log_detail_envelope(
             "provider": ai_log.provider_name,
             "model": ai_log.model_name,
             "prompt_version": ai_log.prompt_version,
+            "schema_version": ai_log.schema_version,
+            "parser_version": ai_log.parser_version,
+            "structured_output_method": ai_log.structured_output_method,
             "attempt_count": ai_log.attempt_count,
             "latency_ms": ai_log.latency_ms,
             "status": ai_log.status,
@@ -796,6 +877,9 @@ async def _run_ai_json(
             model_name=str(getattr(last_error, "model_name", "unknown")),
             prompt_version=prompt.version,
             prompt_hash=prompt.content_hash,
+            schema_version=prompt.schema_version,
+            parser_version=prompt.parser_version,
+            structured_output_method=getattr(last_error, "structured_output_method", None),
             route_name=getattr(last_error, "route_name", None),
             route_attempt=int(getattr(last_error, "route_attempt", 1)),
             fallback_used=int(getattr(last_error, "route_attempt", 1)) > 1,
@@ -823,6 +907,9 @@ async def _run_ai_json(
         model_name=completion.model_name or "unknown",
         prompt_version=prompt.version,
         prompt_hash=prompt.content_hash,
+        schema_version=prompt.schema_version,
+        parser_version=prompt.parser_version,
+        structured_output_method=completion.structured_output_method,
         route_name=completion.route_name,
         route_attempt=completion.route_attempt,
         fallback_used=completion.fallback_used,
@@ -832,11 +919,11 @@ async def _run_ai_json(
 
 
 def _summarize_output(call_type: str, parsed: BaseModel) -> str:
-    if isinstance(parsed, AiExtractResponse):
+    if isinstance(parsed, RepairExtractionResult):
         return (
-            f"intent={parsed.intent_type}; confidence={parsed.confidence_score}; "
-            f"fields={','.join(sorted(parsed.extracted_fields.keys())) or '-'}; "
-            f"missing={','.join(sorted(parsed.missing_fields.keys())) or '-'}"
+            f"confidence={parsed.confidence_score}; "
+            f"fields={','.join(name for name, value in parsed.fields.model_dump().items() if value is not None) or '-'}; "
+            f"items={len(parsed.items)}; conflicts={len(parsed.conflicts)}"
         )
     if isinstance(parsed, AiReplyDraftResponse):
         return f"subject_chars={len(parsed.subject)}; confidence={parsed.confidence_score}; risk={parsed.risk_level}"
@@ -962,138 +1049,6 @@ def _intent_requires_business_fields(intent_type: str | None) -> bool:
     return intent_type in {"new_repair", "thread_new_repair", "customer_supplement"}
 
 
-def _structured_attachment_business_data(
-    attachments: list[EmailAttachment],
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[int]]:
-    """Map deterministic attachment parser output to canonical ticket fields."""
-    field_aliases = {
-        "customer_name": "customer_name",
-        "company_name": "customer_name",
-        "contact_person": "contact_person",
-        "contact_email": "contact_email",
-        "contact_phone": "contact_phone",
-        "phone": "contact_phone",
-        "request_date": "request_date",
-        "mailing_address": "mailing_address",
-        # The legacy repair form labels the customer's own "Mailing Add" as
-        # return_address. This alias is accepted only for the deterministic
-        # attachment parser; system-calculated repair routes never enter here.
-        "return_address": "mailing_address",
-        "problem_description": "problem_description",
-        "failure_description": "problem_description",
-    }
-    fields: dict[str, Any] = {}
-    items: list[dict[str, Any]] = []
-    source_ids: list[int] = []
-    for attachment in attachments:
-        payload = attachment.extracted_json
-        if not isinstance(payload, dict) or attachment.parse_status != "parsed":
-            continue
-        source_ids.append(int(attachment.id))
-        attachment_fields = payload.get("extracted_fields")
-        if isinstance(attachment_fields, dict):
-            for source_name, target_name in field_aliases.items():
-                value = attachment_fields.get(source_name)
-                if value is not None and str(value).strip() and target_name not in fields:
-                    fields[target_name] = value
-            if "customer_name" not in fields:
-                company_address = str(attachment_fields.get("company_address") or "").strip()
-                first_line = company_address.splitlines()[0].strip() if company_address else ""
-                if first_line and re.search(
-                    r"(?:有限公司|公司|集团|Inc\.?|Ltd\.?)$",
-                    first_line,
-                    re.IGNORECASE,
-                ):
-                    fields["customer_name"] = first_line
-        attachment_items = payload.get("extracted_items")
-        if not isinstance(attachment_items, list):
-            continue
-        for index, raw_item in enumerate(attachment_items, start=1):
-            if not isinstance(raw_item, dict):
-                continue
-            normalized_item = normalize_repair_item(raw_item, default_line_no=index)
-            item = {
-                "line_no": normalized_item.get("line_no", index),
-                "sn": normalized_item.get("sn"),
-                "board_code": (
-                    normalized_item.get("board_code")
-                    or normalized_item.get("board_model")
-                ),
-                "board_name": normalized_item.get("board_name"),
-                "failure_description": (
-                    normalized_item.get("failure_description")
-                    or normalized_item.get("failure_information")
-                    or raw_item.get("failure")
-                ),
-                "failure_information": normalized_item.get("failure_information"),
-                "data_info": normalized_item.get("data"),
-                "remarks": normalized_item.get("remarks"),
-            }
-            items.append({key: value for key, value in item.items() if value is not None and str(value).strip()})
-    if not fields.get("problem_description"):
-        descriptions = [str(item["failure_description"]).strip() for item in items if item.get("failure_description")]
-        if descriptions:
-            fields["problem_description"] = "\n".join(dict.fromkeys(descriptions))
-    return fields, items, source_ids
-
-
-def _merge_attachment_business_data(
-    parsed: AiExtractResponse,
-    attachments: list[EmailAttachment],
-) -> AiExtractResponse:
-    attachment_fields, attachment_items, source_ids = _structured_attachment_business_data(attachments)
-    if not source_ids:
-        return parsed
-    fields = dict(parsed.extracted_fields or {})
-    conflicts = dict(parsed.conflict_fields or {})
-    confidences = dict(parsed.field_confidences or {})
-    for name, value in attachment_fields.items():
-        existing = fields.get(name)
-        if existing is None or not str(existing).strip():
-            fields[name] = value
-            confidences[name] = max(float(confidences.get(name) or 0), 0.99)
-        elif str(existing).strip().casefold() != str(value).strip().casefold():
-            conflicts.setdefault(name, "AI extraction conflicts with deterministic attachment parsing.")
-
-    ai_items = normalize_repair_items(
-        dict(item) for item in (parsed.extracted_items or []) if isinstance(item, dict)
-    )
-    deterministic_items = normalize_repair_items(attachment_items)
-    ai_sns = {canonical_sn(item) for item in ai_items if canonical_sn(item)}
-    deterministic_sns = {canonical_sn(item) for item in deterministic_items if canonical_sn(item)}
-    if ai_sns and deterministic_sns and ai_sns != deterministic_sns:
-        conflicts.setdefault("sn", "AI extraction conflicts with deterministic attachment parsing.")
-
-    items_by_sn = {canonical_sn(item): item for item in ai_items if canonical_sn(item)}
-    items = list(ai_items)
-    for attachment_item in deterministic_items:
-        sn = canonical_sn(attachment_item)
-        target = items_by_sn.get(sn) if sn else None
-        if target is None:
-            target = dict(attachment_item)
-            items.append(target)
-            if sn:
-                items_by_sn[sn] = target
-            continue
-        for name, value in attachment_item.items():
-            if (
-                (target.get(name) is None or (isinstance(target.get(name), str) and not target.get(name).strip()))
-                and value is not None
-                and (not isinstance(value, str) or bool(value.strip()))
-            ):
-                target[name] = value
-
-    evidence = dict(parsed.evidence or {})
-    evidence["structured_attachment_source_ids"] = source_ids
-    evidence["structured_attachment_fields"] = sorted(attachment_fields)
-    parsed.extracted_fields = fields
-    parsed.extracted_items = items
-    parsed.conflict_fields = conflicts
-    parsed.field_confidences = confidences
-    parsed.evidence = evidence
-    return parsed
-
-
 async def _request_date_source(
     session: AsyncSession,
     *,
@@ -1172,17 +1127,15 @@ def _apply_request_date_fallback(
 async def _enrich_ai_quality(
     session: AsyncSession,
     *,
-    parsed: AiExtractResponse,
+    parsed: NormalizedRepairCandidate,
     email: Email,
     attachments: list[EmailAttachment],
-) -> AiExtractResponse:
-    parsed = _merge_attachment_business_data(parsed, attachments)
+) -> NormalizedRepairCandidate:
     fields = dict(parsed.extracted_fields or {})
     missing = dict(parsed.missing_fields or {})
     conflicts = dict(parsed.conflict_fields or {})
     field_confidences = dict(parsed.field_confidences or {})
     evidence = dict(parsed.evidence or {})
-    confidence_reasons = list(parsed.confidence_reasons or [])
     manual_directions: list[str] = []
     existing_ticket: RepairTicket | None = None
     expected_supplement_fields: set[str] = set()
@@ -1247,7 +1200,7 @@ async def _enrich_ai_quality(
 
     if not fields.get("contact_email") and _valid_email(email.from_address):
         fields["contact_email"] = parseaddr(email.from_address)[1] or email.from_address
-        confidence_reasons.append("未抽取到联系邮箱，已使用来信地址作为候选联系邮箱。")
+        evidence.setdefault("derived_fields", {})["contact_email"] = {"source": "mail_from_address"}
 
     if not parsed.intent_type or parsed.intent_type == "unknown":
         conflicts.setdefault("intent_type", "邮件类型不明确，需要人工确认是否为新报修、客户补充或无关邮件。")
@@ -1336,10 +1289,6 @@ async def _enrich_ai_quality(
         "has_conflict_fields": bool(conflicts),
         "threshold": settings.CONFIDENCE_THRESHOLD,
     }
-    if confidence_reasons:
-        evidence["confidence_reasons"] = confidence_reasons
-    if parsed.original_evidence:
-        evidence["original_evidence"] = parsed.original_evidence
     auto_recover_supplement = _can_auto_recover_customer_supplement(
         intent_type=parsed.intent_type,
         existing_ticket=existing_ticket,
@@ -1402,31 +1351,8 @@ async def _enrich_ai_quality(
     parsed.conflict_fields = conflicts
     parsed.field_confidences = field_confidences
     parsed.evidence = evidence
-    parsed.confidence_reasons = confidence_reasons
     parsed.manual_review_direction = evidence.get("manual_review_direction")
     return parsed
-
-
-class MultimodalParseResult(BaseModel):
-    extracted_fields: dict[str, Any] = {}
-    extracted_items: list[dict[str, Any]] = []
-    raw_text: str = ""
-
-
-def _qwen_vl_configured() -> bool:
-    return multimodal_ai_configured()
-
-
-def _oss_url_from_object(oss_obj: OssObject) -> str:
-    from urllib.parse import urlparse
-
-    endpoint_url = oss_obj.endpoint or settings.OSS_ENDPOINT
-    parsed = urlparse(endpoint_url)
-    scheme = parsed.scheme or "https"
-    netloc = parsed.netloc or parsed.path
-    if netloc.startswith("//"):
-        netloc = netloc[2:]
-    return f"{scheme}://{oss_obj.bucket}.{netloc}/{oss_obj.object_key}"
 
 
 async def parse_attachment_multimodal(
@@ -1436,32 +1362,6 @@ async def parse_attachment_multimodal(
     from app.services.attachment_parser import parse_attachment
 
     return await parse_attachment(session, attachment)
-
-
-async def _resolve_email_sn_assets(
-    session: AsyncSession,
-    email: Email,
-) -> list[SnAsset]:
-    """Resolve valid SN master-data assets found in the email body.
-
-    The field-extraction prompt requires material_code/material_name to come
-    from SN master data instead of AI guessing.  Without an explicit master
-    snapshot in the prompt the model reports conservative low confidence, so
-    gold regression (and normal parsing) must pass the resolved assets along.
-    """
-    body = clean_email_body(email)
-    tokens = list(
-        dict.fromkeys(
-            [match.group(0).upper() for match in _BODY_TOKEN_PATTERN.finditer(body)]
-            + [match.group(0).upper() for match in _EMBEDDED_SN_PATTERN.finditer(body)]
-        )
-    )
-    assets: list[SnAsset] = []
-    for token in tokens:
-        asset = await session.scalar(select(SnAsset).where(SnAsset.sn == token))
-        if asset is not None and asset.asset_status == "valid":
-            assets.append(asset)
-    return assets
 
 
 async def create_ai_parse_candidate(
@@ -1474,109 +1374,109 @@ async def create_ai_parse_candidate(
     rule_context: dict[str, Any] | None = None,
     multimodal_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    input_payload = _email_input(email, attachments, mode)
-    if rule_context:
-        input_payload["rule_context"] = rule_context
-    if multimodal_results:
-        input_payload["multimodal_results"] = multimodal_results
-    if mode == "field_extract":
-        sn_assets = await _resolve_email_sn_assets(session, email)
-        if sn_assets:
-            input_payload["sn_master_data"] = [
-                {
-                    "sn": str(asset.sn),
-                    "material_code": str(asset.material_code or ""),
-                    "material_name": str(asset.material_name or ""),
-                    "customer_code": str(asset.customer_code or ""),
-                    "customer_name": str(asset.customer_name or ""),
-                }
-                for asset in sn_assets
-            ]
+    del multimodal_results
+    locked_intent = normalize_intent(email.intent_type)
+    rule_context = rule_context or {}
+    raw_thread = rule_context.get("thread_context") if isinstance(rule_context.get("thread_context"), dict) else {}
+    attachment_results: list[AttachmentParseResult] = []
+    ignored_legacy_attachment_ids: list[int] = []
+    for attachment in attachments:
+        payload = attachment.extracted_json
+        try:
+            attachment_results.append(AttachmentParseResult.model_validate(payload))
+        except (TypeError, ValueError):
+            if attachment.id is not None:
+                ignored_legacy_attachment_ids.append(int(attachment.id))
+    extraction_input = RepairExtractionInput(
+        locked_intent=locked_intent,
+        latest_message=clean_email_body(email),
+        thread_context=RepairThreadContext(
+            thread_id=raw_thread.get("thread_id"),
+            has_reply_headers=bool(raw_thread.get("has_reply_headers")),
+        ),
+        existing_ticket_context=ExistingTicketContext(
+            ticket_id=raw_thread.get("active_ticket_id"),
+            ticket_category=raw_thread.get("active_ticket_category"),
+            ticket_status=raw_thread.get("active_ticket_status"),
+            missing_field_names=sorted((raw_thread.get("active_ticket_missing_fields") or {}).keys()),
+            has_rma=bool(raw_thread.get("active_ticket_has_rma")),
+        ),
+        attachment_results=attachment_results,
+    )
+    input_payload = extraction_input.model_dump(mode="json")
     messages = [
         {"role": "system", "content": REPAIR_FIELD_EXTRACT.system},
-        {
-            "role": "user",
-            "content": (
-                "请输出 JSON，字段为 intent_type, extracted_fields, extracted_items, missing_fields, "
-                "conflict_fields, confidence_score, field_confidences, evidence, confidence_reasons, "
-                "manual_review_direction, original_evidence。\n"
-                f"{_safe_json(input_payload)}"
-            ),
-        },
+        {"role": "user", "content": extraction_input.model_dump_json()},
     ]
     parsed, ai_log = await _run_ai_json(
         session,
         call_type=mode,
         messages=messages,
-        response_model=AiExtractResponse,
+        response_model=RepairExtractionResult,
         input_payload=input_payload,
         input_summary=f"email_id={email.id}; attachments={len(attachments)}; mode={mode}",
         email_id=email.id,
         ticket_id=ticket_id,
     )
-    if not isinstance(parsed, AiExtractResponse) or ai_log is None:
+    if not isinstance(parsed, RepairExtractionResult) or ai_log is None:
         return None
-    ai_original_intent = normalize_intent(parsed.intent_type)
-    locked_intent = normalize_intent(email.intent_type)
     locked_decision = decision_for_intent(locked_intent, reason_code=email.classification_reason_code or "PRECLASSIFICATION_LOCKED")
-    # Field extraction is downstream of the authoritative preclassification.
-    # Quality rules (required fields and deterministic fallbacks) must use the
-    # locked ingress intent, never a legacy intent echoed by the extraction
-    # model.
-    parsed.intent_type = locked_decision.intent_type
-    parsed = await _enrich_ai_quality(session, parsed=parsed, email=email, attachments=attachments)
-    classification_alignment = {
-        "rule_intent": locked_decision.intent_type,
-        "ai_intent": ai_original_intent,
-        "matched": ai_original_intent == locked_decision.intent_type,
+    model_fields = {key: value for key, value in parsed.fields.model_dump().items() if value is not None}
+    model_items = [item.model_dump(exclude_none=True) for item in parsed.items]
+    conflict_fields = {item.field_path: item.reason for item in parsed.conflicts}
+    field_confidences = {item.path: item.score for item in parsed.field_confidences}
+    manual = parsed.manual_review_suggestion
+    evidence = {
+        "structured_evidence": [item.model_dump(mode="json") for item in parsed.evidence],
+        "structured_conflicts": [item.model_dump(mode="json") for item in parsed.conflicts],
+        "field_confidence_details": [item.model_dump(mode="json") for item in parsed.field_confidences],
+        "manual_review_suggestion": manual.model_dump(mode="json"),
+        "ignored_legacy_attachment_ids": ignored_legacy_attachment_ids,
     }
-    parsed.evidence = {
-        **(parsed.evidence or {}),
-        "classification_alignment": classification_alignment,
-    }
-    if not classification_alignment["matched"]:
-        parsed.conflict_fields = {
-            **(parsed.conflict_fields or {}),
-            "intent_type": (
-                "规则分类与 AI 原始分类不一致："
-                f"rule={locked_decision.intent_type}, ai={ai_original_intent}"
-            ),
-        }
-        mismatch_direction = "核对规则分类与 AI 原始分类不一致。"
-        existing_direction = str(parsed.manual_review_direction or "").strip()
-        parsed.manual_review_direction = (
-            f"{existing_direction}；{mismatch_direction}"
-            if existing_direction
-            else mismatch_direction
-        )
-        parsed.evidence["manual_review_direction"] = parsed.manual_review_direction
-        confidence_basis = dict(parsed.evidence.get("confidence_basis") or {})
-        confidence_basis["has_conflict_fields"] = True
-        confidence_basis["classification_alignment_matched"] = False
-        parsed.evidence["confidence_basis"] = confidence_basis
-    parsed.handling_level = locked_decision.handling_level
-    parsed.classification_version = email.classification_version or CLASSIFICATION_VERSION
-    parsed.classification_reason_code = email.classification_reason_code or locked_decision.reason_code
+    candidate = NormalizedRepairCandidate(
+        intent_type=locked_decision.intent_type,
+        handling_level=locked_decision.handling_level,
+        classification_version=email.classification_version or CLASSIFICATION_VERSION,
+        classification_reason_code=email.classification_reason_code or locked_decision.reason_code,
+        extracted_fields=model_fields,
+        extracted_items=model_items,
+        conflict_fields=conflict_fields,
+        confidence_score=parsed.confidence_score,
+        field_confidences=field_confidences,
+        evidence=evidence,
+        manual_review_direction=manual.instruction if manual.required else None,
+    )
+    candidate = await _enrich_ai_quality(session, parsed=candidate, email=email, attachments=attachments)
+    await persist_ai_normalized_result(
+        trace_id=ai_log.trace_id,
+        stage="repair_field_extract",
+        normalized_result=candidate.model_dump(),
+        prompt_version=REPAIR_FIELD_EXTRACT.version,
+        schema_version=REPAIR_FIELD_EXTRACT.schema_version,
+        parser_version=REPAIR_FIELD_EXTRACT.parser_version,
+        email_id=email.id,
+    )
 
     parse_result = ParseResult(
         email_id=email.id,
         ticket_id=ticket_id,
         parser_type="ai",
-        parser_version=REPAIR_FIELD_EXTRACT.version,
-        intent_type=parsed.intent_type,
-        handling_level=parsed.handling_level,
-        classification_version=parsed.classification_version,
-        classification_confidence=parsed.confidence_score,
-        classification_reason_code=parsed.classification_reason_code,
-        extracted_fields=parsed.extracted_fields,
-        extracted_items={"items": parsed.extracted_items},
-        missing_fields=parsed.missing_fields,
-        conflict_fields=parsed.conflict_fields,
-        confidence_score=parsed.confidence_score,
-        field_confidences=parsed.field_confidences,
+        parser_version=REPAIR_FIELD_EXTRACT.parser_version,
+        intent_type=candidate.intent_type,
+        handling_level=candidate.handling_level,
+        classification_version=candidate.classification_version,
+        classification_confidence=candidate.confidence_score,
+        classification_reason_code=candidate.classification_reason_code,
+        classification_model_reason_code=email.classification_model_reason_code,
+        classification_outcome_code=email.classification_outcome_code,
+        extracted_fields=candidate.extracted_fields,
+        extracted_items={"items": candidate.extracted_items},
+        missing_fields=candidate.missing_fields,
+        conflict_fields=candidate.conflict_fields,
+        confidence_score=candidate.confidence_score,
+        field_confidences=candidate.field_confidences,
         evidence={
-            **parsed.evidence,
-            "candidate_intents": parsed.candidate_intents,
+            **candidate.evidence,
             "source_type": "ai",
             "trace_id": ai_log.trace_id,
             "ai_call_log_id": ai_log.id,
@@ -1585,6 +1485,8 @@ async def create_ai_parse_candidate(
             "route_name": ai_log.route_name,
             "fallback_used": ai_log.fallback_used,
             "prompt_version": REPAIR_FIELD_EXTRACT.version,
+            "schema_version": REPAIR_FIELD_EXTRACT.schema_version,
+            "parser_version": REPAIR_FIELD_EXTRACT.parser_version,
             "mode": mode,
         },
         apply_status="pending",

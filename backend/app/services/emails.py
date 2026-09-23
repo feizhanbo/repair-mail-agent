@@ -27,6 +27,7 @@ from app.models import Email, EmailAttachment, EmailThread, EmailTicketLink, Mai
 from app.schemas.business import EmailIngestRequest
 from app.services.ai import create_ai_parse_candidate
 from app.services.attachment_parser import attachment_type, parse_attachment
+from app.ai.schemas import ATTACHMENT_SCHEMA_VERSION, AttachmentParseResult
 from app.services.audit import log_operation, log_system_event
 from app.services.common import address_domain, model_to_dict, normalize_message_id, normalize_subject, paginate_scalars, sha256_text, to_plain, utcnow
 from app.services.parser import (
@@ -56,6 +57,16 @@ def attachment_file_size_kb(file_size: int | None) -> int | None:
     if file_size is None:
         return None
     return max(1, (int(file_size) + 1023) // 1024)
+
+
+def _is_current_attachment_result(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    try:
+        result = AttachmentParseResult.model_validate(payload)
+    except (TypeError, ValueError):
+        return False
+    return result.schema_version == ATTACHMENT_SCHEMA_VERSION
 
 
 def serialize_attachment(attachment: EmailAttachment, email: Email | None = None) -> dict[str, Any]:
@@ -97,6 +108,9 @@ async def ingest_minimal_email(
     handling_level: str,
     classification_confidence: float,
     classification_reason_code: str,
+    classification_model_reason_code: str | None = None,
+    classification_outcome_code: str | None = None,
+    classification_version: str = CLASSIFICATION_VERSION,
     priority: str = "normal",
 ) -> dict[str, Any]:
     """Persist SECOND/UNKNOWN without thread, ticket, attachment OSS or business workflow."""
@@ -140,9 +154,11 @@ async def ingest_minimal_email(
         processing_stage="minimal_persisted",
         intent_type=normalize_intent(intent_type),
         handling_level=handling_level,
-        classification_version="rma-mail-preclassification-v1",
+        classification_version=classification_version,
         classification_confidence=classification_confidence,
         classification_reason_code=classification_reason_code,
+        classification_model_reason_code=classification_model_reason_code,
+        classification_outcome_code=classification_outcome_code,
         retryable=False,
         created_at=created_at,
         updated_at=created_at,
@@ -351,6 +367,8 @@ async def export_emails(
                 "classification_version": email.classification_version,
                 "classification_confidence": email.classification_confidence,
                 "classification_reason_code": email.classification_reason_code,
+                "classification_model_reason_code": email.classification_model_reason_code,
+                "classification_outcome_code": email.classification_outcome_code,
                 "parse_status": email.parse_status,
                 "received_at": email.received_at,
                 "attachment_count": attachment_count,
@@ -749,7 +767,7 @@ def _parse_requires_manual(
     ):
         return True
     # A clear repair request with only explicit missing fields is exactly the
-    # automatic follow-up path.  DeepSeek commonly lowers the aggregate score
+    # automatic follow-up path. Models commonly lower the aggregate score
     # because those fields are absent; forcing such mail into manual review
     # prevents the system from asking for the missing information it already
     # identified.  Keep the strict auto-apply threshold for otherwise complete
@@ -1109,7 +1127,15 @@ async def reparse_email(
 
     multimodal_results: list[dict[str, Any]] = []
     for attachment in attachments:
-        if attachment.parse_status in {"parsed", "skipped", "skipped_decorative", "unsupported"}:
+        current_attachment_schema = (
+            ATTACHMENT_SCHEMA_VERSION
+            if _is_current_attachment_result(attachment.extracted_json)
+            else None
+        )
+        reusable = attachment.parse_status in {"skipped", "skipped_decorative", "unsupported"} or (
+            attachment.parse_status == "parsed" and current_attachment_schema == ATTACHMENT_SCHEMA_VERSION
+        )
+        if reusable:
             attachment_result = attachment.extracted_json
         else:
             attachment_result = await parse_attachment(session, attachment)

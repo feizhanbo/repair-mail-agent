@@ -34,6 +34,8 @@ class ParseResult(CreatedAtMixin, Base):
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
     classification_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_model_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_outcome_code: Mapped[str | None] = mapped_column(String(100))
     extracted_fields: Mapped[dict | None] = mapped_column(mysql.JSON)
     extracted_items: Mapped[dict | None] = mapped_column(mysql.JSON)
     missing_fields: Mapped[dict | None] = mapped_column(mysql.JSON)

@@ -263,6 +263,8 @@ async def export_emails(
         "classification_version",
         "classification_confidence",
         "classification_reason_code",
+        "classification_model_reason_code",
+        "classification_outcome_code",
         "parse_status",
         "received_at",
         "attachment_count",

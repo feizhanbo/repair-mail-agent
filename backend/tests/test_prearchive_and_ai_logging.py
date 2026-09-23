@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -10,7 +11,7 @@ from app.config import settings
 from app.models import AiCallLog, Email, EmailAttachment
 from app.schemas.business import EmailIngestRequest
 from app.services import ai, email_preview
-from app.services.ai import read_ai_log_detail, sanitize_ai_detail
+from app.services.ai import persist_ai_normalized_result, read_ai_log_detail, sanitize_ai_detail
 from app.services.attachment_precheck import (
     detect_archive_format,
     engineering_reference_metadata,
@@ -201,7 +202,7 @@ def test_engineering_archive_ai_input_contains_only_classification_metadata() ->
     assert "parse_error" not in item
     assert "extracted_fields" not in item["classification"]
     assert "extracted_items" not in item["classification"]
-    assert ai._structured_attachment_business_data([attachment]) == ({}, [], [])
+    assert not hasattr(ai, "_structured_attachment_business_data")
 
 
 def test_ai_detail_preserves_prompts_but_redacts_transport_secrets() -> None:
@@ -221,6 +222,25 @@ def test_ai_detail_preserves_prompts_but_redacts_transport_secrets() -> None:
     assert result["image_url"].endswith("#SIGNED_QUERY_REDACTED")
     assert result["data"]["binary_ref"] is True
     assert result["total_tokens"] == 42
+
+
+@pytest.mark.anyio
+async def test_final_backend_normalized_result_is_trace_linked_in_jsonl(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AI_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "AI_FULL_LOG_ENABLED", True)
+    path, line_no, _record_hash = await persist_ai_normalized_result(
+        trace_id="trace-normalized",
+        stage="repair_field_extract",
+        normalized_result={"intent_type": "new_repair", "missing_fields": {}},
+        prompt_version="rma-repair-field-extract-v3",
+        schema_version="rma-repair-extraction-schema-v3",
+        parser_version="rma-repair-normalizer-v3",
+        email_id=9,
+    )
+    record = json.loads(Path(path).read_text(encoding="utf-8").splitlines()[line_no - 1])
+    assert record["record_type"] == "ai_normalized_result"
+    assert record["trace_id"] == "trace-normalized"
+    assert record["normalized_result"]["intent_type"] == "new_repair"
 
 
 def test_email_html_preview_blocks_active_and_remote_content() -> None:

@@ -34,8 +34,9 @@ async def test_classification_returns_canonical_level(monkeypatch: pytest.Monkey
     async def fake_gateway(**kwargs):
         model = kwargs["response_model"]
         return SimpleNamespace(parsed=model(
-            intent="new_repair", confidence=0.93, candidates=[], reason_code="SUBJECT_AND_BODY_MATCH",
-            needs_attachment_content=False, evidence=["subject"],
+            intent="new_repair", confidence=0.93, candidates=[], reason_code="EXPLICIT_NEW_REPAIR",
+            needs_attachment_content=False,
+            evidence=[{"source_type": "subject", "text": "设备报修", "attachment_id": None, "file_name": None}],
         ))
 
     monkeypatch.setattr(mail_preclassification, "invoke_structured", fake_gateway)
@@ -50,12 +51,17 @@ async def test_low_confidence_is_forced_unknown(monkeypatch: pytest.MonkeyPatch)
 
     async def fake_gateway(**kwargs):
         model = kwargs["response_model"]
-        return SimpleNamespace(parsed=model(intent="new_repair", confidence=0.5, reason_code="WEAK"))
+        return SimpleNamespace(parsed=model(
+            intent="new_repair", confidence=0.5, candidates=[], reason_code="EXPLICIT_NEW_REPAIR",
+            needs_attachment_content=False, evidence=[],
+        ))
 
     monkeypatch.setattr(mail_preclassification, "invoke_structured", fake_gateway)
     decision = await mail_preclassification.classify_mail(_payload())
     assert decision.handling_level == "unknown"
     assert decision.reason_code == "PRECLASSIFICATION_LOW_CONFIDENCE"
+    assert decision.model_reason_code == "EXPLICIT_NEW_REPAIR"
+    assert decision.outcome_code == "PRECLASSIFICATION_LOW_CONFIDENCE"
 
 
 @pytest.mark.anyio
@@ -68,6 +74,21 @@ async def test_provider_failure_is_forced_unknown(monkeypatch: pytest.MonkeyPatc
     decision = await mail_preclassification.classify_mail(_payload())
     assert decision.intent_type == "unknown"
     assert decision.reason_code == "PRECLASSIFICATION_PROVIDER_FAILED"
+    assert decision.model_reason_code is None
+    assert decision.outcome_code == "PRECLASSIFICATION_PROVIDER_FAILED"
+
+
+@pytest.mark.anyio
+async def test_schema_failure_has_distinct_backend_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_gateway(**kwargs):
+        del kwargs
+        raise AiProviderError("QWEN_PROVIDER_OUTPUT_SCHEMA_INVALID")
+
+    monkeypatch.setattr(mail_preclassification, "invoke_structured", fake_gateway)
+    decision = await mail_preclassification.classify_mail(_payload())
+    assert decision.intent_type == "unknown"
+    assert decision.reason_code == "PRECLASSIFICATION_SCHEMA_FAILED"
+    assert decision.outcome_code == "PRECLASSIFICATION_SCHEMA_FAILED"
 
 
 def test_transient_attachment_evidence_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,9 +110,9 @@ def test_preclassification_context_uses_real_latest_reply_and_thread_summary() -
         payload,
         thread_summary={"thread_id": 9, "ticket_status": "need_customer_info"},
     )
-    assert context["latest_reply_segment"] == "补充 SN001"
-    assert "SN999" in context["body"]
-    assert context["thread_summary"]["thread_id"] == 9
+    assert context.latest_message == "补充 SN001"
+    assert "SN999" in context.conversation_body
+    assert context.thread_context.thread_id == 9
 
 
 def test_rule_analysis_exposes_only_whitelisted_ai_signals() -> None:
@@ -115,7 +136,7 @@ def test_rule_analysis_exposes_only_whitelisted_ai_signals() -> None:
 def test_preclassification_context_accepts_exact_rule_signal_shape() -> None:
     signals = {"has_reply_chain": True, "body_has_sn": True, "matched_keywords": ["报修", "维修"]}
     context = mail_preclassification._context(_payload(), rule_signals=signals)
-    assert context["rule_signals"] == signals
+    assert context.rule_signals.model_dump() == signals
 
 
 @pytest.mark.anyio
@@ -126,7 +147,9 @@ async def test_visual_evidence_routes_to_qwen_vl(monkeypatch: pytest.MonkeyPatch
         seen["task"] = kwargs["task"]
         model = kwargs["response_model"]
         return SimpleNamespace(parsed=model(
-            intent="new_repair", confidence=0.91, reason_code="IMAGE_EVIDENCE", evidence=["image"],
+            intent="new_repair", confidence=0.91, candidates=[], reason_code="EXPLICIT_NEW_REPAIR",
+            needs_attachment_content=False,
+            evidence=[{"source_type": "attachment_content", "text": "image evidence", "attachment_id": None, "file_name": "fault.png"}],
         ))
 
     monkeypatch.setattr(mail_preclassification, "invoke_structured", fake_gateway)
@@ -134,5 +157,5 @@ async def test_visual_evidence_routes_to_qwen_vl(monkeypatch: pytest.MonkeyPatch
         _payload(),
         attachment_evidence=[{"file_name": "fault.png", "data_url": "data:image/png;base64,cG5n"}],
     )
-    assert seen["task"] == LlmTask.ATTACHMENT_VISUAL_PARSE
+    assert seen["task"] == LlmTask.MAIL_CLASSIFICATION_VISUAL
     assert decision.intent_type == "new_repair"

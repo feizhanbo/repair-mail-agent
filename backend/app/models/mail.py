@@ -127,6 +127,8 @@ class Email(TimestampMixin, Base):
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[Any | None] = mapped_column(mysql.DECIMAL(5, 4))
     classification_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_model_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_outcome_code: Mapped[str | None] = mapped_column(String(100))
     duplicate_of_email_id: Mapped[int | None] = mapped_column(mysql.BIGINT(unsigned=True), ForeignKey("emails.id", name="fk_emails_duplicate_of"))
     terminal_reason_code: Mapped[str | None] = mapped_column(String(100))
     last_error_code: Mapped[str | None] = mapped_column(String(100))

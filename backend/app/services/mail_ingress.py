@@ -94,6 +94,8 @@ def _public_result(fetch_record: MailFetchRecord, decision, *, email: dict[str, 
             "handling_level": decision.handling_level,
             "confidence": decision.confidence,
             "reason_code": decision.reason_code,
+            "model_reason_code": decision.model_reason_code,
+            "outcome_code": decision.outcome_code,
             "evidence": decision.evidence,
         },
         "job_id": getattr(job, "id", None),
@@ -166,7 +168,11 @@ async def process_preclassified_ingress(
     fetch_record.classification_version = decision.classification_version
     fetch_record.classification_confidence = decision.confidence
     fetch_record.classification_reason_code = decision.reason_code
+    fetch_record.classification_model_reason_code = decision.model_reason_code
+    fetch_record.classification_outcome_code = decision.outcome_code
     fetch_record.classification_evidence = {
+        "model_reason_code": decision.model_reason_code,
+        "outcome_code": decision.outcome_code,
         "candidates": decision.candidates,
         "evidence": decision.evidence,
         "needs_attachment_content": decision.needs_attachment_content,
@@ -240,6 +246,9 @@ async def _persist_classified_mail(
             session, payload=payload, intent_type=decision.intent_type,
             handling_level=decision.handling_level, classification_confidence=decision.confidence,
             classification_reason_code=decision.reason_code,
+            classification_model_reason_code=decision.model_reason_code,
+            classification_outcome_code=decision.outcome_code,
+            classification_version=decision.classification_version,
             priority="high" if decision.handling_level == "unknown" else "normal",
         )
         fetch_record.email_id = ingest.get("email", {}).get("id")
@@ -268,6 +277,8 @@ async def _persist_classified_mail(
         email.classification_version = decision.classification_version
         email.classification_confidence = decision.confidence
         email.classification_reason_code = decision.reason_code
+        email.classification_model_reason_code = decision.model_reason_code
+        email.classification_outcome_code = decision.outcome_code
         email.persistence_tier = "business"
     job = None
     if auto_parse and not ingest.get("duplicate"):

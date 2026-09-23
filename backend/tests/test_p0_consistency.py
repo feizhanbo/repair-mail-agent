@@ -234,7 +234,7 @@ def test_auto_apply_uses_dedicated_high_confidence_threshold(monkeypatch: pytest
     monkeypatch.setattr("app.services.emails.settings.AUTO_APPLY_MIN_CONFIDENCE", 0.85)
     candidate = ParseResult(
         email_id=1,
-        parser_type="deepseek",
+        parser_type="ai",
         intent_type="new_repair",
         confidence_score=0.84,
         missing_fields={},
@@ -245,6 +245,20 @@ def test_auto_apply_uses_dedicated_high_confidence_threshold(monkeypatch: pytest
     assert _parse_requires_manual(candidate, []) is False
 
 
+def test_model_manual_review_suggestion_does_not_control_backend_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.emails.settings.AUTO_APPLY_MIN_CONFIDENCE", 0.85)
+    candidate = ParseResult(
+        email_id=1,
+        parser_type="ai",
+        intent_type="new_repair",
+        confidence_score=0.95,
+        missing_fields={},
+        conflict_fields={},
+        evidence={"manual_review_direction": "模型建议人工确认，但没有后端门控原因。"},
+    )
+    assert _parse_requires_manual(candidate, []) is False
+
+
 def test_clear_incomplete_repair_uses_followup_path_below_auto_apply_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -252,7 +266,7 @@ def test_clear_incomplete_repair_uses_followup_path_below_auto_apply_threshold(
     monkeypatch.setattr("app.services.emails.settings.CONFIDENCE_THRESHOLD", 0.70)
     candidate = ParseResult(
         email_id=1,
-        parser_type="deepseek",
+        parser_type="ai",
         intent_type="new_repair",
         confidence_score=0.75,
         missing_fields={"contact_phone": "missing"},
@@ -266,7 +280,7 @@ def test_clear_incomplete_repair_uses_followup_path_below_auto_apply_threshold(
 def test_skipped_engineering_archive_does_not_require_manual_review() -> None:
     candidate = ParseResult(
         email_id=1,
-        parser_type="deepseek",
+        parser_type="ai",
         intent_type="new_repair",
         confidence_score=0.95,
         missing_fields={},
@@ -296,7 +310,7 @@ def test_prc_failure_only_blocks_when_customer_fields_are_still_missing() -> Non
     )
     candidate = ParseResult(
         email_id=1,
-        parser_type="deepseek",
+        parser_type="ai",
         intent_type="new_repair",
         confidence_score=0.95,
         missing_fields={},

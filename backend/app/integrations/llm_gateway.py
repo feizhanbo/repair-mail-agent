@@ -14,13 +14,14 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
-from app.integrations.ai_provider import AiJsonCompletion, AiProviderError, _normalize_response_payload
+from app.integrations.ai_provider import AiJsonCompletion, AiProviderError
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class LlmTask(StrEnum):
     MAIL_CLASSIFICATION = "mail_classification"
+    MAIL_CLASSIFICATION_VISUAL = "mail_classification_visual"
     REPAIR_FIELD_EXTRACT = "repair_field_extract"
     REPLY_DRAFT = "reply_draft"
     ATTACHMENT_TEXT_PARSE = "attachment_text_parse"
@@ -46,6 +47,7 @@ class LlmRoute:
     max_output_tokens: int | None
     requires_json: bool
     requires_vision: bool
+    structured_output_method: str
 
 
 def _setting_value(name: str) -> str:
@@ -95,6 +97,7 @@ def load_llm_routes() -> dict[LlmTask, LlmRoute]:
             max_retries=max(0, int(row.get("max_retries", 0))),
             max_output_tokens=int(row["max_output_tokens"]) if row.get("max_output_tokens") else None,
             requires_json=bool(row.get("requires_json", True)), requires_vision=requires_vision,
+            structured_output_method=str(row.get("structured_output_method") or "json_schema"),
         )
     return routes
 
@@ -107,6 +110,7 @@ def public_llm_routes() -> dict[str, Any]:
             "timeout_seconds": route.timeout_seconds,
             "max_retries": route.max_retries,
             "requires_vision": route.requires_vision,
+            "structured_output_method": route.structured_output_method,
         }
         for task, route in load_llm_routes().items()
     }
@@ -137,7 +141,10 @@ def _map_invocation_error(provider: str, exc: Exception) -> AiProviderError:
 
 def _fallback_allowed(exc: AiProviderError) -> bool:
     value = str(exc).upper()
-    if any(marker in value for marker in ("TIMEOUT", "RATE_LIMIT", "HTTP_429", "REQUEST_FAILED")):
+    if any(marker in value for marker in (
+        "TIMEOUT", "RATE_LIMIT", "HTTP_429", "REQUEST_FAILED",
+        "OUTPUT_NOT_JSON", "OUTPUT_SCHEMA_INVALID",
+    )):
         return True
     return any(f"HTTP_{status}" in value for status in range(500, 600))
 
@@ -161,28 +168,45 @@ async def _invoke_endpoint(
         error.route_name = endpoint.profile  # type: ignore[attr-defined]
         error.model_name = endpoint.model  # type: ignore[attr-defined]
         error.route_attempt = route_attempt  # type: ignore[attr-defined]
+        error.structured_output_method = route.structured_output_method  # type: ignore[attr-defined]
         raise error
+    schema = response_model.model_json_schema()
+    response_format = (
+        {"type": "json_schema", "json_schema": {"name": response_model.__name__, "strict": True, "schema": schema}}
+        if route.structured_output_method == "json_schema"
+        else {"type": "json_object"}
+    )
     request_payload = {
         "model": endpoint.model,
         "messages": [{"role": str(item.get("role") or "user"), "content": item.get("content")} for item in messages],
-        "temperature": actual_temperature, "response_format": {"type": "json_object"},
+        "temperature": actual_temperature, "response_format": response_format,
         "task": route.task.value, "framework": "langchain", "route": endpoint.profile,
         "route_attempt": route_attempt,
     }
-    kwargs: dict[str, Any] = {"max_tokens": route.max_output_tokens} if route.max_output_tokens else {}
+    kwargs: dict[str, Any] = {}
+    if route.max_output_tokens:
+        kwargs["max_tokens"] = route.max_output_tokens
     model = ChatOpenAI(
         api_key=endpoint.api_key, base_url=endpoint.base_url, model=endpoint.model,
         timeout=route.timeout_seconds, max_retries=0, temperature=actual_temperature, **kwargs,
     )
     started = time.perf_counter()
     try:
-        result = await model.with_structured_output(method="json_mode", include_raw=True).ainvoke(messages)
+        structured_kwargs: dict[str, Any] = {
+            "method": route.structured_output_method,
+            "include_raw": True,
+        }
+        if route.structured_output_method == "json_schema":
+            structured_kwargs["strict"] = True
+        structured = model.with_structured_output(response_model, **structured_kwargs)
+        result = await structured.ainvoke(messages)
     except Exception as exc:
         error = _map_invocation_error(endpoint.profile, exc)
         error.request_payload = request_payload  # type: ignore[attr-defined]
         error.route_name = endpoint.profile  # type: ignore[attr-defined]
         error.model_name = endpoint.model  # type: ignore[attr-defined]
         error.route_attempt = route_attempt  # type: ignore[attr-defined]
+        error.structured_output_method = route.structured_output_method  # type: ignore[attr-defined]
         raise error from exc
     latency_ms = int((time.perf_counter() - started) * 1000)
     trace_id = uuid.uuid4().hex
@@ -193,7 +217,10 @@ async def _invoke_endpoint(
     output_text = getattr(raw, "content", "") if raw is not None else ""
     if isinstance(output_text, list):
         output_text = json.dumps(output_text, ensure_ascii=False)
-    if isinstance(parsed_value, dict):
+    if isinstance(parsed_value, BaseModel):
+        parsed_json = parsed_value.model_dump(mode="json")
+        output_text = output_text or parsed_value.model_dump_json()
+    elif isinstance(parsed_value, dict):
         parsed_json = parsed_value
         output_text = output_text or json.dumps(parsed_value, ensure_ascii=False)
     else:
@@ -206,9 +233,10 @@ async def _invoke_endpoint(
             error.request_payload = request_payload  # type: ignore[attr-defined]
             error.response_payload = response_payload  # type: ignore[attr-defined]
             error.latency_ms = latency_ms  # type: ignore[attr-defined]
+            error.structured_output_method = route.structured_output_method  # type: ignore[attr-defined]
             raise error from exc
     try:
-        parsed = response_model.model_validate(_normalize_response_payload(parsed_json, response_model))
+        parsed = response_model.model_validate(parsed_json)
     except ValidationError as exc:
         error = _error(endpoint.profile, "OUTPUT_SCHEMA_INVALID", exc)
         error.raw_output = str(output_text)  # type: ignore[attr-defined]
@@ -219,18 +247,21 @@ async def _invoke_endpoint(
         error.route_name = endpoint.profile  # type: ignore[attr-defined]
         error.model_name = endpoint.model  # type: ignore[attr-defined]
         error.route_attempt = route_attempt  # type: ignore[attr-defined]
+        error.structured_output_method = route.structured_output_method  # type: ignore[attr-defined]
         raise error from exc
     if parsing_error is not None:
         error = _error(endpoint.profile, "OUTPUT_SCHEMA_INVALID", parsing_error)
         error.route_name = endpoint.profile  # type: ignore[attr-defined]
         error.model_name = endpoint.model  # type: ignore[attr-defined]
         error.route_attempt = route_attempt  # type: ignore[attr-defined]
+        error.structured_output_method = route.structured_output_method  # type: ignore[attr-defined]
         raise error
     return AiJsonCompletion(
         trace_id=trace_id, request_payload=request_payload, response_payload=response_payload,
         output_text=str(output_text), parsed=parsed, latency_ms=latency_ms,
         task=route.task.value, route_name=endpoint.profile, provider_name=endpoint.profile,
         model_name=endpoint.model, route_attempt=route_attempt, fallback_used=route_attempt > route.max_retries + 1,
+        structured_output_method=route.structured_output_method,
     )
 
 

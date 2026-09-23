@@ -187,6 +187,8 @@ EMAIL_FIELDS = (
     "classification_version",
     "classification_confidence",
     "classification_reason_code",
+    "classification_model_reason_code",
+    "classification_outcome_code",
     "duplicate_of_email_id",
     "terminal_reason_code",
     "last_error_code",
@@ -278,6 +280,8 @@ def serialize_parse_result(parse_result: ParseResult) -> dict[str, Any]:
             "classification_version",
             "classification_confidence",
             "classification_reason_code",
+            "classification_model_reason_code",
+            "classification_outcome_code",
             "extracted_fields",
             "extracted_items",
             "missing_fields",
@@ -1648,6 +1652,8 @@ async def apply_parse_result(
     email.classification_version = parse_result.classification_version
     email.classification_confidence = parse_result.classification_confidence or parse_result.confidence_score
     email.classification_reason_code = parse_result.classification_reason_code
+    email.classification_model_reason_code = parse_result.classification_model_reason_code
+    email.classification_outcome_code = parse_result.classification_outcome_code
     email.processing_stage = "completed"
     email.terminal_reason_code = "EMAIL_PROCESSING_COMPLETED"
     email.last_error_code = None

@@ -88,15 +88,15 @@ class Settings(BaseSettings):
     OSS_ACCESS_KEY: str = ""
     OSS_SECRET_KEY: str = ""
 
-    AI_PROVIDER: str = "deepseek"
+    AI_PROVIDER: str = "qwen"
     AI_API_KEY: str = ""
-    AI_MODEL: str = "deepseek-chat"
-    AI_BASE_URL: str = "https://api.deepseek.com"
+    AI_MODEL: str = "qwen3.7-plus"
+    AI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_RETRIES: int = 2
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
-    AI_PROMPT_VERSION: str = "deepseek-v4-json-v1"
+    AI_PROMPT_VERSION: str = "rma-structured-output-v3"
     AI_FULL_LOG_ENABLED: bool = True
     AI_FULL_LOG_RETENTION_DAYS: int = 30
     AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
 
     MULTIMODAL_PROVIDER: str = "qwen"
     QWEN_API_KEY: str = ""
-    QWEN_MODEL: str = "qwen-plus"
+    QWEN_MODEL: str = "qwen3.7-plus"
     QWEN_VL_MODEL: str = "qwen-vl-plus"
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 

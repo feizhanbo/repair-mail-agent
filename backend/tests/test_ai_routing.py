@@ -32,7 +32,7 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
     seen: dict[str, object] = {}
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
     monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
-    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen-plus")
+    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen3.7-plus")
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
 
     async def fake_invoke_structured(*, task, messages, response_model, temperature):
@@ -40,10 +40,13 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
         seen["task"] = task
         return SimpleNamespace(
             parsed=response_model(
-                file_type="image",
-                extracted_fields={"sn": "SN001"},
-                extracted_items=[{"sn": "SN001"}],
-                raw_text="SN001",
+                summary="visual attachment",
+                key_points=["SN001"],
+                candidate_fields=[],
+                candidate_items=[],
+                evidence=[],
+                warnings=[],
+                ocr_text="SN001",
             )
         )
 
@@ -71,4 +74,6 @@ async def test_multimodal_attachment_uses_qwen_vl_model(monkeypatch: pytest.Monk
 
     assert seen["task"] == LlmTask.ATTACHMENT_VISUAL_PARSE
     assert result is not None
-    assert result["extracted_fields"] == {"sn": "SN001"}
+    assert result["metadata"]["file_type"] == "image"
+    assert result["raw_text"] is None
+    assert result["ocr_text"] == "SN001"

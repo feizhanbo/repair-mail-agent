@@ -8,10 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.integrations.ai_provider import (
-    AiExtractResponse,
     AiReplyDraftResponse,
-    _normalize_response_payload,
+    NormalizedRepairCandidate,
 )
+from app.ai.schemas import RepairExtractionResult
 from app.config import settings
 from app.integrations.llm_gateway import public_llm_routes
 from app.core.repair_items import normalize_repair_item, normalize_repair_items
@@ -22,12 +22,10 @@ from app.services.ai import (
     _enrich_ai_quality,
     _apply_deterministic_supplement_fields,
     _key_result,
-    _merge_attachment_business_data,
     _status_for,
     ai_log_diagnostics,
     _normalize_customer_mailing_address,
     _problem_description_from_latest_reply,
-    _resolve_email_sn_assets,
     create_ai_parse_candidate,
 )
 
@@ -38,21 +36,30 @@ def anyio_backend() -> str:
 
 
 def test_ai_extract_schema_accepts_sample_output() -> None:
-    parsed = AiExtractResponse.model_validate(
+    parsed = RepairExtractionResult.model_validate(
         {
-            "intent_type": "new_repair",
-            "extracted_fields": {"contact_email": "customer@example.com", "problem_description": "设备无法开机"},
-            "extracted_items": [{"line_no": 1, "sn": "SN202607040001", "failure_description": "无法开机"}],
-            "missing_fields": {},
-            "conflict_fields": {},
+            "fields": {
+                "customer_name": None, "contact_person": None, "contact_phone": None,
+                "contact_email": "customer@example.com", "request_date": None,
+                "mailing_address": None, "problem_description": "设备无法开机",
+            },
+            "items": [{
+                "line_no": 1, "sn": "SN202607040001", "board_code": None,
+                "board_name": None, "failure_description": "无法开机", "remarks": None,
+            }],
+            "conflicts": [],
             "confidence_score": 0.86,
-            "field_confidences": {"sn": 0.9, "problem_description": 0.8},
-            "evidence": {"sn": "邮件正文第 2 行"},
+            "field_confidences": [{"path": "items[0].sn", "score": 0.9, "reasons": ["正文明确标注"]}],
+            "evidence": [{
+                "field_path": "items[0].sn", "value": "SN202607040001",
+                "source_type": "latest_message", "attachment_id": None,
+                "file_name": None, "location": None, "text": "SN: SN202607040001",
+            }],
+            "manual_review_suggestion": {"required": False, "reason_codes": [], "instruction": None},
         }
     )
 
-    assert parsed.intent_type == "new_repair"
-    assert parsed.extracted_items[0]["sn"] == "SN202607040001"
+    assert parsed.items[0].sn == "SN202607040001"
     assert _status_for(parsed, None) == "success"
 
 
@@ -79,24 +86,6 @@ def test_problem_description_fallback_ignores_negated_problem_statement() -> Non
 
 
 @pytest.mark.anyio
-async def test_resolve_email_sn_assets_uses_master_data_model() -> None:
-    asset = SimpleNamespace(
-        sn="M81252101025023",
-        asset_status="valid",
-    )
-
-    class Session:
-        async def scalar(self, statement):
-            params = statement.compile().params
-            value = next(iter(params.values()), "")
-            return asset if str(value).upper() == asset.sn else None
-
-    email = Email(clean_body="SN M81252101025023 selfcheck FAIL")
-
-    assert await _resolve_email_sn_assets(Session(), email) == [asset]
-
-
-@pytest.mark.anyio
 async def test_field_extraction_quality_uses_locked_preclassification_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -120,18 +109,23 @@ async def test_field_extraction_quality_uses_locked_preclassification_intent(
         async def flush(self) -> None:
             return None
 
-    parsed = AiExtractResponse(
-        intent_type="unknown",
-        extracted_fields={},
-        extracted_items=[{"sn": "M81252101025023"}],
-        missing_fields={},
-        confidence_score=0.9,
-    )
+    parsed = RepairExtractionResult.model_validate({
+        "fields": {
+            "customer_name": None, "contact_person": None, "contact_phone": None,
+            "contact_email": None, "request_date": None, "mailing_address": None,
+            "problem_description": None,
+        },
+        "items": [{"sn": "M81252101025023", "board_code": None, "board_name": None, "failure_description": None, "line_no": 1, "remarks": None}],
+        "conflicts": [],
+        "confidence_score": 0.9,
+        "field_confidences": [], "evidence": [],
+        "manual_review_suggestion": {"required": False, "reason_codes": [], "instruction": None},
+    })
     ai_log = SimpleNamespace(
         id=9,
         trace_id="trace-9",
-        provider_name="deepseek",
-        model_name="deepseek-chat",
+        provider_name="qwen",
+        model_name="qwen3.7-plus",
         route_name="repair_field_extract",
         fallback_used=False,
     )
@@ -164,15 +158,8 @@ async def test_field_extraction_quality_uses_locked_preclassification_intent(
         "I am preparing to send SVI40 which is detected FAIL on selfcheck."
     )
     assert "problem_description" not in candidate.missing_fields
-    assert candidate.evidence["classification_alignment"] == {
-        "rule_intent": "new_repair",
-        "ai_intent": "unknown",
-        "matched": False,
-    }
-    assert "intent_type" in candidate.conflict_fields
-    assert "规则分类与 AI 原始分类不一致" in candidate.evidence["manual_review_direction"]
-    assert candidate.evidence["confidence_basis"]["has_conflict_fields"] is True
-    assert candidate.evidence["confidence_basis"]["classification_alignment_matched"] is False
+    assert "classification_alignment" not in candidate.evidence
+    assert "intent_type" not in candidate.conflict_fields
 
 
 def test_customer_mailing_address_removes_only_adjacent_municipality_duplicate() -> None:
@@ -228,7 +215,7 @@ async def test_enrichment_rejects_signature_only_return_fields_and_repairs_shift
             "地址：徐州经济技术开发区\n手机：15298760948"
         ),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={
             "customer_name": "江苏爱矽半导体科技有限公司",
@@ -290,7 +277,7 @@ async def test_enrichment_keeps_explicit_english_post_repair_address_block() -> 
             "TEL : +81-3-6312-2251\nSN M81252101025023"
         ),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={
             "customer_name": "Example Japan Inc.",
@@ -336,7 +323,7 @@ async def test_enrichment_keeps_phone_adjacent_to_explicit_return_recipient() ->
             "寄回地址：四川省成都市武侯区测试路1号，收件人：刘家利18200517485"
         ),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={
             "customer_name": "测试客户有限公司",
@@ -384,7 +371,7 @@ async def test_enrichment_replaces_generic_ai_address_with_explicit_addr_line() 
             "TEL : +81-3-6312-2251\nSN M81252101025023"
         ),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={
             "customer_name": "Example Japan Inc.",
@@ -413,76 +400,16 @@ async def test_enrichment_replaces_generic_ai_address_with_explicit_addr_line() 
     }
 def test_ai_extract_schema_rejects_invalid_confidence() -> None:
     with pytest.raises(ValidationError):
-        AiExtractResponse.model_validate({"confidence_score": 1.2})
+        RepairExtractionResult.model_validate({"confidence_score": 1.2})
 
 
-@pytest.mark.parametrize(
-    ("legacy", "expected"),
-    [("customer_reply", "customer_supplement"), ("internal_forward", "repair_thread_other"), ("invented", "unknown")],
-)
-def test_ai_intent_taxonomy_is_normalized(legacy: str, expected: str) -> None:
-    normalized = _normalize_response_payload({"intent_type": legacy}, AiExtractResponse)
-    assert normalized["intent_type"] == expected
-
-
-def test_deepseek_payload_normalization_handles_common_shape_drift() -> None:
-    normalized = _normalize_response_payload(
-        {
-            "extracted_fields": None,
-            "extracted_items": {"items": [{"sn": "SN001"}]},
-            "missing_fields": ["contact_phone"],
-            "conflict_fields": None,
-            "confidence_score": 86,
-            "field_confidences": {"sn": "92", "contact_phone": None},
-            "confidence_reasons": "SN present",
-            "original_evidence": "SN001",
-        },
-        AiExtractResponse,
-    )
-    parsed = AiExtractResponse.model_validate(normalized)
-    assert parsed.extracted_items == [{"sn": "SN001"}]
-    # Shape normalization has no intent context; the business-required matrix
-    # adds contact_phone after classification/enrichment.
-    assert parsed.missing_fields == {}
-    assert parsed.confidence_score == 0.86
-    assert parsed.field_confidences == {"sn": 0.92}
-    assert parsed.confidence_reasons == ["SN present"]
-
-
-def test_ai_item_aliases_are_normalized_before_ticket_mapping() -> None:
-    normalized = _normalize_response_payload(
-        {
+def test_repair_extraction_rejects_legacy_aliases_and_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        RepairExtractionResult.model_validate({
             "intent_type": "new_repair",
-            "extracted_items": [
-                {"serial_number": "P80012205200178", "fault_description": "Channel failure"},
-                {"device_sn": "P80012205200179", "problem_description": "Cannot start"},
-            ],
-        },
-        AiExtractResponse,
-    )
-    assert normalized["extracted_items"][0]["sn"] == "P80012205200178"
-    assert normalized["extracted_items"][0]["failure_description"] == "Channel failure"
-    assert normalized["extracted_items"][1]["sn"] == "P80012205200179"
-    assert normalized["extracted_items"][1]["failure_description"] == "Cannot start"
-
-
-def test_excel_row_number_never_wins_over_part_serial_number() -> None:
-    normalized = _normalize_response_payload(
-        {
-            "intent_type": "new_repair",
-            "extracted_items": [
-                {
-                    "serial_number": "1",
-                    "part_serial_no": "M8123260108000171",
-                    "failure_description": "Controlled failure",
-                }
-            ],
-        },
-        AiExtractResponse,
-    )
-
-    assert normalized["extracted_items"][0]["line_no"] == 1
-    assert normalized["extracted_items"][0]["sn"] == "M8123260108000171"
+            "fields": {},
+            "items": [{"serial_number": "P80012205200178"}],
+        })
 
 
 def test_repair_item_normalization_deduplicates_canonical_sn() -> None:
@@ -499,59 +426,18 @@ def test_repair_item_normalization_deduplicates_canonical_sn() -> None:
     assert normalize_repair_item({"serial_number": "2"}) == {"serial_number": "2", "line_no": 2}
 
 
-def test_structured_xlsx_fields_fill_ai_omissions_without_making_phone_required() -> None:
-    parsed = AiExtractResponse(
-        intent_type="new_repair",
-        extracted_fields={"customer_name": "Test Customer"},
-        extracted_items=[],
-        missing_fields={"contact_phone": "optional field incorrectly requested", "sn": "required"},
-        confidence_score=0.95,
-    )
-    attachment = EmailAttachment(
-        id=30,
-        email_id=16,
-        file_name="controlled.xlsx",
-        parse_status="parsed",
-        extracted_json={
-            "extracted_fields": {
-                "customer_name": "Test Customer",
-                "contact_person": "Test Contact",
-                "phone": "13800000000",
-                "request_date": "2026-07-20",
-                "return_address": "Fictitious Test Address",
-            },
-            "extracted_items": [
-                {
-                    "serial_number": "1",
-                    "part_serial_no": "M8123260108000171",
-                    "failure_description": "Controlled failure",
-                }
-            ],
-        },
-    )
-
-    merged = _merge_attachment_business_data(parsed, [attachment])
-
-    assert merged.extracted_fields["mailing_address"] == "Fictitious Test Address"
-    assert merged.extracted_fields["problem_description"] == "Controlled failure"
-    assert merged.extracted_fields["contact_phone"] == "13800000000"
-    assert merged.extracted_items[0]["sn"] == "M8123260108000171"
-    assert merged.extracted_items[0]["line_no"] == 1
-    assert merged.evidence["structured_attachment_source_ids"] == [30]
-
-
 @pytest.mark.anyio
-async def test_structured_repair_form_fields_survive_body_signature_filter() -> None:
+async def test_legacy_attachment_payload_is_read_only_and_never_directly_merged() -> None:
     class Session:
         async def scalar(self, _statement):
-            return SimpleNamespace(sn="DB20292104080005", asset_status="valid")
+            return None
 
     email = Email(
         id=76,
         mailbox_account="rmatest1@accotest.com",
         from_address="rmatest2@accotest.com",
         sent_at=datetime(2026, 9, 20, 13, 50),
-        clean_body="附件是维修资料卡，请安排维修。",
+        clean_body="请查看附件。",
     )
     attachment = EmailAttachment(
         id=33,
@@ -574,7 +460,7 @@ async def test_structured_repair_form_fields_survive_body_signature_filter() -> 
             ],
         },
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={},
         extracted_items=[],
@@ -586,64 +472,12 @@ async def test_structured_repair_form_fields_survive_body_signature_filter() -> 
         Session(), parsed=parsed, email=email, attachments=[attachment]
     )
 
-    assert enriched.extracted_fields["customer_name"] == "测试半导体有限公司"
-    assert enriched.extracted_fields["contact_person"] == "任浩"
-    assert enriched.extracted_fields["contact_phone"] == "13358157560"
-    assert enriched.extracted_fields["mailing_address"] == "江苏省江阴市测试大道78号"
-    assert not enriched.missing_fields
-
-
-def test_multi_sn_merge_compares_canonical_sets_not_row_order() -> None:
-    parsed = AiExtractResponse(
-        intent_type="new_repair",
-        extracted_items=[
-            {"sn": "M8123260108000118"},
-            {"sn": "M8123260108000110"},
-            {"sn": "M8123260108000169"},
-        ],
-        confidence_score=0.95,
-    )
-    attachment = EmailAttachment(
-        id=31,
-        email_id=17,
-        file_name="multi.xlsx",
-        parse_status="parsed",
-        extracted_json={
-            "extracted_items": [
-                {"serial_number": "1", "part_serial_no": "M8123260108000110"},
-                {"serial_number": "2", "part_serial_no": "M8123260108000169"},
-                {"serial_number": "3", "part_serial_no": "M8123260108000118"},
-            ]
-        },
-    )
-
-    merged = _merge_attachment_business_data(parsed, [attachment])
-
-    assert "sn" not in merged.conflict_fields
-    assert {item["sn"] for item in merged.extracted_items} == {
-        "M8123260108000110",
-        "M8123260108000169",
-        "M8123260108000118",
-    }
-
-
-def test_multi_sn_merge_keeps_real_set_difference_as_conflict() -> None:
-    parsed = AiExtractResponse(
-        intent_type="new_repair",
-        extracted_items=[{"sn": "M8123260108000171"}],
-        confidence_score=0.95,
-    )
-    attachment = EmailAttachment(
-        id=32,
-        email_id=18,
-        file_name="different.xlsx",
-        parse_status="parsed",
-        extracted_json={"extracted_items": [{"part_serial_no": "M8123260108000110"}]},
-    )
-
-    merged = _merge_attachment_business_data(parsed, [attachment])
-
-    assert merged.conflict_fields["sn"] == "AI extraction conflicts with deterministic attachment parsing."
+    assert enriched.extracted_fields.get("customer_name") is None
+    assert enriched.extracted_fields.get("contact_person") is None
+    assert enriched.extracted_fields.get("contact_phone") is None
+    assert enriched.extracted_fields.get("mailing_address") is None
+    assert enriched.extracted_items == []
+    assert "sn" in enriched.missing_fields
 
 
 def test_request_date_fallback_prefers_explicit_then_sent_then_received() -> None:
@@ -803,7 +637,7 @@ async def test_complete_linked_supplement_ignores_generic_model_review_advice() 
 
             return Result()
 
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="customer_supplement",
         extracted_fields={},
         extracted_items=[{"sn": asset.sn, "failure_description": "selfcheck FAIL"}],
@@ -874,7 +708,7 @@ async def test_missing_field_email_uses_failure_description_and_email_date() -> 
         from_address="rmatest2@accotest.com",
         sent_at=datetime(2026, 7, 24, 9, 58),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={},
         extracted_items=[
@@ -922,7 +756,7 @@ async def test_customer_name_waits_for_deterministic_master_resolution() -> None
         from_address="rmatest2@accotest.com",
         sent_at=datetime(2026, 7, 29, 10, 57),
     )
-    parsed = AiExtractResponse(
+    parsed = NormalizedRepairCandidate(
         intent_type="new_repair",
         extracted_fields={
             "contact_person": "test contact",
@@ -965,7 +799,7 @@ def test_ai_reply_schema_accepts_sample_output() -> None:
 
 
 def test_ai_log_key_result_keeps_summary_not_sensitive_values() -> None:
-    parsed = AiExtractResponse.model_validate(
+    parsed = NormalizedRepairCandidate.model_validate(
         {
             "intent_type": "new_repair",
             "extracted_fields": {"contact_email": "customer@example.com"},

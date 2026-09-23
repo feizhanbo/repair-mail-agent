@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
+from pydantic import ValidationError
 
+from app.ai.schemas import AttachmentContentEvidence
 from app.config import settings
 from app.integrations.ai_provider import AiProviderError
 from app.integrations.llm_gateway import LlmTask
@@ -56,27 +58,55 @@ def _png_header(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
 
 
-def test_qwen_attachment_schema_normalizes_common_shape_drift() -> None:
-    parsed = attachment_parser.AttachmentParseJson.model_validate(
-        {
-            "file_type": "pdf",
-            "summary": {"value": "repair form"},
-            "key_points": "SN found",
-            "extracted_fields": [],
-            "extracted_items": {"sn": "SN001"},
-            "raw_text": ["page 1"],
-            "warnings": {"code": "TRUNCATED"},
-            "truncated": "true",
-        }
+def _content_result(response_model, *, summary: str = "parsed", ocr_text: str | None = None, sn: str | None = None):
+    candidate_items = []
+    if sn:
+        candidate_items = [{
+            "candidate_index": 0,
+            "values": [{
+                "field": "sn",
+                "value": sn,
+                "source": {
+                    "source_type": "raw_text" if ocr_text is None else "ocr_text",
+                    "location": None,
+                    "text": sn,
+                },
+            }],
+        }]
+    return response_model(
+        summary=summary,
+        key_points=["SN"] if sn else [],
+        candidate_fields=[],
+        candidate_items=candidate_items,
+        evidence=[],
+        warnings=[],
+        ocr_text=ocr_text,
     )
 
-    assert '"value": "repair form"' in parsed.summary
-    assert parsed.key_points == ["SN found"]
-    assert parsed.extracted_fields == {}
-    assert parsed.extracted_items == [{"sn": "SN001"}]
-    assert '"page 1"' in parsed.raw_text
-    assert parsed.warnings == ['{"code": "TRUNCATED"}']
-    assert parsed.truncated is True
+
+def _warning_codes(result: dict) -> list[str]:
+    return [item["code"] for item in result["warnings"]]
+
+
+def _warning_messages(result: dict) -> list[str]:
+    return [item["message"] for item in result["warnings"]]
+
+
+def test_qwen_attachment_schema_rejects_shape_drift_and_program_metadata() -> None:
+    with pytest.raises(ValidationError):
+        AttachmentContentEvidence.model_validate(
+            {
+                "file_type": "pdf",
+                "summary": {"value": "repair form"},
+                "key_points": "SN found",
+                "candidate_fields": [],
+                "candidate_items": [],
+                "evidence": [],
+                "warnings": [],
+                "ocr_text": None,
+                "truncated": True,
+            }
+        )
 
 
 @pytest.mark.anyio
@@ -101,7 +131,7 @@ async def test_supported_text_like_attachments_extract_then_use_qwen(
     seen: dict[str, list[str] | str] = {"prompts": []}
     monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
-    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen-plus")
+    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen3.7-plus")
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
 
     async def fake_invoke_structured(*, task, messages, response_model, temperature):
@@ -109,13 +139,7 @@ async def test_supported_text_like_attachments_extract_then_use_qwen(
         seen["task"] = task
         seen["prompts"].append(messages[-1]["content"])
         return SimpleNamespace(
-            parsed=response_model(
-                file_type=expected_type,
-                summary="parsed",
-                key_points=["SN"],
-                extracted_fields={"sn": expected_prompt_fragment},
-                raw_text=f"qwen raw {expected_prompt_fragment}",
-            )
+            parsed=_content_result(response_model, sn=expected_prompt_fragment)
         )
 
     async def fake_download(_session, *, oss_object_id: int) -> bytes:
@@ -132,10 +156,14 @@ async def test_supported_text_like_attachments_extract_then_use_qwen(
     assert any(expected_prompt_fragment in prompt for prompt in seen["prompts"])
     assert attachment.parse_status == "parsed"
     assert attachment.parse_error is None
-    assert attachment.extracted_text == f"qwen raw {expected_prompt_fragment}"
+    assert expected_prompt_fragment in (attachment.extracted_text or "")
     assert result is not None
-    assert result["file_type"] == expected_type
-    assert result["extracted_fields"] == {"sn": expected_prompt_fragment}
+    assert result["metadata"]["file_type"] == expected_type
+    assert result["raw_text"] == attachment.extracted_text
+    assert result["normalized_text"] == attachment.extracted_text
+    assert result["candidate_items"][0]["values"][0]["value"] == expected_prompt_fragment
+    assert result["candidate_items"][0]["values"][0]["source"]["file_name"] == file_name
+    assert result["candidate_items"][0]["values"][0]["source"]["attachment_id"] == 0
 
 
 @pytest.mark.anyio
@@ -143,14 +171,15 @@ async def test_image_attachment_uses_presigned_url_and_qwen_visual(monkeypatch: 
     seen: dict[str, object] = {}
     monkeypatch.setattr(settings, "MULTIMODAL_PROVIDER", "qwen")
     monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
-    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen-plus")
+    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen3.7-plus")
     monkeypatch.setattr(settings, "QWEN_VL_MODEL", "qwen-vl-plus")
 
     async def fake_invoke_structured(*, task, messages, response_model, temperature):
         del temperature
         seen["task"] = task
-        seen["urls"] = [item["image_url"]["url"] for item in messages[0]["content"] if item["type"] == "image_url"]
-        return SimpleNamespace(parsed=response_model(file_type="image", summary="visual", raw_text="visual SN001"))
+        seen["system"] = messages[0]
+        seen["urls"] = [item["image_url"]["url"] for item in messages[1]["content"] if item["type"] == "image_url"]
+        return SimpleNamespace(parsed=_content_result(response_model, summary="visual", ocr_text="visual SN001", sn="SN001"))
 
     async def fake_presigned(_session, *, oss_object_id: int, expires_seconds: int) -> str:
         assert oss_object_id == 12
@@ -169,11 +198,15 @@ async def test_image_attachment_uses_presigned_url_and_qwen_visual(monkeypatch: 
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
     assert seen["task"] == LlmTask.ATTACHMENT_VISUAL_PARSE
+    assert seen["system"] == {"role": "system", "content": attachment_parser.ATTACHMENT_VISUAL.system}
     assert seen["urls"] == ["https://oss.example.com/signed-image"]
     assert attachment.parse_status == "parsed"
     assert result is not None
-    assert result["file_type"] == "image"
-    assert result["raw_text"] == "visual SN001"
+    assert result["metadata"]["file_type"] == "image"
+    assert result["raw_text"] is None
+    assert result["ocr_text"] == "visual SN001"
+    assert result["normalized_text"] is None
+    assert attachment.extracted_text == "visual SN001"
 
 
 @pytest.mark.anyio
@@ -186,8 +219,9 @@ async def test_pdf_textless_attachment_renders_pages_for_qwen_visual(monkeypatch
 
     async def fake_invoke_structured(*, task, messages, response_model, temperature):
         del task, temperature
-        seen["urls"] = [item["image_url"]["url"] for item in messages[0]["content"] if item["type"] == "image_url"]
-        return SimpleNamespace(parsed=response_model(file_type="pdf", summary="pdf visual", raw_text="PDF SN001"))
+        seen["system"] = messages[0]
+        seen["urls"] = [item["image_url"]["url"] for item in messages[1]["content"] if item["type"] == "image_url"]
+        return SimpleNamespace(parsed=_content_result(response_model, summary="pdf visual", ocr_text="PDF SN001", sn="SN001"))
 
     async def fake_download(_session, *, oss_object_id: int) -> bytes:
         assert oss_object_id == 12
@@ -202,11 +236,13 @@ async def test_pdf_textless_attachment_renders_pages_for_qwen_visual(monkeypatch
     result = await attachment_parser.parse_attachment(SimpleNamespace(), attachment)
 
     assert seen["urls"] == ["data:image/png;base64,cG5nLXBhZ2U="]
+    assert seen["system"] == {"role": "system", "content": attachment_parser.ATTACHMENT_VISUAL.system}
     assert attachment.parse_status == "parsed"
     assert result is not None
-    assert result["file_type"] == "pdf"
-    assert result["truncated"] is True
-    assert "PDF_TRUNCATED_TO_15_PAGES" in result["warnings"]
+    assert result["metadata"]["file_type"] == "pdf"
+    assert result["metadata"]["truncated"] is True
+    assert "CONTENT_TRUNCATED" in _warning_codes(result)
+    assert any("PDF_TRUNCATED_TO_15_PAGES" in item for item in _warning_messages(result))
 
 
 @pytest.mark.anyio
@@ -233,8 +269,9 @@ async def test_small_inline_image_is_archived_but_skips_qwen(monkeypatch: pytest
     assert attachment.parse_status == "skipped_decorative"
     assert attachment.parse_error is None
     assert result is not None
-    assert result["warnings"] == ["INLINE_DECORATIVE_SKIPPED"]
-    assert result["extracted_fields"] == {"image_width": 88, "image_height": 18}
+    assert _warning_messages(result) == ["INLINE_DECORATIVE_SKIPPED"]
+    assert result["candidate_fields"] == []
+    assert result["candidate_items"] == []
 
 
 @pytest.mark.anyio
@@ -253,8 +290,8 @@ async def test_oversized_attachment_is_uploaded_but_not_auto_parsed(monkeypatch:
     assert attachment.parse_status == "needs_manual_review"
     assert attachment.parse_error == "FILE_TOO_LARGE_FOR_AUTO_PARSE"
     assert result is not None
-    assert result["warnings"] == ["FILE_TOO_LARGE_FOR_AUTO_PARSE"]
-    assert result["truncated"] is True
+    assert _warning_messages(result) == ["FILE_TOO_LARGE_FOR_AUTO_PARSE"]
+    assert result["metadata"]["truncated"] is True
 
 
 @pytest.mark.anyio
@@ -282,8 +319,8 @@ async def test_qwen_failure_uses_local_text_without_blocking(monkeypatch: pytest
     assert attachment.extracted_text == "SN001 needs repair"
     assert result is not None
     assert result["raw_text"] == "SN001 needs repair"
-    assert "QWEN_TEMPORARILY_UNAVAILABLE" in result["warnings"]
-    assert "QWEN_FAILED_LOCAL_TEXT_FALLBACK" in result["warnings"]
+    assert any("QWEN_TEMPORARILY_UNAVAILABLE" in item for item in _warning_messages(result))
+    assert "QWEN_FAILED_LOCAL_TEXT_FALLBACK" in _warning_messages(result)
 
 
 @pytest.mark.anyio
@@ -326,8 +363,8 @@ async def test_large_txt_skips_attachment_qwen_and_keeps_local_result(monkeypatc
     assert attachment.parse_status == "parsed"
     assert attachment.parse_error is None
     assert result is not None
-    assert result["truncated"] is True
-    assert "QWEN_SKIPPED_LARGE_TEXT_LOCAL_FALLBACK" in result["warnings"]
+    assert result["metadata"]["truncated"] is True
+    assert "QWEN_SKIPPED_LARGE_TEXT_LOCAL_FALLBACK" in _warning_messages(result)
 
 
 @pytest.mark.anyio

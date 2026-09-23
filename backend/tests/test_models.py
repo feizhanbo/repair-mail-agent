@@ -68,6 +68,13 @@ def test_parse_result_apply_status_columns() -> None:
     assert "applied_at" in columns
 
 
+def test_classification_model_reason_and_backend_outcome_are_persisted_separately() -> None:
+    for table_name in ("emails", "mail_fetch_records", "parse_results"):
+        columns = Base.metadata.tables[table_name].columns
+        assert "classification_model_reason_code" in columns
+        assert "classification_outcome_code" in columns
+
+
 def test_mail_fetch_records_keep_uid_idempotency_constraint() -> None:
     table = Base.metadata.tables["mail_fetch_records"]
     constraint_columns = {

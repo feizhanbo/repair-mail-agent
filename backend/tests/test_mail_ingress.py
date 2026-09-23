@@ -59,6 +59,7 @@ def _payload() -> EmailIngestRequest:
 def _decision(level: str, intent: str) -> SimpleNamespace:
     return SimpleNamespace(
         intent_type=intent, handling_level=level, confidence=0.95, reason_code="TEST",
+        model_reason_code="EXPLICIT_NEW_REPAIR", outcome_code="CLASSIFIED",
         candidates=[], needs_attachment_content=False, evidence=["test"], classification_version="test-v1",
     )
 
@@ -123,6 +124,8 @@ async def test_all_ingress_levels_apply_exact_persistence_policy(
         "business": business_count, "job": job_count,
     }
     assert result["classification"]["handling_level"] == level
+    assert result["classification"]["model_reason_code"] == "EXPLICIT_NEW_REPAIR"
+    assert result["classification"]["outcome_code"] == "CLASSIFIED"
     if level == "lifecycle_only":
         assert result["email"] is None
         assert result["fetch_status"] == "classified_third"

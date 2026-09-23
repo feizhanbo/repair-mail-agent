@@ -50,6 +50,8 @@ class MailFetchRecord(CreatedAtMixin, Base):
     classification_version: Mapped[str | None] = mapped_column(String(50))
     classification_confidence: Mapped[object | None] = mapped_column(mysql.DECIMAL(5, 4))
     classification_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_model_reason_code: Mapped[str | None] = mapped_column(String(100))
+    classification_outcome_code: Mapped[str | None] = mapped_column(String(100))
     classification_evidence: Mapped[dict | None] = mapped_column(mysql.JSON)
     classified_at: Mapped[datetime | None] = datetime_column()
     completed_at: Mapped[datetime | None] = datetime_column()

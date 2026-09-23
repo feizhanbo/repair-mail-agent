@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import base64
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from app.ai.prompts import MAIL_PRECLASSIFICATION
+from app.ai.schemas import (
+    ClassificationAttachmentMetadata,
+    ClassificationInput,
+    ClassificationOutcomeCode,
+    ClassificationRuleSignals,
+    ClassificationThreadContext,
+    MailPreclassificationResponse,
+)
 from app.config import settings
 from app.core.email_classification import (
     CLASSIFICATION_VERSION,
@@ -28,20 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 PRECLASSIFICATION_PROMPT_VERSION = MAIL_PRECLASSIFICATION.version
 
 
-class IntentCandidate(BaseModel):
-    intent: EmailIntent
-    confidence: float = Field(ge=0, le=1)
-
-
-class MailPreclassificationResponse(BaseModel):
-    intent: EmailIntent
-    handling_level: HandlingLevel | None = None
-    confidence: float = Field(ge=0, le=1)
-    candidates: list[IntentCandidate] = Field(default_factory=list)
-    reason_code: str = Field(min_length=1, max_length=100)
-    needs_attachment_content: bool = False
-    evidence: list[str] = Field(default_factory=list)
-
 @dataclass(frozen=True)
 class MailPreclassificationDecision:
     intent_type: str
@@ -50,8 +42,10 @@ class MailPreclassificationDecision:
     reason_code: str
     candidates: list[dict[str, Any]]
     needs_attachment_content: bool
-    evidence: list[str]
-    classification_version: str = PRECLASSIFICATION_PROMPT_VERSION
+    evidence: list[dict[str, Any]]
+    model_reason_code: str | None = None
+    outcome_code: str = str(ClassificationOutcomeCode.CLASSIFIED)
+    classification_version: str = CLASSIFICATION_VERSION
 
 
 def _context(
@@ -59,37 +53,47 @@ def _context(
     *,
     thread_summary: dict[str, Any] | None = None,
     rule_signals: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> ClassificationInput:
     body = normalize_email_body(payload.text_body or html_to_text(payload.html_body))
     latest = extract_latest_reply_segment(body)
-    return {
-        "subject": payload.subject,
-        "from": payload.from_address,
-        "to": payload.to_addresses,
-        "latest_reply_segment": latest[: settings.MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS],
-        "body": body[: settings.MAIL_PRECLASSIFICATION_BODY_CHARS],
-        "truncated": {
-            "latest_reply_segment": len(latest) > settings.MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS,
-            "body": len(body) > settings.MAIL_PRECLASSIFICATION_BODY_CHARS,
-        },
-        "message_id": payload.message_id,
-        "in_reply_to": payload.in_reply_to,
-        "references": payload.references_header,
-        "thread_summary": thread_summary or {},
-        "rule_signals": rule_signals or {
-            "has_reply_chain": False,
-            "body_has_sn": False,
-            "matched_keywords": [],
-        },
-        "attachments": [
-            {
-                "file_name": item.get("file_name"),
-                "content_type": item.get("content_type"),
-                "file_size": item.get("file_size"),
-            }
+    summary = thread_summary or {}
+    missing = summary.get("ticket_missing_fields")
+    thread = ClassificationThreadContext(
+        thread_id=summary.get("thread_id"),
+        thread_root_message_id=summary.get("thread_root_message_id"),
+        latest_intent=summary.get("latest_intent"),
+        latest_handling_level=summary.get("latest_handling_level"),
+        ticket_id=summary.get("ticket_id"),
+        ticket_category=summary.get("ticket_category"),
+        ticket_status=summary.get("ticket_status"),
+        ticket_missing_fields=sorted(missing) if isinstance(missing, dict) else list(missing or []),
+        known_serial_numbers=list(summary.get("known_serial_numbers") or []),
+        rma_status=summary.get("rma_status"),
+        has_rma=bool(summary.get("has_rma")),
+    )
+    signals = ClassificationRuleSignals.model_validate(rule_signals or {})
+    return ClassificationInput(
+        message_id=payload.message_id,
+        subject=payload.subject,
+        sender=payload.from_address,
+        recipients=list(payload.to_addresses or []),
+        latest_message=latest[: settings.MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS],
+        conversation_body=body[: settings.MAIL_PRECLASSIFICATION_BODY_CHARS],
+        in_reply_to=payload.in_reply_to,
+        references=payload.references_header,
+        latest_message_truncated=len(latest) > settings.MAIL_PRECLASSIFICATION_LATEST_REPLY_CHARS,
+        conversation_body_truncated=len(body) > settings.MAIL_PRECLASSIFICATION_BODY_CHARS,
+        thread_context=thread,
+        rule_signals=signals,
+        attachments=[
+            ClassificationAttachmentMetadata(
+                file_name=str(item.get("file_name") or "attachment"),
+                content_type=item.get("content_type"),
+                file_size=item.get("file_size"),
+            )
             for item in payload.attachments
         ],
-    }
+    )
 
 
 def transient_attachment_evidence(blobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -155,19 +159,18 @@ async def classify_mail(
 ) -> MailPreclassificationDecision:
     context = _context(payload, thread_summary=thread_summary, rule_signals=rule_signals)
     if attachment_evidence:
-        context["attachment_evidence"] = attachment_evidence
-    audit_context = dict(context)
-    if attachment_evidence:
-        audit_context["attachment_evidence"] = [
-            {key: value for key, value in item.items() if key not in {"data_url", "data_urls"}}
-            | ({"visual_bytes_in_memory": True} if item.get("data_url") or item.get("data_urls") else {})
-            for item in attachment_evidence
-        ]
-    user_text = (
-        f"prompt_version={PRECLASSIFICATION_PROMPT_VERSION}\n"
-        "请返回 intent, handling_level, confidence, candidates, reason_code, "
-        f"needs_attachment_content, evidence。上下文：{context}"
-    )
+        by_name = {str(item.get("file_name") or ""): item for item in attachment_evidence}
+        enriched: list[ClassificationAttachmentMetadata] = []
+        for item in context.attachments:
+            evidence_item = by_name.get(item.file_name, {})
+            enriched.append(item.model_copy(update={
+                "content": evidence_item.get("text"),
+                "truncated": bool(evidence_item.get("truncated")),
+                "visual_available": bool(evidence_item.get("data_url") or evidence_item.get("data_urls")),
+            }))
+        context = context.model_copy(update={"attachments": enriched})
+    audit_context = context.model_dump(mode="json")
+    user_text = context.model_dump_json()
     visual_urls = [
         url
         for item in (attachment_evidence or [])
@@ -194,13 +197,18 @@ async def classify_mail(
     completion = None
     try:
         completion = await invoke_structured(
-            task=LlmTask.ATTACHMENT_VISUAL_PARSE if visual_urls else LlmTask.MAIL_CLASSIFICATION,
+            task=LlmTask.MAIL_CLASSIFICATION_VISUAL if visual_urls else LlmTask.MAIL_CLASSIFICATION,
             messages=messages,
             response_model=MailPreclassificationResponse,
             temperature=0.0,
         )
         result = completion.parsed
     except AiProviderError as exc:
+        failure_outcome = (
+            ClassificationOutcomeCode.PRECLASSIFICATION_SCHEMA_FAILED
+            if any(code in str(exc).upper() for code in ("OUTPUT_SCHEMA_INVALID", "OUTPUT_NOT_JSON"))
+            else ClassificationOutcomeCode.PRECLASSIFICATION_PROVIDER_FAILED
+        )
         if session is not None:
             from app.services.ai import persist_ai_log
 
@@ -220,12 +228,15 @@ async def classify_mail(
                 model_name=str(getattr(exc, "model_name", "unknown")),
                 prompt_version=PRECLASSIFICATION_PROMPT_VERSION,
                 prompt_hash=MAIL_PRECLASSIFICATION.content_hash,
+                schema_version=MAIL_PRECLASSIFICATION.schema_version,
+                parser_version=MAIL_PRECLASSIFICATION.parser_version,
+                structured_output_method=getattr(exc, "structured_output_method", None),
                 route_name=getattr(exc, "route_name", None),
                 route_attempt=int(getattr(exc, "route_attempt", 1)),
                 fallback_used=int(getattr(exc, "route_attempt", 1)) > 1,
                 error_message=str(exc),
             )
-        return unknown_decision("PRECLASSIFICATION_PROVIDER_FAILED")
+        return unknown_decision(str(failure_outcome))
 
     if session is not None:
         from app.services.ai import persist_ai_log
@@ -246,56 +257,80 @@ async def classify_mail(
             model_name=getattr(completion, "model_name", None) or "unknown",
             prompt_version=PRECLASSIFICATION_PROMPT_VERSION,
             prompt_hash=MAIL_PRECLASSIFICATION.content_hash,
+            schema_version=MAIL_PRECLASSIFICATION.schema_version,
+            parser_version=MAIL_PRECLASSIFICATION.parser_version,
+            structured_output_method=completion.structured_output_method,
             route_name=getattr(completion, "route_name", None),
             route_attempt=int(getattr(completion, "route_attempt", 1)),
             fallback_used=bool(getattr(completion, "fallback_used", False)),
         )
+
+    async def finalize(decision: MailPreclassificationDecision) -> MailPreclassificationDecision:
+        if session is not None:
+            from app.services.ai import persist_ai_normalized_result
+
+            await persist_ai_normalized_result(
+                trace_id=completion.trace_id,
+                stage="mail_classification",
+                normalized_result=asdict(decision),
+                prompt_version=MAIL_PRECLASSIFICATION.version,
+                schema_version=MAIL_PRECLASSIFICATION.schema_version,
+                parser_version=MAIL_PRECLASSIFICATION.parser_version,
+            )
+        return decision
 
     # 链路 smoke 测试开关：非空时强制最终 intent，需在低置信度/候选冲突判定之前，
     # 否则 Qwen 等模型返回 low-confidence 时会先短路为 unknown，导致开关失效。
     forced = settings.MAIL_INTENT_FORCE.strip()
     if forced:
         canonical = decision_for_intent(forced, reason_code=f"SMOKE_FORCE:{forced}")
-        return MailPreclassificationDecision(
+        return await finalize(MailPreclassificationDecision(
             intent_type=canonical.intent_type,
             handling_level=canonical.handling_level,
             confidence=result.confidence,
             reason_code=canonical.reason_code,
             candidates=[candidate.model_dump() for candidate in result.candidates],
             needs_attachment_content=result.needs_attachment_content,
-            evidence=result.evidence,
-        )
-    canonical = decision_for_intent(result.intent, reason_code=result.reason_code)
+            evidence=[item.model_dump(mode="json") for item in result.evidence],
+            model_reason_code=str(result.reason_code),
+            outcome_code=str(ClassificationOutcomeCode.SMOKE_FORCE),
+        ))
+    canonical = decision_for_intent(result.intent, reason_code=str(result.reason_code))
     below_threshold = result.confidence < settings.MAIL_PRECLASSIFICATION_MIN_CONFIDENCE
     conflicting = bool(result.candidates) and result.candidates[0].intent != canonical.intent_type
     if below_threshold or conflicting:
         reason = "PRECLASSIFICATION_LOW_CONFIDENCE" if below_threshold else "PRECLASSIFICATION_INTENT_CONFLICT"
-        return unknown_decision(
+        return await finalize(unknown_decision(
             reason,
             confidence=result.confidence,
-            evidence=result.evidence,
+            evidence=[item.model_dump(mode="json") for item in result.evidence],
             needs_attachment_content=result.needs_attachment_content,
             candidates=[candidate.model_dump() for candidate in result.candidates],
-        )
-    return MailPreclassificationDecision(
+            model_reason_code=str(result.reason_code),
+        ))
+    return await finalize(MailPreclassificationDecision(
         intent_type=canonical.intent_type,
         handling_level=canonical.handling_level,
         confidence=result.confidence,
         reason_code=canonical.reason_code,
         candidates=[candidate.model_dump() for candidate in result.candidates],
         needs_attachment_content=result.needs_attachment_content,
-        evidence=result.evidence,
-    )
+        evidence=[item.model_dump(mode="json") for item in result.evidence],
+        model_reason_code=str(result.reason_code),
+        outcome_code=str(ClassificationOutcomeCode.CLASSIFIED),
+    ))
 
 
 def unknown_decision(
     reason_code: str,
     *,
     confidence: float = 0.0,
-    evidence: list[str] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
     needs_attachment_content: bool = False,
     candidates: list[dict[str, Any]] | None = None,
+    model_reason_code: str | None = None,
 ) -> MailPreclassificationDecision:
+    outcome = reason_code if reason_code in {item.value for item in ClassificationOutcomeCode} else str(ClassificationOutcomeCode.PRECLASSIFICATION_PROVIDER_FAILED)
     return MailPreclassificationDecision(
         intent_type=str(EmailIntent.UNKNOWN),
         handling_level=str(HandlingLevel.UNKNOWN),
@@ -304,4 +339,6 @@ def unknown_decision(
         candidates=candidates or [],
         needs_attachment_content=needs_attachment_content,
         evidence=evidence or [],
+        model_reason_code=model_reason_code,
+        outcome_code=outcome,
     )

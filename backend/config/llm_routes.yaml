@@ -1,7 +1,4 @@
 profiles:
-  deepseek:
-    api_key_setting: AI_API_KEY
-    base_url_setting: AI_BASE_URL
   qwen:
     api_key_setting: QWEN_API_KEY
     base_url_setting: QWEN_BASE_URL
@@ -9,38 +6,53 @@ profiles:
 tasks:
   mail_classification:
     primary: {profile: qwen, model: qwen3.7-plus}
+    fallback: {profile: qwen, model: qwen3.8-flash}
     temperature: 0.0
     timeout_seconds: 30
     max_retries: 2
     max_output_tokens: 4096
     requires_json: true
     requires_vision: false
+    structured_output_method: json_schema
+  mail_classification_visual:
+    primary: {profile: qwen, model: qwen-vl-plus}
+    temperature: 0.0
+    timeout_seconds: 45
+    max_retries: 2
+    max_output_tokens: 4096
+    requires_json: true
+    requires_vision: true
+    structured_output_method: json_mode
   repair_field_extract:
     primary: {profile: qwen, model: qwen3.7-plus}
-    temperature: 0.1
+    fallback: {profile: qwen, model: qwen3.8-flash}
+    temperature: 0.0
     timeout_seconds: 120
     max_retries: 2
     max_output_tokens: 8192
     requires_json: true
     requires_vision: false
+    structured_output_method: json_schema
   reply_draft:
-    primary: {profile: deepseek, model: deepseek-chat}
-    fallback: {profile: qwen, model: qwen-plus}
+    primary: {profile: qwen, model: qwen3.7-plus}
+    fallback: {profile: qwen, model: qwen3.8-flash}
     temperature: 0.1
     timeout_seconds: 30
     max_retries: 2
     max_output_tokens: 4096
     requires_json: true
     requires_vision: false
+    structured_output_method: json_schema
   attachment_text_parse:
-    primary: {profile: qwen, model: qwen-plus}
-    fallback: {profile: deepseek, model: deepseek-chat}
+    primary: {profile: qwen, model: qwen3.7-plus}
+    fallback: {profile: qwen, model: qwen3.8-flash}
     temperature: 0.0
     timeout_seconds: 30
     max_retries: 2
     max_output_tokens: 8192
     requires_json: true
     requires_vision: false
+    structured_output_method: json_schema
   attachment_visual_parse:
     primary: {profile: qwen, model: qwen-vl-plus}
     temperature: 0.0
@@ -49,3 +61,4 @@ tasks:
     max_output_tokens: 8192
     requires_json: true
     requires_vision: true
+    structured_output_method: json_mode
