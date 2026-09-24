@@ -28,7 +28,7 @@ from app.schemas.business import BoardCardImportItem
 from app.services.master_data import import_board_cards, parse_board_cards_file
 
 
-EXPECTED_REVISION = "a0b5c6d7e8f9"
+EXPECTED_REVISION = "b1c6d7e8f9a0"
 OVERSEAS_DEFAULT_CODE = "*"
 OVERSEAS_DEFAULT_NAME = "OVERSEAS_DEFAULT_BEIJING"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

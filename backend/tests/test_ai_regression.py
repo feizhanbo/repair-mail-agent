@@ -28,6 +28,7 @@ from app.services.ai import (
     _problem_description_from_latest_reply,
     create_ai_parse_candidate,
 )
+from app.services.tickets import _authoritative_request_date
 
 
 @pytest.fixture
@@ -50,11 +51,6 @@ def test_ai_extract_schema_accepts_sample_output() -> None:
             "conflicts": [],
             "confidence_score": 0.86,
             "field_confidences": [{"path": "items[0].sn", "score": 0.9, "reasons": ["正文明确标注"]}],
-            "evidence": [{
-                "field_path": "items[0].sn", "value": "SN202607040001",
-                "source_type": "latest_message", "attachment_id": None,
-                "file_name": None, "location": None, "text": "SN: SN202607040001",
-            }],
             "manual_review_suggestion": {"required": False, "reason_codes": [], "instruction": None},
         }
     )
@@ -118,7 +114,7 @@ async def test_field_extraction_quality_uses_locked_preclassification_intent(
         "items": [{"sn": "M81252101025023", "board_code": None, "board_name": None, "failure_description": None, "line_no": 1, "remarks": None}],
         "conflicts": [],
         "confidence_score": 0.9,
-        "field_confidences": [], "evidence": [],
+        "field_confidences": [],
         "manual_review_suggestion": {"required": False, "reason_codes": [], "instruction": None},
     })
     ai_log = SimpleNamespace(
@@ -480,7 +476,7 @@ async def test_legacy_attachment_payload_is_read_only_and_never_directly_merged(
     assert "sn" in enriched.missing_fields
 
 
-def test_request_date_fallback_prefers_explicit_then_sent_then_received() -> None:
+def test_request_date_uses_sent_then_received_and_overrides_model_value() -> None:
     email = Email(
         id=51,
         mailbox_account="rmatest1@accotest.com",
@@ -497,8 +493,8 @@ def test_request_date_fallback_prefers_explicit_then_sent_then_received() -> Non
         field_confidences=explicit_confidence,
         source_email=email,
     )
-    assert explicit_fields["request_date"] == "2026-07-20"
-    assert "derived_fields" not in explicit_evidence
+    assert explicit_fields["request_date"] == "2026-07-24"
+    assert explicit_evidence["derived_fields"]["request_date"]["source"] == "email_sent_at"
 
     sent_fields: dict = {}
     sent_evidence: dict = {}
@@ -547,6 +543,22 @@ def test_customer_supplement_keeps_existing_ticket_request_date() -> None:
 
     assert fields["request_date"] == "2026-07-24"
     assert evidence["derived_fields"]["request_date"]["source"] == "existing_ticket"
+
+
+@pytest.mark.anyio
+async def test_ticket_request_date_requires_transport_timestamp() -> None:
+    email = Email(
+        id=53,
+        mailbox_account="rmatest1@accotest.com",
+        from_address="rmatest2@accotest.com",
+    )
+
+    with pytest.raises(ValueError, match="REQUEST_DATE_SOURCE_MISSING"):
+        await _authoritative_request_date(
+            SimpleNamespace(),
+            email=email,
+            intent_type="new_repair",
+        )
 
 
 def test_customer_supplement_explicit_phone_overrides_ai_omission() -> None:

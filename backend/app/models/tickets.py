@@ -58,7 +58,7 @@ class RepairTicket(TimestampMixin, Base):
     contact_person: Mapped[str | None] = mapped_column(String(100))
     contact_phone: Mapped[str | None] = mapped_column(String(100))
     contact_email: Mapped[str | None] = mapped_column(String(255))
-    request_date: Mapped[date | None] = mapped_column(mysql.DATE)
+    request_date: Mapped[date] = mapped_column(mysql.DATE, nullable=False)
     mailing_address: Mapped[str | None] = mapped_column(String(500))
     problem_description: Mapped[str | None] = mapped_column(Text)
     accessories: Mapped[str | None] = mapped_column(String(500))

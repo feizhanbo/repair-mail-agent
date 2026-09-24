@@ -194,7 +194,9 @@ async def ensure_export_lines(
         raise ValueError("SAP_EXPORT_ITEMS_REQUIRED")
     source_email = await session.get(Email, ticket.source_email_id) if ticket.source_email_id else None
     owner = await session.get(User, ticket.assigned_user_id) if ticket.assigned_user_id else None
-    requested_on = ticket.request_date or utcnow().date()
+    if ticket.request_date is None:
+        raise ValueError("REQUEST_DATE_REQUIRED")
+    requested_on = ticket.request_date
     prepared: list[tuple[RepairTicketItem, Any, dict[str, Any], str]] = []
 
     for item in items:
@@ -861,10 +863,9 @@ async def poll_export_batch(
         )
     distinct_rmas = sorted({line.rma_no for line in lines if line.rma_no})
     existing_rmas: dict[str, TicketRma | None] = {}
-    business_date = ticket.request_date or min(
-        (line.repair_requested_at.date() for line in lines if line.repair_requested_at),
-        default=now.date(),
-    )
+    if ticket.request_date is None:
+        raise ValueError("REQUEST_DATE_REQUIRED")
+    business_date = ticket.request_date
     for rma_no in distinct_rmas:
         rows = list(
             (await session.execute(select(TicketRma).where(TicketRma.rma_no == rma_no))).scalars().all()

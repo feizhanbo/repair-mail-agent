@@ -32,7 +32,7 @@ from app.config import settings
 
 EXPECTED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 EXPECTED_LOCAL_PORT = 13307
-EXPECTED_HEAD = "a0b5c6d7e8f9"
+EXPECTED_HEAD = "b1c6d7e8f9a0"
 CRITICAL_TABLES = (
     "emails",
     "email_attachments",
@@ -196,7 +196,7 @@ async def _database_snapshot(url: Any) -> dict[str, Any]:
                 counts[table] = int((await cursor.fetchone())[0])
             await cursor.execute(
                 "SELECT COUNT(*) FROM job_run_logs "
-                "WHERE status IN ('running', 'retrying')"
+                "WHERE status IN ('queued', 'running', 'retry_wait', 'retrying')"
             )
             active_jobs = int((await cursor.fetchone())[0])
     finally:

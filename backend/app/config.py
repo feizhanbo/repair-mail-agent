@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     AI_MAX_RETRIES: int = 2
     AI_RETRY_BASE_DELAY_SECONDS: float = 1.0
     AI_MAX_INPUT_CHARS: int = 12000
-    AI_PROMPT_VERSION: str = "rma-structured-output-v3"
+    AI_PROMPT_VERSION: str = "rma-structured-output-v4"
     AI_FULL_LOG_ENABLED: bool = True
     AI_FULL_LOG_RETENTION_DAYS: int = 30
     AI_LOG_DIR: str = str(BACKEND_DIR / "logs" / "ai")

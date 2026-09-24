@@ -151,7 +151,7 @@ async def test_domestic_route_uses_board_code_when_material_code_is_different() 
 
 
 @pytest.mark.anyio
-async def test_domestic_route_uses_unique_authoritative_material_name_fallback() -> None:
+async def test_domestic_route_does_not_infer_board_from_sn_material_name() -> None:
     ticket = RepairTicket(id=1, ticket_no="T1", customer_scope="domestic")
     item = RepairTicketItem(
         id=2,
@@ -162,16 +162,15 @@ async def test_domestic_route_uses_unique_authoritative_material_name_fallback()
         board_code="FOVI",
         board_name="浮动8路电压电流源(FOVI100)_A StationSM 8123 Rev1.20",
     )
-    route = board("M8123", "tianjin", name="FOVI100")
-
     result = await business_resolution.resolve_item_return_route(
-        QueueSession(execute_rows=[[], [route]]), ticket=ticket, item=item
+        QueueSession(execute_rows=[[]]), ticket=ticket, item=item
     )
 
-    assert result["status"] == "resolved"
-    assert result["route_source"] == "domestic_material_name_match"
-    assert item.board_code == "M8123"
-    assert item.matched_board_card_id == route.id
+    assert result["status"] == "needs_manual"
+    assert result["message"] == "BOARD_CODE_NOT_FOUND"
+    assert item.board_code == "FOVI"
+    assert item.board_name == "浮动8路电压电流源(FOVI100)_A StationSM 8123 Rev1.20"
+    assert item.matched_board_card_id is None
 
 
 @pytest.mark.anyio
@@ -321,7 +320,7 @@ async def test_policy_resolution_confirms_customer_and_snapshots_scope(monkeypat
         enabled=True,
     )
     session = QueueSession(
-        execute_rows=[[item], [policy]],
+        execute_rows=[[item], [policy], []],
         get_values={(SnAsset, 3): asset},
     )
 
@@ -359,6 +358,7 @@ async def test_unresolved_policy_clears_stale_decision_and_marks_manual(
         charge_status_source="customer_policy",
         service_policy_id=99,
         policy_resolution_status="resolved",
+        request_date=date(2026, 7, 31),
     )
     item = RepairTicketItem(
         id=2,
@@ -587,6 +587,7 @@ async def test_manual_charge_status_blocks_sap_export() -> None:
         mailing_address="Customer mailing address",
         contact_person="Customer Contact",
         contact_phone="13800000000",
+        request_date=date(2026, 7, 31),
     )
     item = RepairTicketItem(
         id=2,

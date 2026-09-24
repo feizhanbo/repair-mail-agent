@@ -295,6 +295,16 @@ async def preview_policy_delete(session: AsyncSession, policy_id: int) -> dict[s
 
 
 def _policy_snapshot(policy: CustomerServicePolicy, *, source: str) -> dict[str, Any]:
+    repair_price = None if policy.repair_price is None else str(policy.repair_price).strip()
+    currency = str(policy.currency or "").strip().upper()
+    monetary_defaults: list[str] = []
+    if policy.customer_scope == "overseas":
+        if not repair_price:
+            repair_price = "1200.00"
+            monetary_defaults.append("repair_price")
+        if not currency:
+            currency = "RMB"
+            monetary_defaults.append("currency")
     return {
         "policy_id": policy.id,
         "policy_code": policy.policy_code,
@@ -302,14 +312,15 @@ def _policy_snapshot(policy: CustomerServicePolicy, *, source: str) -> dict[str,
         "policy_type": policy.policy_type,
         "charge_status": policy.charge_status,
         "customer_scope": policy.customer_scope,
-        "repair_price": str(policy.repair_price),
-        "currency": policy.currency,
+        "repair_price": repair_price,
+        "currency": currency,
         "tax_rate": str(policy.tax_rate),
         "shipping_fee_text": policy.shipping_fee_text,
         "reply_salutation": policy.reply_salutation,
         "hide_company_name": policy.hide_company_name,
         "force_manual_review": policy.force_manual_review,
         "source": source,
+        "monetary_defaults": monetary_defaults,
     }
 
 

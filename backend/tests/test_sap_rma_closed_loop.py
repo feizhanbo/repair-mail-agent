@@ -524,6 +524,27 @@ def test_missing_customer_specific_policy_requires_manual_resolution() -> None:
     assert result["error_code"] == "CUSTOMER_POLICY_MISSING"
 
 
+def test_overseas_policy_defaults_only_missing_monetary_fields() -> None:
+    missing = _policy("overseas-missing", "special_out_of_warranty", "1200")
+    missing.customer_scope = "overseas"
+    missing.repair_price = None
+    missing.currency = None
+
+    snapshot = customer_policies._policy_snapshot(missing, source="customer_policy")
+
+    assert snapshot["repair_price"] == "1200.00"
+    assert snapshot["currency"] == "RMB"
+    assert snapshot["monetary_defaults"] == ["repair_price", "currency"]
+
+    explicit = _policy("overseas-explicit", "special_out_of_warranty", "875")
+    explicit.customer_scope = "overseas"
+    explicit.currency = "USD"
+    explicit_snapshot = customer_policies._policy_snapshot(explicit, source="customer_policy")
+    assert explicit_snapshot["repair_price"] == "875"
+    assert explicit_snapshot["currency"] == "USD"
+    assert explicit_snapshot["monetary_defaults"] == []
+
+
 def test_free_and_special_price_overlap_requires_manual_review() -> None:
     result = asyncio.run(
         customer_policies.resolve_customer_policy(

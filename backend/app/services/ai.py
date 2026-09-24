@@ -1110,10 +1110,15 @@ def _apply_request_date_fallback(
         }
         field_confidences["request_date"] = 1.0
         return
-    if fields.get("request_date"):
-        return
     source_time = source_email.sent_at or source_email.received_at
     if source_time is None:
+        fields.pop("request_date", None)
+        evidence.setdefault("derived_fields", {})["request_date"] = {
+            "source": "unavailable",
+            "email_id": source_email.id,
+            "error_code": "REQUEST_DATE_SOURCE_MISSING",
+        }
+        field_confidences.pop("request_date", None)
         return
     fields["request_date"] = source_time.date().isoformat()
     evidence.setdefault("derived_fields", {})["request_date"] = {
@@ -1215,7 +1220,7 @@ async def _enrich_ai_quality(
         if not item_sns:
             missing.setdefault("sn", "缺少设备 SN，无法校验资产。")
 
-    if parsed.intent_type in {"new_repair", "customer_supplement"}:
+    if parsed.intent_type in {"new_repair", "thread_new_repair", "customer_supplement"}:
         source_email, existing_ticket = await _request_date_source(
             session,
             email=email,
@@ -1427,7 +1432,6 @@ async def create_ai_parse_candidate(
     field_confidences = {item.path: item.score for item in parsed.field_confidences}
     manual = parsed.manual_review_suggestion
     evidence = {
-        "structured_evidence": [item.model_dump(mode="json") for item in parsed.evidence],
         "structured_conflicts": [item.model_dump(mode="json") for item in parsed.conflicts],
         "field_confidence_details": [item.model_dump(mode="json") for item in parsed.field_confidences],
         "manual_review_suggestion": manual.model_dump(mode="json"),

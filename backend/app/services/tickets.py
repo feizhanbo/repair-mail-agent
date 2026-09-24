@@ -1096,6 +1096,11 @@ async def create_ticket_from_parse_result(
     if selected_fields is not None:
         fields = {key: value for key, value in fields.items() if key in selected_fields}
     owner_id, language_code, routing_reason = await choose_system_owner(session, email)
+    request_date = await _authoritative_request_date(
+        session,
+        email=email,
+        intent_type=parse_result.intent_type,
+    )
     ticket_no = await _next_ticket_no(session)
     ticket = RepairTicket(
         ticket_no=ticket_no,
@@ -1110,7 +1115,7 @@ async def create_ticket_from_parse_result(
         contact_person=fields.get("contact_person"),
         contact_phone=fields.get("contact_phone"),
         contact_email=fields.get("contact_email") or email.from_address,
-        request_date=_coerce_ticket_value("request_date", fields.get("request_date")) if fields.get("request_date") else None,
+        request_date=request_date,
         mailing_address=fields.get("mailing_address"),
         problem_description=fields.get("problem_description"),
         missing_fields=parse_result.missing_fields if selected_fields is None else {},
@@ -1182,6 +1187,39 @@ async def _existing_ticket_for_email(session: AsyncSession, email: Email, parse_
     return None
 
 
+async def _authoritative_request_date(
+    session: AsyncSession,
+    *,
+    email: Email,
+    intent_type: str | None,
+) -> date:
+    source_email = email
+    if intent_type == "customer_supplement" and email.thread_id:
+        thread = await session.get(EmailThread, email.thread_id)
+        existing_ticket = (
+            await session.get(RepairTicket, thread.ticket_id)
+            if thread and thread.ticket_id
+            else None
+        )
+        if existing_ticket and existing_ticket.request_date:
+            return existing_ticket.request_date
+        first_inbound = await session.scalar(
+            select(Email)
+            .where(
+                Email.thread_id == email.thread_id,
+                Email.mail_direction == "inbound",
+            )
+            .order_by(Email.sent_at.asc(), Email.received_at.asc(), Email.id.asc())
+            .limit(1)
+        )
+        if first_inbound is not None:
+            source_email = first_inbound
+    source_time = source_email.sent_at or source_email.received_at
+    if source_time is None:
+        raise ValueError("REQUEST_DATE_SOURCE_MISSING")
+    return source_time.date()
+
+
 async def _link_email_to_ticket(
     session: AsyncSession,
     *,
@@ -1215,6 +1253,11 @@ async def ensure_manual_review_ticket_from_parse_result(
         from app.services.routing import choose_system_owner
 
         owner_id, language_code, routing_reason = await choose_system_owner(session, email)
+        request_date = await _authoritative_request_date(
+            session,
+            email=email,
+            intent_type=parse_result.intent_type,
+        )
         ticket_no = await _next_ticket_no(session)
         ticket = RepairTicket(
             ticket_no=ticket_no,
@@ -1226,7 +1269,7 @@ async def ensure_manual_review_ticket_from_parse_result(
             contact_person=fields.get("contact_person"),
             contact_phone=fields.get("contact_phone"),
             contact_email=fields.get("contact_email") or email.from_address,
-            request_date=_coerce_ticket_value("request_date", fields.get("request_date")) if fields.get("request_date") else None,
+            request_date=request_date,
             mailing_address=fields.get("mailing_address"),
             problem_description=fields.get("problem_description"),
             missing_fields=parse_result.missing_fields,
