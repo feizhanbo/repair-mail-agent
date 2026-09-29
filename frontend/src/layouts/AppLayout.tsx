@@ -69,7 +69,6 @@ export default function AppLayout() {
     ...(canOperate ? [{ key: '/statistics', icon: <BarChartOutlined />, label: '统计分析' }] : []),
     ...(canOperate ? [{ key: '/master-data', icon: <DatabaseOutlined />, label: '基础资料' }] : []),
     ...(canAdmin ? [{ key: '/users', icon: <UserOutlined />, label: '用户管理' }] : []),
-    ...(canAdmin ? [{ key: '/db-browser', icon: <DatabaseOutlined />, label: '数据库浏览' }] : []),
     ...baseMenuItems.slice(4),
     ...(canOperate ? [{ key: '/ai-logs', icon: <RobotOutlined />, label: 'AI 日志' }] : []),
     ...(canOperate ? [{ key: '/system', icon: <SettingOutlined />, label: '系统配置' }] : []),

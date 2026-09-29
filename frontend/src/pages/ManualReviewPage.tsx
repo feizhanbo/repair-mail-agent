@@ -6,6 +6,7 @@ import {
   MailOutlined,
   SearchOutlined,
   SyncOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -29,6 +30,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorMessage } from '../api/client';
+import { useAuthStore } from '../stores/authStore';
 import ContentPreviewButton from '../components/ContentPreviewButton';
 import CopyableField from '../components/CopyableField';
 import ErrorResult from '../components/ErrorResult';
@@ -50,6 +52,7 @@ import type {
   ParseResult,
   ReplyRecord,
   TicketLine,
+  UserAccount,
 } from '../types/api';
 import { ARCHIVE_DOWNLOAD_WARNING, attachmentTypeLabel, isEngineeringReference } from '../utils/attachments';
 import { filtersWithDateRange } from '../utils/filters';
@@ -87,6 +90,7 @@ const taskStatusOptions = [
   { value: 'pending', label: '待分配' },
   { value: 'assigned', label: '已分配待处理' },
   { value: 'claimed', label: '处理中' },
+  { value: 'assignment_failed', label: '分配失败' },
   { value: 'resolved', label: '已解决' },
 ];
 
@@ -137,8 +141,12 @@ export default function ManualReviewPage() {
   const [partialParse, setPartialParse] = useState<ParseResult | null>(null);
   const [policyOverrideOpen, setPolicyOverrideOpen] = useState(false);
   const [returnRouteItem, setReturnRouteItem] = useState<TicketLine | null>(null);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [assignForm] = Form.useForm<{ assigned_user_id?: number | null; reason?: string }>();
   const [filterForm] = Form.useForm<TaskFilters>();
   const queryClient = useQueryClient();
+  const currentUser = useAuthStore((s) => s.user);
+  const canAdmin = currentUser?.roles?.includes('admin') ?? false;
   const visibleTaskScopeOptions = taskScopeOptions;
   const handleMutationError = (error: unknown) => message.error(apiErrorMessage(error));
   const confirmAction = (title: string, onOk: () => void) => {
@@ -173,6 +181,27 @@ export default function ManualReviewPage() {
     void queryClient.invalidateQueries({ queryKey: ['ticket-detail'] });
     void queryClient.invalidateQueries({ queryKey: ['notifications'] });
   };
+
+  const operatorsQuery = useQuery({
+    queryKey: ['operators'],
+    queryFn: () => api.users({ role: 'operator', status: 'active', page: 1, page_size: 100 }),
+    staleTime: 60_000,
+  });
+  const operatorMap = new Map<number, string>(
+    (operatorsQuery.data?.items ?? []).map((u: UserAccount) => [u.id, u.real_name || u.username]),
+  );
+
+  const assignMutation = useMutation({
+    mutationFn: (values: { assigned_user_id: number | null; reason?: string }) =>
+      api.assignTask(selectedId as number, values),
+    onSuccess: () => {
+      message.success('任务分配已更新');
+      setAssignOpen(false);
+      assignForm.resetFields();
+      invalidateWorkbench();
+    },
+    onError: handleMutationError,
+  });
 
   const resolveMutation = useMutation({
     mutationFn: (values: ResolveForm) => {
@@ -389,7 +418,7 @@ export default function ManualReviewPage() {
     },
     {
       title: '负责人', dataIndex: 'assigned_user_id', width: 100,
-      render: (v: number | null) => v ? `用户#${v}` : <Typography.Text type="secondary">未分配</Typography.Text>,
+      render: (v: number | null) => (v && operatorMap.has(v)) ? operatorMap.get(v) : v ? `用户#${v}` : <Typography.Text type="secondary">未分配</Typography.Text>,
     },
   ];
 
@@ -474,6 +503,8 @@ export default function ManualReviewPage() {
               onOverridePolicy={() => setPolicyOverrideOpen(true)}
               onResolveRoutes={() => resolveRoutesMutation.mutate()}
               onSelectRoute={setReturnRouteItem}
+              onAssign={() => { assignForm.resetFields(); setAssignOpen(true); }}
+              canAdmin={canAdmin}
               reparseLoading={reparseMutation.isPending}
               draftLoading={draftReplyMutation.isPending}
               validateLoading={validateSnMutation.isPending}
@@ -488,6 +519,23 @@ export default function ManualReviewPage() {
           <SectionPanel><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择左侧任务" /></SectionPanel>
         ) : null}
       </div>
+      <Modal title="分配任务" open={assignOpen} onCancel={() => setAssignOpen(false)} onOk={() => assignForm.submit()} confirmLoading={assignMutation.isPending} destroyOnClose>
+        <Form form={assignForm} layout="vertical" onFinish={(values) => assignMutation.mutate({ assigned_user_id: values.assigned_user_id ?? null, reason: values.reason })}>
+          <Form.Item label="负责人" name="assigned_user_id">
+            <Select
+              placeholder="选择操作员（留空则取消分配）"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              options={(operatorsQuery.data?.items ?? []).map((u: UserAccount) => ({ value: u.id, label: `${u.real_name || u.username}（${u.username}）` }))}
+              loading={operatorsQuery.isFetching}
+            />
+          </Form.Item>
+          <Form.Item label="原因" name="reason">
+            <Input.TextArea rows={2} placeholder="选填" />
+          </Form.Item>
+        </Form>
+      </Modal>
       <Modal title="编辑工单字段" open={fieldOpen} onCancel={() => setFieldOpen(false)} footer={null} destroyOnClose>
         {detailQuery.data?.ticket_context ? (
           <TicketFieldEditor
@@ -679,6 +727,8 @@ function ManualEvidencePane({
   onOverridePolicy,
   onResolveRoutes,
   onSelectRoute,
+  onAssign,
+  canAdmin,
   reparseLoading,
   draftLoading,
   validateLoading,
@@ -700,6 +750,8 @@ function ManualEvidencePane({
   onOverridePolicy: () => void;
   onResolveRoutes: () => void;
   onSelectRoute: (item: TicketLine) => void;
+  onAssign: () => void;
+  canAdmin: boolean;
   reparseLoading: boolean;
   draftLoading: boolean;
   validateLoading: boolean;
@@ -816,12 +868,22 @@ function ManualEvidencePane({
                     )},
                   ]}
                   expandable={{
-                    expandedRowRender: (r: Attachment) => (
-                      <div className="evidence-grid">
-                        <div><Typography.Text strong>提取文本</Typography.Text><pre className="json-block">{r.extracted_text || '-'}</pre></div>
-                        <div><Typography.Text strong>提取 JSON</Typography.Text><JsonBlock value={r.extracted_json} /></div>
-                      </div>
-                    ),
+                    expandedRowRender: (r: Attachment) => {
+                      const isXlsx = (r.file_name || '').toLowerCase().endsWith('.xlsx');
+                      return (
+                        <div className="evidence-grid">
+                          <div>
+                            <Typography.Text strong>提取文本</Typography.Text>
+                            {isXlsx && r.oss_object_id ? (
+                              <div><ContentPreviewButton kind="attachment" id={r.id} /></div>
+                            ) : (
+                              <pre className="json-block">{r.extracted_text || '-'}</pre>
+                            )}
+                          </div>
+                          <div><Typography.Text strong>提取 JSON</Typography.Text><JsonBlock value={r.extracted_json} /></div>
+                        </div>
+                      );
+                    },
                   }}
                 />
               </div>
@@ -1000,6 +1062,9 @@ function ManualEvidencePane({
         <Button loading={resolveRoutesLoading} onClick={onResolveRoutes}>匹配寄回地址</Button>
         <Button icon={<SyncOutlined />} loading={reparseLoading} onClick={onReparse}>重新解析</Button>
         <Button icon={<MailOutlined />} loading={draftLoading} onClick={onDraftReply}>生成追问</Button>
+        {canAdmin && detail.task.status !== 'resolved' && detail.task.status !== 'closed' ? (
+          <Button icon={<UserOutlined />} onClick={onAssign}>分配</Button>
+        ) : null}
         <Button type="primary" disabled={detail.task.status === 'resolved' || detail.task.status === 'closed'} onClick={onResolve}>完成任务</Button>
       </div>
     </div>

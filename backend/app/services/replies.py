@@ -1925,30 +1925,32 @@ async def create_reply_draft(
         )
         raise
     effective_related_email_id = related_email.id
-    existing_draft = await session.scalar(
+    existing_reply = await session.scalar(
         select(ReplyRecord)
         .where(
             ReplyRecord.ticket_id == ticket.id,
             ReplyRecord.related_email_id == effective_related_email_id,
             ReplyRecord.reply_type == reply_kind,
-            ReplyRecord.review_status == "pending",
-            ReplyRecord.send_status == "pending_review",
         )
         .order_by(ReplyRecord.created_at.desc(), ReplyRecord.id.desc())
     )
-    if existing_draft is not None:
-        can_auto_send = _reply_can_auto_send(existing_draft)
+    if existing_reply is not None:
+        can_auto_send = (
+            existing_reply.review_status == "pending"
+            and existing_reply.send_status == "pending_review"
+            and _reply_can_auto_send(existing_reply)
+        )
         if can_auto_send:
-            existing_draft.review_status = "auto_approved"
-            existing_draft.reviewed_at = utcnow()
+            existing_reply.review_status = "auto_approved"
+            existing_reply.reviewed_at = utcnow()
             await _send_reply_record(
                 session,
-                reply=existing_draft,
+                reply=existing_reply,
                 user_id=user_id,
                 auto=True,
                 prepare_only=True,
             )
-        return serialize_reply(existing_draft)
+        return serialize_reply(existing_reply)
     if is_followup_reply_type(reply_kind) and ticket.followup_count >= ticket.max_followup_count:
         if ticket.current_status_code != "manual_review":
             await transition_ticket(

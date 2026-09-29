@@ -29,6 +29,8 @@ def test_public_routes_are_task_specific_and_do_not_expose_keys(monkeypatch: pyt
     assert routes["mail_classification"]["primary"] == {"profile": "qwen", "model": "qwen3.7-plus"}
     assert routes["mail_classification"]["fallback"] == {"profile": "qwen", "model": "qwen3.8-flash"}
     assert routes["attachment_text_parse"]["primary"]["model"] == "qwen3.7-plus"
+    assert routes["attachment_text_parse"]["timeout_seconds"] == 120
+    assert routes["attachment_visual_parse"]["timeout_seconds"] == 120
     assert routes["reply_draft"]["primary"]["model"] == "qwen3.7-plus"
     assert routes["mail_classification"]["structured_output_method"] == "json_schema"
     assert routes["attachment_visual_parse"]["structured_output_method"] == "json_mode"

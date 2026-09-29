@@ -47,7 +47,7 @@ tasks:
     primary: {profile: qwen, model: qwen3.7-plus}
     fallback: {profile: qwen, model: qwen3.8-flash}
     temperature: 0.0
-    timeout_seconds: 30
+    timeout_seconds: 120
     max_retries: 2
     max_output_tokens: 8192
     requires_json: true
@@ -56,7 +56,7 @@ tasks:
   attachment_visual_parse:
     primary: {profile: qwen, model: qwen-vl-plus}
     temperature: 0.0
-    timeout_seconds: 45
+    timeout_seconds: 120
     max_retries: 2
     max_output_tokens: 8192
     requires_json: true

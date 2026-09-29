@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
 
 from app import seed as seed_data
 from app.config import settings
@@ -255,6 +256,98 @@ async def test_uncertain_followup_count_changes_only_after_confirmed_sent(monkey
     assert result["send_status"] == "sent"
     assert ticket.followup_count == 1
     transition.assert_awaited_once()
+
+
+@run_async
+async def test_fourth_followup_attempt_transitions_to_manual_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="RMA2026092801",
+        current_status_code="need_customer_info",
+        missing_fields={"mailing_address": "required"},
+        followup_count=3,
+        max_followup_count=3,
+    )
+    parent = Email(
+        id=8,
+        mailbox_account="rmatest1@accotest.com",
+        message_id="<third-supplement@accotest.com>",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
+    transition = AsyncMock()
+    monkeypatch.setattr(replies, "get_ticket", AsyncMock(return_value=ticket))
+    monkeypatch.setattr(replies, "_require_reply_parent", AsyncMock(return_value=parent))
+    monkeypatch.setattr(replies, "transition_ticket", transition)
+
+    with pytest.raises(HTTPException) as caught:
+        await replies.create_reply_draft(
+            session,
+            ticket_id=ticket.id,
+            user_id=None,
+            reply_type="missing_fields",
+            related_email_id=parent.id,
+        )
+
+    assert caught.value.status_code == 400
+    assert caught.value.detail == "FOLLOWUP_LIMIT_EXCEEDED"
+    transition.assert_awaited_once_with(
+        session,
+        ticket=ticket,
+        to_status_code="manual_review",
+        trigger_event="manual_review_required",
+        user_id=None,
+        reason="追问次数已达到上限。",
+        manual_task_type="followup_limit",
+        manual_task_priority="high",
+    )
+
+
+@run_async
+async def test_existing_queued_followup_is_reused_without_duplicate_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticket = RepairTicket(
+        id=1,
+        ticket_no="RMA2026092901",
+        current_status_code="need_customer_info",
+        missing_fields={"mailing_address": "required"},
+        followup_count=1,
+        max_followup_count=3,
+    )
+    parent = Email(
+        id=8,
+        mailbox_account="rmatest1@accotest.com",
+        message_id="<first-supplement@accotest.com>",
+    )
+    existing = ReplyRecord(
+        id=17,
+        ticket_id=ticket.id,
+        related_email_id=parent.id,
+        reply_type="missing_fields",
+        followup_round=2,
+        to_addresses="rmatest2@accotest.com",
+        review_status="auto_approved",
+        send_status="queued",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=existing))
+    send_reply = AsyncMock()
+    monkeypatch.setattr(replies, "get_ticket", AsyncMock(return_value=ticket))
+    monkeypatch.setattr(replies, "_require_reply_parent", AsyncMock(return_value=parent))
+    monkeypatch.setattr(replies, "_send_reply_record", send_reply)
+    monkeypatch.setattr(replies, "serialize_reply", lambda value: {"id": value.id, "send_status": value.send_status})
+
+    result = await replies.create_reply_draft(
+        session,
+        ticket_id=ticket.id,
+        user_id=None,
+        reply_type="missing_fields",
+        related_email_id=parent.id,
+    )
+
+    assert result == {"id": 17, "send_status": "queued"}
+    send_reply.assert_not_awaited()
 
 
 @run_async

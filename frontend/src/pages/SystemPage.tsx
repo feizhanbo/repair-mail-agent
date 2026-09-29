@@ -1,48 +1,17 @@
-import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
+import { Button, Descriptions, Form, Input, Modal, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import { ChangePreview } from '../components/FriendlyPreview';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
 import { useAuthStore } from '../stores/authStore';
-import type { ReplyTemplate, SnSyncConfig, WorkflowStatus, WorkflowTransition } from '../types/api';
+import type { ReplyTemplate, WorkflowStatus, WorkflowTransition } from '../types/api';
 import { formatTime } from '../utils/format';
 import { hasAnyRole } from '../utils/roles';
-
-type ConfigForm = {
-  auto_send_enabled: boolean;
-  auto_followup_enabled: boolean;
-  auto_apply_min_confidence: number;
-  auto_send_min_confidence: number;
-  confidence_threshold: number;
-  max_follow_up: number;
-  imap_fetch_enabled: boolean;
-  imap_poll_interval_minutes: number;
-  imap_folder: string;
-  imap_fetch_limit: number;
-  imap_unseen_only: boolean;
-  imap_max_retries: number;
-  imap_archive_to_oss: boolean;
-};
-
-type SnConfigForm = Omit<SnSyncConfig, 'connection' | 'sn_column_map'>;
-type SnMappingRow = { key: string; localField: string; label: string; sourceColumn: string; required: boolean; example: string };
-
-const SN_FIELDS: Array<Omit<SnMappingRow, 'sourceColumn'>> = [
-  { key: 'sn', localField: 'sn', label: 'SN', required: true, example: 'SN00001234' },
-  { key: 'customer_code', localField: 'customer_code', label: '客户代码', required: true, example: 'C10001' },
-  { key: 'customer_name', localField: 'customer_name', label: '客户名称', required: true, example: '示例客户' },
-  { key: 'material_code', localField: 'material_code', label: 'SAP 物料代码', required: true, example: 'MAT-001' },
-  { key: 'material_name', localField: 'material_name', label: 'SAP 物料名称', required: false, example: '控制板卡' },
-  { key: 'asset_status', localField: 'asset_status', label: '资产状态', required: false, example: 'valid' },
-  { key: 'service_tracking_card_no', localField: 'service_tracking_card_no', label: '服务追踪卡号', required: false, example: 'STC-001' },
-  { key: 'parent_sn', localField: 'parent_sn', label: '上级 SN', required: false, example: 'PARENT-SN' },
-  { key: 'top_sn', localField: 'top_sn', label: 'Top SN', required: false, example: 'TOP-SN' },
-];
 
 type TemplateForm = {
   template_code: string;
@@ -59,10 +28,7 @@ type TemplateForm = {
 export default function SystemPage() {
   const canAdmin = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin']);
   const queryClient = useQueryClient();
-  const [configForm] = Form.useForm<ConfigForm>();
   const [templateForm] = Form.useForm<TemplateForm>();
-  const [snConfigForm] = Form.useForm<SnConfigForm>();
-  const [snMappings, setSnMappings] = useState<SnMappingRow[]>(SN_FIELDS.map((field) => ({ ...field, sourceColumn: '' })));
   const [editingTemplate, setEditingTemplate] = useState<ReplyTemplate | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const systemQuery = useQuery({
@@ -70,47 +36,10 @@ export default function SystemPage() {
     queryFn: api.systemInfo,
     enabled: canAdmin,
   });
-  const configQuery = useQuery({
-    queryKey: ['system-config'],
-    queryFn: api.systemConfig,
-    enabled: canAdmin,
-  });
-  const runtimeQuery = useQuery({
-    queryKey: ['system-runtime-status'],
-    queryFn: api.systemRuntimeStatus,
-    refetchInterval: 10000,
-    enabled: canAdmin,
-  });
   const templatesQuery = useQuery({
     queryKey: ['system-reply-templates'],
     queryFn: api.replyTemplates,
     enabled: canAdmin,
-  });
-  const snConfigQuery = useQuery({ queryKey: ['sn-sync-config'], queryFn: api.snSyncConfig });
-  const latestSnSyncQuery = useQuery({ queryKey: ['sn-sync-latest'], queryFn: api.latestSnSync, refetchInterval: 10000 });
-  const configMutation = useMutation({
-    mutationFn: (values: ConfigForm) => api.updateSystemConfig(values),
-    onSuccess: () => {
-      message.success('系统配置已保存');
-      void queryClient.invalidateQueries({ queryKey: ['system-info'] });
-      void queryClient.invalidateQueries({ queryKey: ['system-config'] });
-    },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const snConfigMutation = useMutation({
-    mutationFn: (values: Partial<SnSyncConfig>) => api.updateSnSyncConfig(values),
-    onSuccess: () => { message.success('SN 同步配置已保存'); void queryClient.invalidateQueries({ queryKey: ['sn-sync-config'] }); },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const snSyncMutation = useMutation({
-    mutationFn: api.startSnSync,
-    onSuccess: () => { message.success('SN 同步任务已执行'); void queryClient.invalidateQueries({ queryKey: ['sn-sync-latest'] }); void queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const mailPreflightMutation = useMutation({
-    mutationFn: api.mailTestPreflight,
-    onSuccess: (result) => message.success(`邮件预检通过，实际发送 ${result.messages_sent} 封邮件`),
-    onError: (error) => message.error(apiErrorMessage(error)),
   });
   const templateMutation = useMutation({
     mutationFn: ({ id, values }: { id: number; values: TemplateForm }) =>
@@ -151,30 +80,6 @@ export default function SystemPage() {
 
   const info = systemQuery.data;
   const integrations = info?.integrations ?? {};
-  useEffect(() => {
-    if (configQuery.data) {
-      configForm.setFieldsValue({
-        auto_send_enabled: configQuery.data.auto_send_enabled,
-        auto_followup_enabled: configQuery.data.auto_followup_enabled,
-        auto_apply_min_confidence: configQuery.data.auto_apply_min_confidence,
-        auto_send_min_confidence: configQuery.data.auto_send_min_confidence,
-        confidence_threshold: configQuery.data.confidence_threshold,
-        max_follow_up: configQuery.data.max_follow_up,
-        imap_fetch_enabled: configQuery.data.imap_fetch_enabled,
-        imap_poll_interval_minutes: configQuery.data.imap_poll_interval_minutes,
-        imap_folder: configQuery.data.imap_folder,
-        imap_fetch_limit: configQuery.data.imap_fetch_limit,
-        imap_unseen_only: configQuery.data.imap_unseen_only,
-        imap_max_retries: configQuery.data.imap_max_retries,
-        imap_archive_to_oss: configQuery.data.imap_archive_to_oss,
-      });
-    }
-  }, [configForm, configQuery.data]);
-  useEffect(() => {
-    if (!snConfigQuery.data) return;
-    snConfigForm.setFieldsValue(snConfigQuery.data);
-    setSnMappings(SN_FIELDS.map((field) => ({ ...field, sourceColumn: snConfigQuery.data.sn_column_map[field.localField] ?? '' })));
-  }, [snConfigForm, snConfigQuery.data]);
 
   const statusColumns: ColumnsType<WorkflowStatus> = [
     { title: '状态码', dataIndex: 'status_code', width: 170 },
@@ -246,131 +151,7 @@ export default function SystemPage() {
   return (
     <div className="page-stack">
       <PageTitle title="系统配置" />
-      <SectionPanel>
-        <div className="section-heading">
-          <Typography.Title level={4}>SN 同步与配置</Typography.Title>
-          <Button type="primary" icon={<SyncOutlined spin={snSyncMutation.isPending} />} loading={snSyncMutation.isPending} onClick={() => Modal.confirm({
-            title: '确认执行 SN 全量同步？',
-            content: <Descriptions bordered size="small" column={1}><Descriptions.Item label="数据源">{String(snConfigQuery.data?.connection?.adapter ?? '未配置')}</Descriptions.Item><Descriptions.Item label="来源表">{snConfigQuery.data ? `${snConfigQuery.data.sn_schema}.${snConfigQuery.data.sn_table}` : '未配置'}</Descriptions.Item><Descriptions.Item label="说明">同步过程会校验重复 SN、必填字段和快照完整性，并写入审计记录。</Descriptions.Item></Descriptions>,
-            okText: '确认同步',
-            onOk: () => snSyncMutation.mutateAsync(),
-          })}>立即同步</Button>
-        </div>
-        {latestSnSyncQuery.data ? <Descriptions size="small" bordered column={4} style={{ marginBottom: 16 }}>
-          <Descriptions.Item label="最近批次">{latestSnSyncQuery.data.batch_no}</Descriptions.Item>
-          <Descriptions.Item label="状态"><StatusTag value={latestSnSyncQuery.data.status} kind="sap" /></Descriptions.Item>
-          <Descriptions.Item label="来源 / 有效">{latestSnSyncQuery.data.source_count} / {latestSnSyncQuery.data.valid_count}</Descriptions.Item>
-          <Descriptions.Item label="重复数">{latestSnSyncQuery.data.duplicate_count}</Descriptions.Item>
-        </Descriptions> : <Alert type="info" showIcon message="暂无 SN 同步记录" style={{ marginBottom: 16 }} />}
-        <Form<SnConfigForm> form={snConfigForm} layout="vertical" onFinish={(values) => {
-          const sn_column_map = Object.fromEntries(snMappings.filter((row) => row.sourceColumn.trim()).map((row) => [row.localField, row.sourceColumn.trim()]));
-          const next = { ...values, sn_column_map };
-          Modal.confirm({ title: '确认修改 SN 同步配置？', width: 760, content: <ChangePreview before={snConfigQuery.data as unknown as Record<string, unknown>} after={{ ...values, sn_column_map: `${Object.keys(sn_column_map).length} 项字段映射` }} />, okText: '确认提交', onOk: () => snConfigMutation.mutateAsync(next) });
-        }}>
-          <Space wrap align="start">
-            <Form.Item label="启用 SQL Server 中转库" name="relay_sqlserver_enabled" valuePropName="checked"><Switch /></Form.Item>
-            <Form.Item label="启用 SN 同步" name="relay_sn_sync_enabled" valuePropName="checked"><Switch /></Form.Item>
-            <Form.Item label="来源 Schema" name="sn_schema" rules={[{ required: true }]}><Input /></Form.Item>
-            <Form.Item label="来源表" name="sn_table" rules={[{ required: true }]}><Input /></Form.Item>
-            <Form.Item label="SN 主键列" name="sn_primary_key" rules={[{ required: true }]}><Input /></Form.Item>
-            <Form.Item label="更新时间列" name="sn_updated_at_column"><Input /></Form.Item>
-            <Form.Item label="同步批量大小" name="batch_size" rules={[{ required: true }]}><InputNumber min={1} max={10000} /></Form.Item>
-            <Form.Item label="快照有效期（小时）" name="snapshot_max_age_hours" rules={[{ required: true }]}><InputNumber min={1} max={720} /></Form.Item>
-          </Space>
-          <Typography.Title level={5}>字段映射</Typography.Title>
-          <Table<SnMappingRow> rowKey="key" size="small" pagination={false} dataSource={snMappings} columns={[
-            { title: '本地业务字段', dataIndex: 'label', width: 180 },
-            { title: '来源数据库列', dataIndex: 'sourceColumn', render: (_, row) => <Input value={row.sourceColumn} placeholder="例如 SERIAL_NO" onChange={(event) => setSnMappings((items) => items.map((item) => item.key === row.key ? { ...item, sourceColumn: event.target.value } : item))} /> },
-            { title: '要求', dataIndex: 'required', width: 90, render: (value: boolean) => <Tag color={value ? 'red' : 'default'}>{value ? '必填' : '可选'}</Tag> },
-            { title: '示例值', dataIndex: 'example', width: 160 },
-          ]} />
-          <Button type="primary" htmlType="submit" loading={snConfigMutation.isPending} style={{ marginTop: 16 }}>保存 SN 配置</Button>
-        </Form>
-      </SectionPanel>
       {canAdmin ? <>
-      <SectionPanel>
-        <div className="section-heading">
-          <Typography.Title level={4}>运行配置</Typography.Title>
-        </div>
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={configQuery.data?.environment_note ?? '测试环境默认生成草稿并由人工确认后发送；生产环境可切换为自动发送。'}
-        />
-        {configQuery.data?.mail_test_static_ready === false ? (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 12 }}
-            message="测试邮箱静态配置未通过，发送开关不能开启"
-            description={(configQuery.data.mail_test_static_reasons ?? []).join('、')}
-          />
-        ) : null}
-        <Form<ConfigForm>
-          form={configForm}
-          layout="inline"
-          className="filter-bar"
-          onFinish={(values) => Modal.confirm({ title: '确认修改系统配置？', width: 760, content: <ChangePreview before={configQuery.data as unknown as Record<string, unknown>} after={values as unknown as Record<string, unknown>} />, okText: '确认提交', onOk: () => configMutation.mutateAsync(values) })}
-        >
-          <Form.Item label="普通回复自动发送" name="auto_send_enabled" valuePropName="checked">
-            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_send_enabled} />
-          </Form.Item>
-          <Form.Item label="缺失必填字段自动追问" name="auto_followup_enabled" valuePropName="checked">
-            <Switch disabled={configQuery.data?.mail_test_static_ready === false && !configQuery.data?.auto_followup_enabled} />
-          </Form.Item>
-          <Form.Item label="置信度阈值" name="confidence_threshold" rules={[{ required: true }]}>
-            <InputNumber min={0} max={1} step={0.01} precision={2} />
-          </Form.Item>
-          <Form.Item label="自动采纳安全阈值" name="auto_apply_min_confidence" rules={[{ required: true }]}>
-            <InputNumber min={0} max={1} step={0.01} precision={2} />
-          </Form.Item>
-          <Form.Item label="自动发送安全阈值" name="auto_send_min_confidence" rules={[{ required: true }]}>
-            <InputNumber min={0} max={1} step={0.01} precision={2} />
-          </Form.Item>
-          <Form.Item label="追问上限" name="max_follow_up" rules={[{ required: true }]}>
-            <InputNumber min={0} max={20} precision={0} />
-          </Form.Item>
-          <Form.Item label="自动收取邮件" name="imap_fetch_enabled" valuePropName="checked"><Switch /></Form.Item>
-          <Form.Item label="轮询周期（分钟）" name="imap_poll_interval_minutes" rules={[{ required: true }]}><InputNumber min={1} max={1440} /></Form.Item>
-          <Form.Item label="收件文件夹" name="imap_folder" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item label="单次收取上限" name="imap_fetch_limit" rules={[{ required: true }]}><InputNumber min={1} max={1000} /></Form.Item>
-          <Form.Item label="仅收取未读邮件" name="imap_unseen_only" valuePropName="checked"><Switch /></Form.Item>
-          <Form.Item label="失败重试次数" name="imap_max_retries" rules={[{ required: true }]}><InputNumber min={0} max={20} /></Form.Item>
-          <Form.Item label="归档原始邮件" name="imap_archive_to_oss" valuePropName="checked"><Switch /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={configMutation.isPending || configQuery.isFetching}>
-            保存
-          </Button>
-          <Button loading={mailPreflightMutation.isPending} onClick={() => mailPreflightMutation.mutate()}>
-            执行邮件预检（不发信）
-          </Button>
-        </Form>
-        {mailPreflightMutation.data ? (
-          <Alert
-            type="success"
-            showIcon
-            style={{ marginTop: 12 }}
-            message="邮件预检通过（未发送邮件）"
-            description={`数据库 ${mailPreflightMutation.data.database?.current_revision ?? '-'}；IMAP 只读检查通过；SMTP 阶段 ${mailPreflightMutation.data.smtp?.stage ?? '-'}；实际发送 ${mailPreflightMutation.data.messages_sent} 封。`}
-          />
-        ) : null}
-      </SectionPanel>
-      <SectionPanel>
-        <div className="section-heading">
-          <Typography.Title level={4}>运行状态</Typography.Title>
-        </div>
-        <Descriptions column={3} size="small" bordered>
-          <Descriptions.Item label="失败任务">{runtimeQuery.data?.failed_job_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="等待重试任务">{runtimeQuery.data?.retry_job_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="IMAP 待重试">{runtimeQuery.data?.imap_retry_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="待补齐归档证据工单">{runtimeQuery.data?.rma_sent_pending_closure_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="OSS 孤立对象">{runtimeQuery.data?.oss_orphan_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="最近 IMAP 状态">{runtimeQuery.data?.latest_imap_job?.status ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="最近 IMAP 失败数">{runtimeQuery.data?.latest_imap_job?.failed_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="DeepSeek 最近状态">{runtimeQuery.data?.ai_provider_status.deepseek?.status ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="Qwen 最近状态">{runtimeQuery.data?.ai_provider_status.qwen?.status ?? '-'}</Descriptions.Item>
-        </Descriptions>
-      </SectionPanel>
       <SectionPanel>
         <div className="section-heading">
           <Typography.Title level={4}>回复话术</Typography.Title>

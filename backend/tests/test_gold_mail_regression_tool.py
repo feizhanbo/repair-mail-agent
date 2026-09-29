@@ -445,6 +445,38 @@ def test_set_and_verify_runtime_switches_detects_drift(monkeypatch) -> None:
     assert exc.value.code == "RUNTIME_SEND_SWITCH_DRIFT"
 
 
+def test_restore_and_verify_send_config_uses_pre_suite_values(monkeypatch) -> None:
+    captured = {}
+
+    def patch(_client, **values):
+        captured.update(values)
+
+    monkeypatch.setattr(tool, "patch_config", patch)
+    monkeypatch.setattr(
+        tool,
+        "current_config",
+        lambda _client: {
+            "auto_send_enabled": True,
+            "auto_followup_enabled": True,
+        },
+    )
+
+    restored = tool._restore_and_verify_send_config(
+        object(),
+        {
+            "auto_send_enabled": True,
+            "auto_followup_enabled": True,
+        },
+    )
+
+    assert captured == {
+        "auto_send_enabled": True,
+        "auto_followup_enabled": True,
+    }
+    assert restored["auto_send_enabled"] is True
+    assert restored["auto_followup_enabled"] is True
+
+
 def test_target_relay_gate_rejects_sqlserver_worker() -> None:
     with pytest.raises(tool.GoldCliError) as exc:
         tool._assert_target_relay_is_test_http(
@@ -509,7 +541,7 @@ def test_config_restore_failure_is_structured_without_primary(monkeypatch) -> No
     assert exc.value.details == {"cause": "PermissionError"}
 
 
-def test_config_restore_includes_relay_runtime_switch(monkeypatch) -> None:
+def test_config_restore_only_uses_supported_mail_runtime_switches(monkeypatch) -> None:
     captured = {}
 
     def patch(_client, **values):
@@ -527,7 +559,10 @@ def test_config_restore_includes_relay_runtime_switch(monkeypatch) -> None:
         None,
     )
 
-    assert captured["relay_sqlserver_enabled"] is True
+    assert captured == {
+        "auto_send_enabled": False,
+        "auto_followup_enabled": True,
+    }
 
 
 def test_safe_exception_code_preserves_only_machine_prefix() -> None:
@@ -678,6 +713,50 @@ def test_classification_accepts_explicit_manual_review_outcome(tmp_path: Path) -
             },
             "items": [{"sn": "SN-GOLD-001"}],
         }]
+    }
+
+    assert tool._classification_issues(manifest, result) == []
+
+
+def test_followup_limit_classification_uses_initial_not_final_missing_fields(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gold = manifest["messages"][0]["gold"]
+    gold.update(
+        {
+            "send_mode": "auto_followup_limit",
+            "allow_manual_review": True,
+            "initial_missing_fields": [
+                "contact_person",
+                "contact_phone",
+                "mailing_address",
+            ],
+            "missing_fields": ["mailing_address"],
+            "expected_final_status": "manual_review",
+        }
+    )
+    message_id = manifest["messages"][0]["message_id"]
+    result = {
+        "cases": [
+            {
+                "message_id_sha256": hashlib.sha256(message_id.encode()).hexdigest(),
+                "intent_type": "new_repair",
+                "handling_level": "auto_repair",
+                "persistence_tier": "business",
+                "ticket": {
+                    "status": "need_customer_info",
+                    "customer_code": "CM00001",
+                    "missing_fields": {
+                        "contact_person": "required",
+                        "contact_phone": "required",
+                        "mailing_address": "required",
+                    },
+                },
+                "items": [{"sn": "SN-GOLD-001"}],
+            }
+        ]
     }
 
     assert tool._classification_issues(manifest, result) == []
@@ -1099,7 +1178,7 @@ def test_sensitive_egress_approval_is_explicit_and_hash_bound(tmp_path: Path) ->
     approved = tool.authorize_sensitive_egress(
         manifest, approved_by="business-owner", acknowledge=True
     )
-    assert approved["destinations"] == ["project_oss", "deepseek_api"]
+    assert approved["destinations"] == ["qwen_api"]
     assert tool._require_sensitive_egress_approval(manifest, payload)[
         "manifest_sha256"
     ] == tool.file_sha256(manifest)
@@ -1109,6 +1188,20 @@ def test_sensitive_egress_approval_is_explicit_and_hash_bound(tmp_path: Path) ->
     with pytest.raises(tool.GoldCliError) as exc:
         tool._require_sensitive_egress_approval(manifest, payload)
     assert exc.value.code == "SENSITIVE_EGRESS_APPROVAL_MANIFEST_CHANGED"
+
+
+def test_sensitive_egress_approval_adds_oss_only_for_attachments(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["suite_id"] = f"suite-egress-attachment-{hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]}"
+    payload["messages"][0]["attachments"] = [{"filename": "repair.xlsx"}]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    approved = tool.authorize_sensitive_egress(
+        manifest, approved_by="business-owner", acknowledge=True
+    )
+
+    assert approved["destinations"] == ["project_oss", "qwen_api"]
 
 
 def test_manifest_counts_customer_supplements_in_total_smtp_limit(tmp_path: Path) -> None:
@@ -1135,6 +1228,64 @@ def test_manifest_counts_customer_supplements_in_total_smtp_limit(tmp_path: Path
     assert "MAX_ACTUAL_SENDS_MUST_EQUAL_ALL_PLANNED_SMTP_SENDS" in exc.value.details[
         "errors"
     ]
+
+
+def test_manifest_accepts_three_round_auto_followup_limit_case(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["schema_version"] = 4
+    gold = payload["messages"][0]["gold"]
+    gold.update(
+        {
+            "send_mode": "auto_followup_limit",
+            "fixed_rma_no": None,
+            "expected_final_status": "manual_review",
+            "expected_outbound_count": 3,
+            "initial_missing_fields": ["contact_person", "contact_phone", "mailing_address"],
+            "missing_fields": ["mailing_address"],
+            "supplements": [
+                {"body_text": "联系人：测试客户"},
+                {"body_text": "联系电话：13800000000"},
+                {"body_text": "地址稍后补充"},
+            ],
+        }
+    )
+    payload["max_system_outbound_sends"] = 3
+    payload["max_supplement_sends"] = 3
+    payload["max_actual_sends"] = 6
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = tool.validate_manifest(manifest)
+
+    assert result["planned_system_outbound_sends"] == 3
+    assert result["planned_supplement_sends"] == 3
+    assert result["planned_total_smtp_sends"] == 6
+
+
+def test_manifest_rejects_auto_followup_limit_without_exactly_three_rounds(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["schema_version"] = 4
+    gold = payload["messages"][0]["gold"]
+    gold.update(
+        {
+            "send_mode": "auto_followup_limit",
+            "fixed_rma_no": None,
+            "expected_final_status": "manual_review",
+            "expected_outbound_count": 3,
+            "initial_missing_fields": ["contact_person", "contact_phone", "mailing_address"],
+            "supplements": [{"body_text": "only one"}],
+        }
+    )
+    payload["max_system_outbound_sends"] = 3
+    payload["max_supplement_sends"] = 1
+    payload["max_actual_sends"] = 4
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool.validate_manifest(manifest)
+
+    assert "messages[0].supplements_MUST_CONTAIN_3_ROUNDS" in exc.value.details["errors"]
 
 
 def test_supplement_envelope_is_test_only_and_threaded(monkeypatch) -> None:
@@ -1183,6 +1334,49 @@ def test_supplement_envelope_is_test_only_and_threaded(monkeypatch) -> None:
     assert "blockquote" in parsed.get_body(preferencelist=("html",)).get_content()
 
 
+def test_followup_limit_seed_is_test_only_and_single_recipient(monkeypatch) -> None:
+    captured: dict[str, bytes] = {}
+
+    class Smtp:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def login(self, *_args):
+            return None
+
+        def send_message(self, msg, *, from_addr, to_addrs):
+            captured["raw"] = msg.as_bytes()
+            assert from_addr == "rmatest2@accotest.com"
+            assert to_addrs == ["rmatest1@accotest.com"]
+
+    monkeypatch.setattr(tool, "test_mail_configuration_reasons", lambda: [])
+    monkeypatch.setattr(tool.settings, "E2E_RMATEST2_SMTP_USER", "rmatest2@accotest.com")
+    monkeypatch.setattr(tool.settings, "E2E_RMATEST2_SMTP_PASSWORD", "test-secret")
+    monkeypatch.setattr(tool.smtplib, "SMTP_SSL", Smtp)
+
+    result = tool.send_followup_limit_seed(confirm_real_smtp=True)
+    parsed = BytesParser(policy=policy.default).parsebytes(captured["raw"])
+
+    assert result["smtp_send_count"] == 1
+    assert parsed["Subject"].startswith("[TEST ONLY]")
+    assert parsed["From"] == "rmatest2@accotest.com"
+    assert parsed["To"] == "rmatest1@accotest.com"
+    assert "M81232504500155" in parsed.get_body(preferencelist=("plain",)).get_content()
+
+
+def test_followup_limit_seed_requires_explicit_real_smtp_confirmation() -> None:
+    with pytest.raises(tool.GoldCliError) as exc:
+        tool.send_followup_limit_seed(confirm_real_smtp=False)
+
+    assert exc.value.code == "REAL_SMTP_CONFIRMATION_REQUIRED"
+
+
 def test_supplement_send_checks_limit_before_smtp(monkeypatch) -> None:
     monkeypatch.setattr(
         tool.smtplib,
@@ -1198,6 +1392,37 @@ def test_supplement_send_checks_limit_before_smtp(monkeypatch) -> None:
             hard_limit=1,
         )
     assert exc.value.code == "SUPPLEMENT_SEND_HARD_LIMIT_EXCEEDED"
+
+
+def test_wait_for_next_followup_message_skips_seen_thread_messages(monkeypatch) -> None:
+    monkeypatch.setattr(tool, "_assert_config_matches", lambda *_args: None)
+    monkeypatch.setattr(
+        tool,
+        "_rmatest2_new_messages",
+        lambda _uid: [
+            {
+                "message_id": "<followup-1@accotest.com>",
+                "in_reply_to": "<original@accotest.com>",
+                "references": "<original@accotest.com>",
+            },
+            {
+                "message_id": "<followup-2@accotest.com>",
+                "in_reply_to": "<supplement-1@accotest.com>",
+                "references": "<original@accotest.com> <followup-1@accotest.com>",
+            },
+        ],
+    )
+
+    result = tool._wait_for_next_followup_message(
+        10,
+        thread_message_ids={"<original@accotest.com>", "<supplement-1@accotest.com>"},
+        seen_followup_ids={"<followup-1@accotest.com>"},
+        client=object(),
+        expected_switches={},
+        timeout_seconds=1,
+    )
+
+    assert result["message_id"] == "<followup-2@accotest.com>"
 
 
 def test_resume_pending_followup_reenters_idempotent_draft_endpoint() -> None:

@@ -71,7 +71,8 @@ from tools.run_new_repair_mail_e2e import Client, current_config, find_email, lo
 from tools.run_rmatest_batch_e2e import apply_temporary_master_data, cleanup_temporary_master_data
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = {3, 4}
 MESSAGE_ID_PATTERN = re.compile(r"^<[^<>\s]+>$")
 RMA_PATTERN = re.compile(r"^\d{10}$")
 INTENTS = {str(intent) for intent in EmailIntent}
@@ -83,6 +84,7 @@ SEND_MODES = {
     "auto_rma",
     "auto_followup",
     "followup_then_rma",
+    "auto_followup_limit",
     "manual_review_then_rma",
 }
 TERMINAL_PARSE_STATUSES = {"parsed", "failed", "manual_review", "needs_manual", "irrelevant"}
@@ -167,6 +169,18 @@ def _set_and_verify_config(
     return actual
 
 
+def _restore_and_verify_send_config(
+    client: Client,
+    initial: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore the send switches to their pre-suite values."""
+    return _set_and_verify_config(
+        client,
+        auto_send_enabled=bool(initial.get("auto_send_enabled")),
+        auto_followup_enabled=bool(initial.get("auto_followup_enabled")),
+    )
+
+
 def _assert_config_matches(client: Client, expected: dict[str, bool]) -> None:
     actual = current_config(client)
     drift = {
@@ -206,7 +220,6 @@ def _restore_config_without_masking_primary_error(
             client,
             auto_send_enabled=bool(initial.get("auto_send_enabled")),
             auto_followup_enabled=bool(initial.get("auto_followup_enabled")),
-            relay_sqlserver_enabled=bool(initial.get("relay_sqlserver_enabled")),
         )
     except Exception as exc:
         code = _safe_exception_code(exc)
@@ -345,6 +358,37 @@ def _fetch_raw_by_message_id(
         uid_validity = uid_validity_response[1][0].decode("ascii", errors="replace") if uid_validity_response[1] else None
         status, data = client.uid("search", None, "HEADER", "Message-ID", message_id)
         uids = (data[0] or b"").split() if status == "OK" else []
+        if not uids:
+            # Some providers expose a newly delivered message through ALL/SINCE
+            # before their HEADER search index catches up. Inspect only recent
+            # headers so test inventory remains read-only and deterministic.
+            all_status, all_data = client.uid("search", None, "ALL")
+            recent_uids = (
+                (all_data[0] or b"").split()[-200:]
+                if all_status == "OK" and all_data
+                else []
+            )
+            target = normalized_message_id(message_id)
+            for candidate_uid in recent_uids:
+                header_status, header_data = client.uid(
+                    "fetch",
+                    candidate_uid,
+                    "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                )
+                header = next(
+                    (
+                        part[1]
+                        for part in header_data or []
+                        if isinstance(part, tuple) and isinstance(part[1], bytes)
+                    ),
+                    b"",
+                )
+                if header_status != "OK" or not header:
+                    continue
+                parsed_header = BytesParser(policy=policy.default).parsebytes(header)
+                header_message_id = str(parsed_header.get("Message-ID") or "").strip()
+                if header_message_id and normalized_message_id(header_message_id) == target:
+                    uids.append(candidate_uid)
         if len(uids) != 1:
             raise GoldCliError("IMAP_MESSAGE_ID_MATCH_COUNT_INVALID", details={"match_count": len(uids)})
         status, fetched = client.uid("fetch", uids[0], "(BODY.PEEK[])")
@@ -420,6 +464,7 @@ def inventory(suite_id: str, message_ids: list[str]) -> dict[str, Any]:
             "temporary_board_cards": [],
             "temporary_customer_policies": [],
             "supplement": None,
+            "supplements": [],
         }
         messages.append(metadata)
     manifest = {
@@ -441,8 +486,9 @@ def inventory(suite_id: str, message_ids: list[str]) -> dict[str, Any]:
 def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str, Any]:
     manifest = read_json(path)
     errors: list[str] = []
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        errors.append("SCHEMA_VERSION_MUST_EQUAL_3")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        errors.append("SCHEMA_VERSION_MUST_EQUAL_3_OR_4")
     if manifest.get("source_mailbox", "").lower() != TEST_MAIL_SENDER:
         errors.append("SOURCE_MAILBOX_MUST_BE_RMATEST1")
     if manifest.get("outbound_recipient_only", "").lower() != TEST_MAIL_RECIPIENT:
@@ -504,6 +550,25 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
                 errors.append(f"{prefix}.fixed_rma_no_INVALID")
         if gold.get("send_mode") == "followup_then_rma" and not isinstance(gold.get("supplement"), dict):
             errors.append(f"{prefix}.supplement_REQUIRED")
+        if gold.get("send_mode") == "auto_followup_limit":
+            supplements = gold.get("supplements")
+            initial_missing_fields = gold.get("initial_missing_fields")
+            if schema_version != 4:
+                errors.append(f"{prefix}.auto_followup_limit_REQUIRES_SCHEMA_VERSION_4")
+            if not isinstance(initial_missing_fields, list) or not initial_missing_fields:
+                errors.append(f"{prefix}.initial_missing_fields_REQUIRED")
+            if not isinstance(supplements, list) or len(supplements) != 3:
+                errors.append(f"{prefix}.supplements_MUST_CONTAIN_3_ROUNDS")
+            else:
+                for supplement_index, supplement in enumerate(supplements):
+                    if not isinstance(supplement, dict) or not str(supplement.get("body_text") or "").strip():
+                        errors.append(
+                            f"{prefix}.supplements[{supplement_index}].body_text_REQUIRED"
+                        )
+            if count != 3:
+                errors.append(f"{prefix}.expected_outbound_count_MUST_EQUAL_3")
+            if gold.get("expected_final_status") != "manual_review":
+                errors.append(f"{prefix}.expected_final_status_MUST_BE_MANUAL_REVIEW")
         if gold.get("send_mode") == "manual_review_then_rma":
             if not gold.get("allow_manual_review"):
                 errors.append(f"{prefix}.manual_review_then_rma_REQUIRES_MANUAL_REVIEW")
@@ -536,8 +601,11 @@ def validate_manifest(path: Path, *, require_approval: bool = False) -> dict[str
             errors.append(f"{prefix}.expected_final_status_REQUIRED")
     supplement_sends = sum(
         1
-        for item in messages
         if (item.get("gold") or {}).get("send_mode") == "followup_then_rma"
+        else len((item.get("gold") or {}).get("supplements") or [])
+        if (item.get("gold") or {}).get("send_mode") == "auto_followup_limit"
+        else 0
+        for item in messages
     )
     total_smtp_sends = planned_sends + supplement_sends
     if manifest.get("max_system_outbound_sends") != planned_sends:
@@ -578,9 +646,9 @@ def approve_manifest(path: Path, approved_by: str, acknowledge: bool) -> dict[st
 
 
 def _required_egress_destinations(manifest: dict[str, Any]) -> list[str]:
-    destinations = ["project_oss", "deepseek_api"]
+    destinations = ["qwen_api"]
     if any(item.get("attachments") for item in manifest.get("messages") or []):
-        destinations.append("qwen_api")
+        destinations.insert(0, "project_oss")
     return destinations
 
 
@@ -1252,7 +1320,6 @@ def _classify_suite_once(path: Path, confirm_suite: str) -> dict[str, Any]:
             client,
             auto_send_enabled=False,
             auto_followup_enabled=False,
-            relay_sqlserver_enabled=False,
         )
         # Relay export is toggled through the sn-sync config endpoint; disable
         # it during classification so ready_for_export tickets do not enqueue
@@ -1913,6 +1980,101 @@ def _send_supplement(
     return message_id
 
 
+def send_followup_limit_seed(*, confirm_real_smtp: bool) -> dict[str, Any]:
+    if not confirm_real_smtp:
+        raise GoldCliError("REAL_SMTP_CONFIRMATION_REQUIRED")
+    reasons = test_mail_configuration_reasons()
+    if reasons:
+        raise GoldCliError("MAIL_SAFETY_GATE_FAILED", details={"reasons": reasons})
+    if (
+        settings.E2E_RMATEST2_SMTP_USER.lower() != TEST_MAIL_RECIPIENT
+        or not settings.E2E_RMATEST2_SMTP_PASSWORD
+    ):
+        raise GoldCliError("RMATEST2_SMTP_CONFIGURATION_INVALID")
+    message_id = make_msgid(domain="accotest.com")
+    msg = EmailMessage()
+    msg["From"] = TEST_MAIL_RECIPIENT
+    msg["To"] = TEST_MAIL_SENDER
+    msg["Subject"] = test_only_subject(
+        f"AUTO FOLLOWUP LIMIT {datetime.now().astimezone().strftime('%Y%m%d-%H%M%S')}"
+    )
+    msg["Message-ID"] = message_id
+    msg["Date"] = format_datetime(datetime.now(timezone.utc))
+    msg.set_content(
+        "您好，以下板卡需要维修。\n"
+        "客户名称：杰华特微电子（珠海）有限公司\n"
+        "SN：M81232504500155\n"
+        "故障描述：校准Fail\n"
+        "联系人、联系电话和维修后寄回地址暂未提供。\n"
+    )
+    recipients = [address.lower() for _, address in getaddresses([str(msg["To"])])]
+    if (
+        str(msg["From"]).lower() != TEST_MAIL_RECIPIENT
+        or recipients != [TEST_MAIL_SENDER]
+        or msg.get("Cc")
+        or msg.get("Bcc")
+        or not str(msg["Subject"]).upper().startswith("[TEST ONLY]")
+    ):
+        raise GoldCliError("FOLLOWUP_SEED_ENVELOPE_GATE_FAILED")
+    with smtplib.SMTP_SSL(
+        settings.E2E_RMATEST2_SMTP_HOST,
+        settings.E2E_RMATEST2_SMTP_PORT,
+        context=ssl.create_default_context(),
+        timeout=30,
+    ) as smtp:
+        smtp.login(
+            settings.E2E_RMATEST2_SMTP_USER,
+            settings.E2E_RMATEST2_SMTP_PASSWORD,
+        )
+        smtp.send_message(
+            msg, from_addr=TEST_MAIL_RECIPIENT, to_addrs=[TEST_MAIL_SENDER]
+        )
+    return {
+        "status": "sent",
+        "message_id": message_id,
+        "subject": str(msg["Subject"]),
+        "from": TEST_MAIL_RECIPIENT,
+        "to": TEST_MAIL_SENDER,
+        "smtp_send_count": 1,
+    }
+
+
+def _wait_for_next_followup_message(
+    baseline_uid: int,
+    *,
+    thread_message_ids: set[str],
+    seen_followup_ids: set[str],
+    client: Client,
+    expected_switches: dict[str, bool],
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        _assert_config_matches(client, expected_switches)
+        candidates = []
+        for row in _rmatest2_new_messages(baseline_uid):
+            message_id = str(row.get("message_id") or "")
+            in_reply_to = str(row.get("in_reply_to") or "")
+            references = str(row.get("references") or "")
+            if not message_id or message_id in seen_followup_ids:
+                continue
+            if in_reply_to in thread_message_ids or any(
+                thread_id in references for thread_id in thread_message_ids
+            ):
+                candidates.append(row)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise GoldCliError(
+                "FOLLOWUP_REPLY_NOT_UNIQUE", details={"match_count": len(candidates)}
+            )
+        if time.monotonic() >= deadline:
+            raise GoldCliError(
+                "FOLLOWUP_REPLY_NOT_UNIQUE", details={"match_count": 0}
+            )
+        time.sleep(2)
+
+
 def _assert_case(item: dict[str, Any], value: dict[str, Any], outbound: list[dict[str, Any]]) -> list[str]:
     gold = item["gold"]
     issues: list[str] = []
@@ -2113,19 +2275,28 @@ def _classification_issues(
             if not accepted_email_manual and bool(ticket) != bool(gold.get("create_ticket")):
                 codes.append("TICKET_CREATION_MISMATCH")
             if ticket:
+                classification_missing_fields = (
+                    gold.get("initial_missing_fields")
+                    if gold.get("send_mode") == "auto_followup_limit"
+                    else gold.get("missing_fields")
+                ) or []
                 accepted_resolved_problem = (
-                    gold.get("missing_fields") == ["problem_description"]
+                    classification_missing_fields == ["problem_description"]
                     and ticket.get("status") == "ready_for_export"
                     and bool(str(ticket.get("problem_description") or "").strip())
                     and not (ticket.get("missing_fields") or {})
                 )
                 expected_stage = (
-                    "manual_review"
-                    if gold.get("allow_manual_review")
+                    "need_customer_info"
+                    if gold.get("send_mode") == "auto_followup_limit" and classification_missing_fields
                     else (
-                        "need_customer_info"
-                        if gold.get("missing_fields")
-                        else "ready_for_export"
+                        "manual_review"
+                        if gold.get("allow_manual_review")
+                        else (
+                            "need_customer_info"
+                            if classification_missing_fields
+                            else "ready_for_export"
+                        )
                     )
                 )
                 accepted_human_stage = (
@@ -2135,7 +2306,7 @@ def _classification_issues(
                 if ticket.get("status") != expected_stage and not accepted_resolved_problem and not accepted_human_stage:
                     codes.append("CLASSIFICATION_STAGE_MISMATCH")
                 missing = sorted((ticket.get("missing_fields") or {}).keys())
-                if missing != sorted(gold.get("missing_fields") or []) and not accepted_resolved_problem:
+                if missing != sorted(classification_missing_fields) and not accepted_resolved_problem:
                     codes.append("MISSING_FIELDS_MISMATCH")
                 for key, expected in (gold.get("expected_fields") or {}).items():
                     if ticket.get(key) != expected:
@@ -2308,8 +2479,11 @@ def _run_suite_unlocked(
     )
     selected_supplement_limit = sum(
         1
-        for item in messages
         if item["gold"].get("send_mode") == "followup_then_rma"
+        else len(item["gold"].get("supplements") or [])
+        if item["gold"].get("send_mode") == "auto_followup_limit"
+        else 0
+        for item in messages
     )
     rmatest2_suite_baseline_uid = 0
     rmatest1_suite_baseline_uid = 0
@@ -2370,7 +2544,7 @@ def _run_suite_unlocked(
                     raise GoldCliError("SYSTEM_OUTBOUND_HARD_LIMIT_WOULD_BE_EXCEEDED")
                 expected_switches = {
                     "auto_send_enabled": mode in {"auto_rma", "followup_then_rma", "manual_review_then_rma"},
-                    "auto_followup_enabled": mode in {"auto_followup", "followup_then_rma"},
+                    "auto_followup_enabled": mode in {"auto_followup", "followup_then_rma", "auto_followup_limit"},
                 }
                 _set_and_verify_config(client, **expected_switches)
                 email_id, fetch_result = _fetch_system_message(
@@ -2413,12 +2587,12 @@ def _run_suite_unlocked(
                                 gold=item["gold"],
                                 suite_id=suite_id,
                             )
-                    initial_status = "auto_replied" if mode == "followup_then_rma" else str(item["gold"].get("expected_final_status") or "")
+                    initial_status = "auto_replied" if mode in {"followup_then_rma", "auto_followup_limit"} else str(item["gold"].get("expected_final_status") or "")
                     value = _wait_for_case(
                         client,
                         email_id,
                         initial_status,
-                        1 if mode == "followup_then_rma" else int(item["gold"].get("expected_outbound_count") or 0),
+                        1 if mode in {"followup_then_rma", "auto_followup_limit"} else int(item["gold"].get("expected_outbound_count") or 0),
                         approve_special_policy=mode in {"auto_rma", "manual_review_then_rma"},
                         expected_switches=expected_switches,
                         accepted_statuses=(
@@ -2486,6 +2660,56 @@ def _run_suite_unlocked(
                         max_sent_followups=1,
                     )
                     value = {"email_detail": original_email_detail, "ticket_detail": recovered.get("ticket_detail")}
+                elif mode == "auto_followup_limit":
+                    original_email_detail = value.get("email_detail")
+                    thread_message_ids = {message_id}
+                    seen_followup_ids: set[str] = set()
+                    supplements = list(item["gold"].get("supplements") or [])
+                    for supplement_index, supplement in enumerate(supplements, start=1):
+                        followup_message = _wait_for_next_followup_message(
+                            baseline_uid,
+                            thread_message_ids=thread_message_ids,
+                            seen_followup_ids=seen_followup_ids,
+                            client=client,
+                            expected_switches=expected_switches,
+                        )
+                        followup_message_id = str(followup_message.get("message_id") or "")
+                        seen_followup_ids.add(followup_message_id)
+                        thread_message_ids.add(followup_message_id)
+                        supplement_id = _send_supplement(
+                            message_id,
+                            followup_message,
+                            supplement,
+                            sent_so_far=result["actual_supplement_send_count"],
+                            hard_limit=selected_supplement_limit,
+                        )
+                        supplement_message_ids.add(supplement_id)
+                        thread_message_ids.add(supplement_id)
+                        result["actual_supplement_send_count"] = len(supplement_message_ids)
+                        result["actual_total_smtp_count"] = (
+                            result["actual_system_outbound_count"]
+                            + result["actual_supplement_send_count"]
+                        )
+                        supplement_email_id, _ = _fetch_system_message(
+                            client,
+                            supplement_id,
+                            expected_switches=expected_switches,
+                        )
+                        if not supplement_email_id:
+                            raise GoldCliError("SUPPLEMENT_NOT_ARCHIVED")
+                        is_limit_attempt = supplement_index == len(supplements)
+                        recovered = _wait_for_case(
+                            client,
+                            supplement_email_id,
+                            "manual_review" if is_limit_attempt else "auto_replied",
+                            3 if is_limit_attempt else supplement_index + 1,
+                            expected_switches=expected_switches,
+                            max_sent_followups=3,
+                        )
+                    value = {
+                        "email_detail": original_email_detail,
+                        "ticket_detail": recovered.get("ticket_detail"),
+                    }
                 outbound = _wait_for_case_outbound(
                     baseline_uid,
                     original_message_id=message_id,
@@ -2641,11 +2865,7 @@ def _run_suite_unlocked(
     finally:
         if initial is not None:
             try:
-                _set_and_verify_config(
-                    client,
-                    auto_send_enabled=False,
-                    auto_followup_enabled=False,
-                )
+                _restore_and_verify_send_config(client, initial)
             except Exception as exc:
                 result["runtime_restore_error"] = type(exc).__name__
                 result["status"] = "error"
@@ -2700,6 +2920,11 @@ def build_parser() -> argparse.ArgumentParser:
     inv = sub.add_parser("inventory", help="Read exact rmatest1 originals with BODY.PEEK and create manifest")
     inv.add_argument("--suite-id", required=True)
     inv.add_argument("--message-id", action="append", required=True)
+    seed = sub.add_parser(
+        "seed-followup-limit",
+        help="Send one test-only incomplete repair from rmatest2 to rmatest1",
+    )
+    seed.add_argument("--confirm-real-smtp", action="store_true")
     val = sub.add_parser("validate", help="Validate manifest and optional approval hash")
     val.add_argument("--manifest", type=Path, required=True)
     val.add_argument("--require-approval", action="store_true")
@@ -2741,6 +2966,10 @@ def main() -> None:
             result = doctor(live=args.live)
         elif args.command == "inventory":
             result = inventory(args.suite_id, args.message_id)
+        elif args.command == "seed-followup-limit":
+            result = send_followup_limit_seed(
+                confirm_real_smtp=args.confirm_real_smtp
+            )
         elif args.command == "validate":
             result = validate_manifest(args.manifest, require_approval=args.require_approval)
         elif args.command == "approve":

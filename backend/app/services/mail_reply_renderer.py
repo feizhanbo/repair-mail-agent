@@ -41,6 +41,10 @@ UNSAFE_CSS_RE = re.compile(
     re.IGNORECASE,
 )
 CID_RE = re.compile(r"cid\s*:\s*([^\s\"'<>\)]+)", re.IGNORECASE)
+GENERATED_HISTORY_CID_RE = re.compile(
+    r"^history-\d+-[0-9a-f]{12}-\d+@rma\.accotest\.com$",
+    re.IGNORECASE,
+)
 
 
 class ReplyRenderError(ValueError):
@@ -160,6 +164,43 @@ def _replace_cids(source: str, mapping: dict[str, str]) -> str:
     return CID_RE.sub(replace, source)
 
 
+def _drop_generated_history_cid(source: str, content_id: str) -> str:
+    """Drop a quoted image whose generated CID was not forwarded by the customer client."""
+    normalized_target = _normalize_cid(content_id)
+    soup = BeautifulSoup(source or "", "lxml")
+    for tag in list(soup.find_all(True)):
+        if tag.name == "style":
+            refs = {_normalize_cid(item) for item in CID_RE.findall(tag.get_text())}
+            if normalized_target in refs:
+                tag.decompose()
+            continue
+        removed = False
+        for attribute in CID_URL_ATTRIBUTES:
+            value = tag.attrs.get(attribute)
+            rendered = " ".join(value) if isinstance(value, list) else str(value or "")
+            refs = {_normalize_cid(item) for item in CID_RE.findall(rendered)}
+            if normalized_target not in refs:
+                continue
+            if tag.name in {"img", "image", "source"} and attribute == "src":
+                tag.decompose()
+                removed = True
+                break
+            del tag.attrs[attribute]
+        if removed:
+            continue
+        style = str(tag.attrs.get("style") or "")
+        refs = {_normalize_cid(item) for item in CID_RE.findall(style)}
+        if normalized_target in refs:
+            del tag.attrs["style"]
+    style_parts: list[str] = []
+    for tag in soup.find_all("style"):
+        style_parts.append(str(tag))
+        tag.extract()
+    body = soup.body
+    body_html = body.decode_contents() if body is not None else str(soup)
+    return "".join(style_parts) + body_html
+
+
 def _content_id_index(message: Message) -> dict[str, list[Message]]:
     result: dict[str, list[Message]] = {}
     for part in message.walk() if message.is_multipart() else [message]:
@@ -225,6 +266,7 @@ def render_reply_history_from_eml(
     mapping: dict[str, str] = {}
     resources: list[RelatedResource] = []
     recovered_known_cids: list[str] = []
+    dropped_generated_history_cids: list[str] = []
     for index, original_cid in enumerate(sorted(referenced_cids), start=1):
         matches = cid_index.get(original_cid, [])
         if not matches:
@@ -232,6 +274,10 @@ def render_reply_history_from_eml(
                 content = ACCO_TEST_LOGO_PNG
                 maintype, subtype = "image", "png"
                 recovered_known_cids.append(original_cid)
+            elif GENERATED_HISTORY_CID_RE.fullmatch(original_cid):
+                sanitized_html = _drop_generated_history_cid(sanitized_html, original_cid)
+                dropped_generated_history_cids.append(original_cid)
+                continue
             else:
                 raise ReplyRenderError("REPLY_PARENT_CID_MISSING")
         else:
@@ -277,6 +323,7 @@ def render_reply_history_from_eml(
         "plain_sha256": hashlib.sha256(plain.encode("utf-8")).hexdigest(),
         "html_sha256": hashlib.sha256(html_body.encode("utf-8")).hexdigest(),
         "recovered_known_cids": recovered_known_cids,
+        "dropped_generated_history_cids": dropped_generated_history_cids,
         "resources": [
             {
                 "content_id": resource.content_id,

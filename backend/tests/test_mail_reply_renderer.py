@@ -143,6 +143,30 @@ def test_renderer_recovers_missing_known_accotest_logo_from_customer_quote() -> 
     assert "cid:history-22-" in history.html
 
 
+def test_renderer_drops_missing_generated_history_image_from_customer_quote() -> None:
+    message = EmailMessage()
+    message["From"] = "rmatest2@accotest.com"
+    message["To"] = "rmatest1@accotest.com"
+    message["Subject"] = "Re: repair"
+    message["Message-ID"] = "<second-supplement@example.com>"
+    message.set_content("Second supplement with quoted prior reply")
+    message.add_alternative(
+        '<div>Second supplement</div><blockquote>Prior reply'
+        '<img src="cid:history-483-dc32e5db58a1-1@rma.accotest.com">'
+        '<img src="cid:accotest_logo"></blockquote>',
+        subtype="html",
+    )
+
+    history = render_reply_history_from_eml(
+        message.as_bytes(), parent_email_id=24, language="zh-CN"
+    )
+
+    assert "Second supplement" in history.html
+    assert "history-483-dc32e5db58a1-1@rma.accotest.com" not in history.html
+    assert len(history.resources) == 1
+    assert history.resources[0].original_content_id == "accotest_logo"
+
+
 def test_renderer_plain_text_fallback_is_safe_html() -> None:
     message = EmailMessage()
     message["From"] = "customer@example.com"

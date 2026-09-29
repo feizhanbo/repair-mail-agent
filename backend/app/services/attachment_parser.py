@@ -9,7 +9,7 @@ import logging
 import re
 import time
 import zipfile
-from html import unescape
+from html import escape as html_escape, unescape
 from pathlib import PurePath
 from typing import Any
 from uuid import uuid4
@@ -211,6 +211,44 @@ def _extract_xlsx(
             if values:
                 blocks.append(" | ".join(values))
     return "\n".join(blocks)
+
+
+def _extract_xlsx_html(
+    content: bytes, *, max_sheets: int = 10, max_rows: int = 200, max_columns: int = 40
+) -> str:
+    _validate_zip_archive(content)
+    try:
+        from openpyxl import load_workbook  # type: ignore
+    except Exception as exc:
+        raise ValueError("XLSX_READER_NOT_AVAILABLE") from exc
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:
+        raise ValueError("XLSX_TEXT_EXTRACT_FAILED") from exc
+
+    table_style = "border-collapse: collapse;"
+    cell_style = "border: 1px solid #ddd; padding: 4px 8px;"
+    header_style = f"{cell_style} background: #f5f5f5; text-align: left;"
+    parts: list[str] = ['<div style="font-family: sans-serif; padding: 12px;">']
+
+    for sheet in workbook.worksheets[:max_sheets]:
+        parts.append(f"<h3>{html_escape(sheet.title)}</h3>")
+        parts.append(f'<table style="{table_style}">')
+        for row_index, row in enumerate(sheet.iter_rows(), start=1):
+            if row_index > max_rows:
+                break
+            parts.append("<tr>")
+            for cell in row[:max_columns]:
+                value = cell.value
+                text = html_escape(str(value)) if value is not None else ""
+                tag = "th" if row_index == 1 else "td"
+                style = header_style if tag == "th" else cell_style
+                parts.append(f'<{tag} style="{style}">{text}</{tag}>')
+            parts.append("</tr>")
+        parts.append("</table>")
+
+    parts.append("</div>")
+    return "\n".join(parts)
 
 
 def _pdf_page_count(content: bytes) -> int | None:

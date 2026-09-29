@@ -428,18 +428,25 @@ export default function EmailsPage() {
                   },
                 ]}
                 expandable={{
-                  expandedRowRender: (record) => (
-                    <div className="evidence-grid">
-                      <div>
-                        <Typography.Text strong>提取文本</Typography.Text>
-                        <pre className="json-block">{record.extracted_text || '-'}</pre>
+                  expandedRowRender: (record) => {
+                    const isXlsx = (record.file_name || '').toLowerCase().endsWith('.xlsx');
+                    return (
+                      <div className="evidence-grid">
+                        <div>
+                          <Typography.Text strong>提取文本</Typography.Text>
+                          {isXlsx && record.oss_object_id ? (
+                            <div><ContentPreviewButton kind="attachment" id={record.id} /></div>
+                          ) : (
+                            <pre className="json-block">{record.extracted_text || '-'}</pre>
+                          )}
+                        </div>
+                        <div>
+                          <Typography.Text strong>提取 JSON</Typography.Text>
+                          <JsonBlock value={record.extracted_json} />
+                        </div>
                       </div>
-                      <div>
-                        <Typography.Text strong>提取 JSON</Typography.Text>
-                        <JsonBlock value={record.extracted_json} />
-                      </div>
-                    </div>
-                  ),
+                    );
+                  },
                 }}
               />
             </div>
@@ -448,7 +455,7 @@ export default function EmailsPage() {
               <Table<ParseResult>
                 size="small"
                 rowKey="id"
-                dataSource={detailQuery.data.parse_results}
+                dataSource={detailQuery.data.parse_results?.filter((r) => r.parser_type !== 'rule')}
                 pagination={false}
                 columns={[
                   { title: '解析器', dataIndex: 'parser_type', width: 90 },

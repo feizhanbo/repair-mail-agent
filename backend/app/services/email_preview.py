@@ -211,8 +211,19 @@ async def build_attachment_preview(session: AsyncSession, attachment_id: int) ->
             "truncated": page_count > len(pages),
             "extracted_json": attachment.extracted_json,
         }
-    if file_type in {"docx", "xlsx"}:
+    if file_type == "docx":
         return {**base, "mode": "extracted", "url": None, "text": attachment.extracted_text or "", "html": None, "extracted_json": attachment.extracted_json}
+    if file_type == "xlsx":
+        if not attachment.oss_object_id:
+            raise _missing_archive_error(attachment, stage="attachment_xlsx_lookup")
+        content = await _download_bytes(session, attachment.oss_object_id, stage="attachment_xlsx_download")
+        try:
+            from app.services.attachment_parser import _extract_xlsx_html
+            html = await asyncio.to_thread(_extract_xlsx_html, content)
+        except (ValueError, RuntimeError):
+            # Fallback to extracted text mode if HTML conversion fails
+            return {**base, "mode": "extracted", "url": None, "text": attachment.extracted_text or "", "html": None, "extracted_json": attachment.extracted_json}
+        return {**base, "mode": "html", "url": None, "text": None, "html": html, "extracted_json": attachment.extracted_json}
     if file_type is None:
         return {
             **base,

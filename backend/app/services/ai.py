@@ -82,7 +82,10 @@ _EMBEDDED_SN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _RETURN_CONTEXT_PATTERNS = (
-    re.compile(r"(?:维修返回地址|返修寄回地址|维修后寄回地址|寄回地址|收件地址|邮寄地址)\s*[:：]?", re.IGNORECASE),
+    re.compile(
+        r"(?:维修返回地址|返修寄回地址|维修后寄回地址|返修地址|寄回地址|收件地址|邮寄地址)\s*[:：]?",
+        re.IGNORECASE,
+    ),
     re.compile(r"(?:shipping information after repaired|send back to|return address)\s*[:：]?", re.IGNORECASE),
 )
 _FIELD_LABEL_PATTERNS = {
@@ -92,6 +95,11 @@ _FIELD_LABEL_PATTERNS = {
 _SUPPLEMENT_PHONE_PATTERN = re.compile(
     r"(?:寄回联系电话|联系电话|联系方式|电话|手机|tel(?:ephone)?|phone|mobile)"
     r"[ \t]*[:：]?[ \t]*(\+?\d[\d \t()\-]{5,28}\d)",
+    re.IGNORECASE,
+)
+_SUPPLEMENT_CONTACT_PERSON_PATTERN = re.compile(
+    r"(?:^|\n)[ \t]*(?:补充[ \t]*)?(?:寄回联系人|收件人|联系人)"
+    r"[ \t]*[:：][ \t]*([^\r\n，,。;；]{1,80})",
     re.IGNORECASE,
 )
 _EXPLICIT_ENGLISH_ADDRESS_PATTERN = re.compile(
@@ -127,6 +135,13 @@ def _apply_deterministic_supplement_fields(
 ) -> None:
     """Prefer explicit labels in the customer's latest reply over AI omission."""
     body = clean_email_body(email)
+    person_match = _SUPPLEMENT_CONTACT_PERSON_PATTERN.search(body)
+    if person_match:
+        fields["contact_person"] = person_match.group(1).strip()
+        field_confidences["contact_person"] = 1.0
+        evidence.setdefault("derived_fields", {})["contact_person"] = {
+            "source": "explicit_supplement_label"
+        }
     phone_match = _SUPPLEMENT_PHONE_PATTERN.search(body)
     if phone_match:
         fields["contact_phone"] = re.sub(
@@ -169,6 +184,24 @@ def _return_context(body: str) -> str:
     return body[min(starts) : min(len(body), min(starts) + 1200)]
 
 
+def _return_contact_pair_supported(
+    context: str, *, contact_person: str, contact_phone: str
+) -> bool:
+    """Accept an unlabeled contact pair only immediately inside a return block."""
+    if not context or not contact_person or not contact_phone:
+        return False
+    person = contact_person.casefold()
+    phone = contact_phone.casefold()
+    lines = [line.strip().casefold() for line in context[:500].splitlines() if line.strip()]
+    # The heading is normally the first non-empty line. Limiting the match to
+    # the first four lines prevents a later signature block from being treated
+    # as customer return information merely because the message has an address.
+    lines = lines[:4]
+    person_lines = [index for index, line in enumerate(lines) if person in line]
+    phone_lines = [index for index, line in enumerate(lines) if phone in line]
+    return any(abs(person_line - phone_line) <= 1 for person_line in person_lines for phone_line in phone_lines)
+
+
 def _sanitize_customer_return_fields(
     *,
     fields: dict[str, Any],
@@ -183,6 +216,11 @@ def _sanitize_customer_return_fields(
     context = _return_context(body)
     structured_attachment_fields = set(
         evidence.get("structured_attachment_fields") or []
+    )
+    contact_pair_supported = _return_contact_pair_supported(
+        context,
+        contact_person=str(fields.get("contact_person") or "").strip(),
+        contact_phone=str(fields.get("contact_phone") or "").strip(),
     )
     rejected: list[str] = []
     accepted: list[str] = []
@@ -212,6 +250,7 @@ def _sanitize_customer_return_fields(
                 and (
                     _FIELD_LABEL_PATTERNS[name].search(context)
                     or re.search(r"shipping information after repaired|send back to", context, re.IGNORECASE)
+                    or contact_pair_supported
                 )
             )
         else:
@@ -230,6 +269,7 @@ def _sanitize_customer_return_fields(
                 and (
                     _FIELD_LABEL_PATTERNS[name].search(context)
                     or adjacent_to_contact
+                    or contact_pair_supported
                 )
             )
         if not supported:
@@ -1268,10 +1308,14 @@ async def _enrich_ai_quality(
                 "ticket_id": existing_ticket.id,
                 "item_count": len(existing_items),
             }
+            # The model reports only the latest message.  Preserve every
+            # unresolved field from the linked ticket even when the model's
+            # `missing_fields` array omits it; remove a field only when this
+            # supplement explicitly supplies a non-empty value.
             missing = {
-                key: value
-                for key, value in missing.items()
-                if key in original_missing and not fields.get(key)
+                key: str((existing_ticket.missing_fields or {}).get(key) or "required")
+                for key in original_missing
+                if not fields.get(key)
             }
 
     missing = required_missing_for_values(

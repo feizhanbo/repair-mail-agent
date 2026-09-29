@@ -1,123 +1,135 @@
-# 邮件报修自动化系统
+# repair-mail-agent
 
-> 📖 详细开发文档请查阅 docs/ 目录。开发前必读：docs/00-开发指导文档.md 和 docs/01-开发进度文档.md。
+邮件报修自动化系统，用于将客户通过邮箱提交的设备报修请求自动转换为可处理的 RMA 业务工单，并完成信息识别、数据校验、SAP 对接、RMA 授权单生成以及邮件回复。
 
-`repair-mail-agent` 是邮件报修自动化系统的一期内部试运行工程，已实现基础业务闭环 + DeepSeek AI 接入 + RBAC 接口拦截。
+## 项目要解决的问题
 
-## 核心业务流程
+传统 RMA 报修主要依赖人工处理邮件，需要人工查看正文和附件、识别设备信息、核对 SN、判断资料是否完整、录入 SAP、生成 RMA 单并回复客户。
+
+当邮件数量增加后，容易出现：
+
+- 邮件处理效率低，人工重复操作较多
+- 正文、附件中的报修信息需要人工整理
+- SN、客户、物料等业务数据需要跨系统核对
+- 客户信息缺失时需要人工反复追问
+- SAP 数据录入和 RMA 编号回查缺少统一流程
+- 邮件、工单、RMA 和处理过程难以统一追踪
+
+本项目通过邮件自动化、AI 信息提取、规则校验和 SAP 中转集成，将这些步骤统一到一个系统中处理。
+
+## 解决方式
+
+系统以客户邮件为入口，将报修流程拆分为几个独立环节：
+
+**邮件分类**
+
+先判断邮件属于新报修、客户补充、人工业务、流程通知或其他类型，只让需要进入 RMA 流程的邮件继续处理。
+
+**信息提取**
+
+解析邮件正文和附件，通过规则与 AI 提取 SN、板卡、故障描述、联系人、地址等报修信息，并输出结构化结果。
+
+**业务校验**
+
+结合本地同步的 SAP SN 主数据，对 SN、客户、物料、保修等信息进行校验。存在缺失、冲突或无法确定的数据时转人工处理。
+
+**客户信息补充**
+
+报修信息不完整时，系统根据缺失字段生成追问邮件，客户回复后继续合并和校验原工单信息。
+
+**SAP 对接**
+
+信息完整并通过校验后，将工单数据写入 SQL Server 中转数据库，由 SAP 创建 RMA，并通过唯一 RequestID 回查对应的 RMA 编号。
+
+**RMA 回复**
+
+获取 RMA 编号后生成 RMA PDF 授权单，并按照原邮件回复链发送给客户，完成当前报修业务闭环。
+
+## 业务流程
 
 ```text
-邮件接收/手工入库
--> 原文归档与回复链识别
--> 规则预解析生成候选和 LLM 上下文
--> DeepSeek AI 判断邮件类型、字段有效性、异常情况和置信度
--> 高置信无冲突时自动应用到工单；否则进入人工复核
--> 工单生成/字段修正/明细修正
--> SN 校验
--> 解析候选采纳或拒绝
--> 人工复核任务领取/分配/处理
--> 追问草稿生成
--> 主管审核回复
--> 工单状态流转与审计沉淀
+客户发送报修邮件
+        ↓
+邮件接收与去重
+        ↓
+邮件业务分类
+        ↓
+正文与附件解析
+        ↓
+结构化报修信息提取
+        ↓
+SN / 客户 / 物料 / 业务规则校验
+        ↓
+┌──────────────────────┐
+│ 信息缺失或存在冲突   │
+└──────────┬───────────┘
+           ↓
+      自动追问 / 人工复核
+           ↓
+        信息补充完成
+           ↓
+      SAP 中转数据库
+           ↓
+          SAP
+           ↓
+       获取 RMA 编号
+           ↓
+      生成 RMA PDF
+           ↓
+   原邮件线程回复客户
+           ↓
+        工单完成
 ```
+
+## 邮件处理范围
+
+系统根据业务类型对邮件进行分层处理：
+
+- **自动报修业务**：新报修、邮件线程中的新报修、客户补充信息
+- **人工业务**：物料替换维修、现场服务、保修状态咨询、报修线程中的其他业务问题
+- **流程类邮件**：设备入库、维修完成发出、客户确认收货、合同、发票等
+- **未知邮件**：无法可靠判断的邮件进入人工处理
+
+不同类型邮件采用不同处理路径，避免非报修邮件进入 RMA 自动流程。
+
+## 当前已实现内容
+
+目前项目已经完成主要业务链路，包括：
+
+- IMAP 邮箱邮件拉取、增量同步和重复邮件识别
+- 邮件原文和附件归档
+- 邮件业务分类
+- 正文和附件内容解析
+- AI 结构化字段提取
+- 报修信息合并和字段校验
+- SN 主数据同步与多记录匹配
+- SN、客户、物料和保修信息校验
+- 信息缺失自动追问
+- 人工复核与异常处理
+- 工单状态和处理过程记录
+- SQL Server 中转数据库对接
+- SAP RMA 提交和 RMA 编号回查
+- 多 SN 工单处理
+- RMA PDF 授权单生成
+- SMTP 原邮件线程回复
+- 邮件发送记录与归档
+- 用户、角色和基础权限管理
+- 工单、邮件、人工复核、基础资料、系统配置等后台页面
+- 操作日志、AI 日志和外部调用记录
 
 ## 技术栈
 
-- 后端：Python 3.11、FastAPI、SQLAlchemy 2.x asyncio、Pydantic Settings、Alembic。
-- 数据库：MySQL 8.x、`utf8mb4`、`DATETIME(3)`。
-- AI：DeepSeek OpenAI 兼容接口，后端 Provider 抽象，JSON 输出校验。
-- 前端：React、TypeScript、Vite、Ant Design、TanStack Query、Zustand。
-- 部署预留：Docker Compose、Nginx、GitHub Actions。
+- **后端**：Python、FastAPI、Langchain、SQLAlchemy、Alembic
+- **前端**：React、TypeScript、Vite、Ant Design
+- **数据库**：MySQL
+- **中转数据库**：SQL Server
+- **AI**：Qwen / OpenAI Compatible API
+- **对象存储**：阿里云 OSS
+- **邮件**：IMAP / SMTP
+- **部署**：Docker Compose、Nginx
 
-## 角色权限
+## 项目状态
 
-| 角色 | role_code | 当前后端拦截 |
-| --- | --- | --- |
-| 系统管理员 | `admin` | 用户管理、角色分配、系统配置、基础资料导入、全部业务兜底操作。 |
-| 主管 | `supervisor` | 查看业务数据、人工任务分配/转派/释放、回复审核、AI 日志、系统配置、工单状态流转。 |
-| 一般操作员 | `operator` | 查看统一人工任务池，主动领取未分配任务，处理本人已领取/被分配任务，修正字段、SN 校验、采纳解析、生成追问、提交回复草稿。 |
+当前项目已经具备从 **邮件接收 → 邮件分类 → 信息解析 → 数据校验 → SAP 中转 → RMA 生成 → 邮件回复** 的完整业务链路。
 
-行级数据权限尚未完整建模，当前按角色 + 接口级 RBAC 控制；详细限制见 docs/01。
-
-## 项目结构
-
-```text
-repair-mail-agent/
-  backend/                 # FastAPI 后端服务
-  frontend/                # React 控制台
-  docker/                  # 镜像构建文件
-  nginx/                   # 统一入口配置
-  docs/                    # 开发、审计和数据库对照文档
-  .github/workflows/       # CI/CD workflow 预留
-  docker-compose.yml       # MySQL、后端、前端、Nginx 编排
-  deploy.sh                # 远程部署脚本
-```
-
-## 环境变量
-
-配置示例见 `.env.example`。真实密钥、数据库口令、邮箱凭据、OSS key、AI key 不得提交到仓库。
-
-关键配置：
-
-- `DATABASE_URL`
-- `JWT_SECRET`
-- `IMAP_*`、`SMTP_*`、`OSS_*`
-- `AI_PROVIDER`（默认 `deepseek`）
-- `AI_BASE_URL`（默认 `https://api.deepseek.com`）
-- `AI_MODEL`（默认 `deepseek-v4-flash`，可选覆盖为 `deepseek-v4-pro`）
-- `AI_API_KEY`
-- `AI_TIMEOUT_SECONDS`
-- `AI_MAX_INPUT_CHARS`
-- `AI_PROMPT_VERSION`
-- `AUTO_SEND_ENABLED`
-- `REPLY_SEND_MODE`
-- `AUTO_SEND_MIN_CONFIDENCE`
-- `MAX_FOLLOW_UP`
-- `CONFIDENCE_THRESHOLD`
-
-## 本地启动
-
-后端：
-
-```bash
-cd backend
-python -m venv .venv
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-前端：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-数据库维护命令只在明确确认后执行。默认开发和检查不运行迁移、seed、db_smoke 或任何会写入真实业务库的命令。
-
-## 数据库与迁移
-
-当前 Alembic 迁移版本：`9d2b7c4f1a30`，共 27 张业务表 + alembic_version（用户权限、OSS、邮件、工单、工作流审计、解析校验、回复复核、日志等），详见 docs/ 目录下的数据库对照文档。
-
-## 验证命令
-
-后端：
-
-```bash
-cd backend
-python -m compileall app
-pytest
-```
-
-前端：
-
-```bash
-cd frontend
-npm run typecheck
-npm run build
-```
-
-## 已知限制
-
-详见 docs/01-开发进度文档.md 中的已知限制章节。
+现阶段主要工作集中在真实业务数据验证、异常场景测试、系统稳定性验证以及正式部署前的配置和环境检查。

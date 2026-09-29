@@ -1040,12 +1040,22 @@ function TicketDetailView({
                         )},
                       ]}
                       expandable={{
-                        expandedRowRender: (record: Attachment) => (
-                          <div className="evidence-grid">
-                            <div><Typography.Text strong>提取文本</Typography.Text><pre className="json-block">{record.extracted_text || '-'}</pre></div>
-                            <div><Typography.Text strong>提取 JSON</Typography.Text><JsonBlock value={record.extracted_json} /></div>
-                          </div>
-                        ),
+                        expandedRowRender: (record: Attachment) => {
+                          const isXlsx = (record.file_name || '').toLowerCase().endsWith('.xlsx');
+                          return (
+                            <div className="evidence-grid">
+                              <div>
+                                <Typography.Text strong>提取文本</Typography.Text>
+                                {isXlsx && record.oss_object_id ? (
+                                  <div><ContentPreviewButton kind="attachment" id={record.id} /></div>
+                                ) : (
+                                  <pre className="json-block">{record.extracted_text || '-'}</pre>
+                                )}
+                              </div>
+                              <div><Typography.Text strong>提取 JSON</Typography.Text><JsonBlock value={record.extracted_json} /></div>
+                            </div>
+                          );
+                        },
                       }}
                     />
                   </>
