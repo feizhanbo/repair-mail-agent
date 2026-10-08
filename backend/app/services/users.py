@@ -29,6 +29,7 @@ from app.services.audit import log_operation
 from app.services.common import model_to_dict, paginate_scalars
 
 ROLE_CODES = ("admin", "operator")
+TASK_OWNER_USERNAMES = ("miya", "demi")
 USER_FIELDS = (
     "id",
     "username",
@@ -78,6 +79,30 @@ async def _role_map(session: AsyncSession) -> dict[str, Role]:
     if missing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"ROLE_NOT_INITIALIZED:{','.join(missing)}")
     return roles
+
+
+async def _ensure_task_owner_pair_available(
+    session: AsyncSession,
+    *,
+    user: User,
+    remains_active_operator: bool,
+) -> None:
+    if user.username not in TASK_OWNER_USERNAMES or remains_active_operator:
+        return
+    alternate_exists = await session.scalar(
+        select(User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            User.id != user.id,
+            User.username.in_(TASK_OWNER_USERNAMES),
+            User.status == "active",
+            Role.role_code == "operator",
+        )
+        .limit(1)
+    )
+    if alternate_exists is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TASK_OWNER_PAIR_REQUIRED")
 
 
 def serialize_user(user: User, roles: list[str]) -> dict[str, Any]:
@@ -163,6 +188,11 @@ async def set_user_roles(session: AsyncSession, *, user: User, roles: list[str],
     invalid = [role for role in roles if role not in ROLE_CODES]
     if invalid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"ROLE_NOT_ALLOWED:{','.join(invalid)}")
+    await _ensure_task_owner_pair_available(
+        session,
+        user=user,
+        remains_active_operator=user.status == "active" and "operator" in roles,
+    )
     role_map = await _role_map(session)
     await session.execute(delete(UserRole).where(UserRole.user_id == user.id))
     for role_code in roles:
@@ -222,6 +252,12 @@ async def update_user(session: AsyncSession, *, user_id: int, values: dict[str, 
 
 async def update_user_status(session: AsyncSession, *, user_id: int, user_status: str, operator_user_id: int) -> dict[str, Any]:
     user = await get_user(session, user_id)
+    current_roles = await _roles_for_user(session, user.id)
+    await _ensure_task_owner_pair_available(
+        session,
+        user=user,
+        remains_active_operator=user_status == "active" and "operator" in current_roles,
+    )
     old_status = user.status
     user.status = user_status
     await log_operation(
@@ -268,6 +304,7 @@ async def delete_user(session: AsyncSession, *, user_id: int, operator_user_id: 
     user = await get_user(session, user_id)
     if user.id == operator_user_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="USER_CANNOT_DELETE_SELF")
+    await _ensure_task_owner_pair_available(session, user=user, remains_active_operator=False)
 
     references = await _user_reference_summary(session, user.id)
     if references:

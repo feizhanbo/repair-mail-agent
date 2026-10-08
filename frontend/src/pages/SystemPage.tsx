@@ -34,12 +34,23 @@ export default function SystemPage() {
   const systemQuery = useQuery({
     queryKey: ['system-info'],
     queryFn: api.systemInfo,
-    enabled: canAdmin,
   });
   const templatesQuery = useQuery({
     queryKey: ['system-reply-templates'],
     queryFn: api.replyTemplates,
-    enabled: canAdmin,
+  });
+  const configQuery = useQuery({
+    queryKey: ['system-config'],
+    queryFn: api.systemConfig,
+  });
+  const configMutation = useMutation({
+    mutationFn: (values: Parameters<typeof api.updateSystemConfig>[0]) => api.updateSystemConfig(values),
+    onSuccess: () => {
+      message.success('自动化配置已更新');
+      void queryClient.invalidateQueries({ queryKey: ['system-config'] });
+      void queryClient.invalidateQueries({ queryKey: ['system-info'] });
+    },
+    onError: (error) => message.error(apiErrorMessage(error)),
   });
   const templateMutation = useMutation({
     mutationFn: ({ id, values }: { id: number; values: TemplateForm }) =>
@@ -151,7 +162,25 @@ export default function SystemPage() {
   return (
     <div className="page-stack">
       <PageTitle title="系统配置" />
-      {canAdmin ? <>
+      <SectionPanel>
+        <div className="section-heading">
+          <Typography.Title level={4}>邮件与主数据自动化</Typography.Title>
+        </div>
+        <Descriptions column={2} bordered size="small">
+          <Descriptions.Item label="自动接收邮件">
+            <Switch disabled={!canAdmin} checked={configQuery.data?.imap_fetch_enabled ?? false} loading={configQuery.isFetching || configMutation.isPending} onChange={(value) => configMutation.mutate({ imap_fetch_enabled: value })} />
+          </Descriptions.Item>
+          <Descriptions.Item label="自动发送RMA邮件">
+            <Switch disabled={!canAdmin} checked={configQuery.data?.auto_send_enabled ?? false} loading={configQuery.isFetching || configMutation.isPending} onChange={(value) => configMutation.mutate({ auto_send_enabled: value })} />
+          </Descriptions.Item>
+          <Descriptions.Item label="自动发送追问邮件">
+            <Switch disabled={!canAdmin} checked={configQuery.data?.auto_followup_enabled ?? false} loading={configQuery.isFetching || configMutation.isPending} onChange={(value) => configMutation.mutate({ auto_followup_enabled: value })} />
+          </Descriptions.Item>
+          <Descriptions.Item label="自动同步SN数据">
+            <Switch disabled={!canAdmin} checked={configQuery.data?.relay_sn_sync_enabled ?? false} loading={configQuery.isFetching || configMutation.isPending} onChange={(value) => configMutation.mutate({ relay_sn_sync_enabled: value })} />
+          </Descriptions.Item>
+        </Descriptions>
+      </SectionPanel>
       <SectionPanel>
         <div className="section-heading">
           <Typography.Title level={4}>回复话术</Typography.Title>
@@ -294,7 +323,6 @@ export default function SystemPage() {
           </Form>
         ) : null}
       </Modal>
-      </> : null}
     </div>
   );
 }

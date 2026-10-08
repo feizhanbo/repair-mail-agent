@@ -61,5 +61,7 @@ def test_unknown_language_uses_domestic_fallback_code() -> None:
 
 
 @pytest.mark.anyio
-async def test_unknown_scope_does_not_randomly_fallback() -> None:
-    assert await choose_scope_owner(Session(User(id=99, username="other", status="active")), None) is None
+async def test_unknown_scope_uses_domestic_miya_route() -> None:
+    owner = await choose_scope_owner(Session(User(id=11, username="miya", status="active")), None)
+    assert owner is not None
+    assert owner.username == "miya"

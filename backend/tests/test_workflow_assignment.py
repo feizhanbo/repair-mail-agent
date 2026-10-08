@@ -64,7 +64,7 @@ async def test_manual_task_is_pending_with_system_owner(monkeypatch: pytest.Monk
         notices.append(kwargs)
 
     monkeypatch.setattr(workflow, "create_notification", fake_notification)
-    ticket = SimpleNamespace(id=8, ticket_no="RMA-TEST", source_email_id=3, assigned_user_id=11)
+    ticket = SimpleNamespace(id=8, ticket_no="RMA-TEST", source_email_id=3, assigned_user_id=11, customer_scope="domestic")
 
     task = await workflow.create_manual_task_if_missing(session, ticket=ticket, task_type="manual")
 
@@ -77,7 +77,7 @@ async def test_manual_task_is_pending_with_system_owner(monkeypatch: pytest.Monk
 
 
 @pytest.mark.anyio
-async def test_missing_required_operator_stays_visible_and_notifies_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_required_operator_rejects_task_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     session = Session(None)
     notices: list[dict] = []
 
@@ -85,14 +85,14 @@ async def test_missing_required_operator_stays_visible_and_notifies_admin(monkey
         notices.append(kwargs)
 
     monkeypatch.setattr(workflow, "create_notification", fake_notification)
-    ticket = SimpleNamespace(id=9, ticket_no="RMA-FAILED", source_email_id=4, assigned_user_id=None)
+    ticket = SimpleNamespace(id=9, ticket_no="RMA-FAILED", source_email_id=4, assigned_user_id=None, customer_scope="domestic")
 
-    task = await workflow.create_manual_task_if_missing(session, ticket=ticket, task_type="manual")
+    with pytest.raises(HTTPException) as exc_info:
+        await workflow.create_manual_task_if_missing(session, ticket=ticket, task_type="manual")
 
-    assert task.status == "pending"
-    assert task.assigned_user_id is None
-    assert notices[0]["event_type"] == "manual_review_assignment_failed"
-    assert notices[0]["recipient_role_code"] == "admin"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "TASK_OWNER_NOT_CONFIGURED"
+    assert notices == []
 
 
 @pytest.mark.anyio

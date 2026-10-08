@@ -1,4 +1,5 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
+import type { ReactNode } from 'react';
 import AppLayout from '../layouts/AppLayout';
 import AiLogsPage from '../pages/AiLogsPage';
 import Dashboard from '../pages/Dashboard';
@@ -14,6 +15,12 @@ import StatisticsPage from '../pages/StatisticsPage';
 import SystemPage from '../pages/SystemPage';
 import TicketsPage from '../pages/TicketsPage';
 import UsersPage from '../pages/UsersPage';
+import { useAuthStore } from '../stores/authStore';
+
+function AdminOnly({ children }: { children: ReactNode }) {
+  const roles = useAuthStore((state) => state.user?.roles);
+  return roles?.includes('admin') ? children : <Navigate to="/" replace />;
+}
 
 const router = createBrowserRouter([
   {
@@ -30,8 +37,8 @@ const router = createBrowserRouter([
       { path: 'manual-review', element: <ManualReviewPage /> },
       { path: 'replies', element: <RepliesPage /> },
       { path: 'statistics', element: <StatisticsPage /> },
-      { path: 'master-data', element: <MasterDataPage /> },
-      { path: 'users', element: <UsersPage /> },
+      { path: 'master-data', element: <AdminOnly><MasterDataPage /></AdminOnly> },
+      { path: 'users', element: <AdminOnly><UsersPage /></AdminOnly> },
       { path: 'profile', element: <ProfilePage /> },
       { path: 'notification-center', element: <NotificationCenterPage /> },
       { path: 'notifications', element: <NotificationsPage /> },

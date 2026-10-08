@@ -58,6 +58,11 @@ export const apiClient = axios.create({
 function friendlyServerMessage(status?: number, code?: string): string {
   const messages: Record<string, string> = {
     AUTH_FORBIDDEN: '当前账号没有权限执行此操作',
+    MASTER_DATA_READ_ONLY: '基础资料为只读数据，不支持修改、删除、导入或导出',
+    MANUAL_SN_SYNC_DISABLED: 'SN 数据由后台自动同步，请使用系统配置中的自动同步开关',
+    TASK_OWNER_NOT_CONFIGURED: '任务负责人 miya/demi 均不可用，请管理员检查账号状态和角色',
+    TASK_OWNER_PAIR_REQUIRED: 'miya 和 demi 至少需要保留一名启用的操作员',
+    TASK_ASSIGNEE_NOT_ACTIVE_OPERATOR: '所选负责人不是启用状态的操作员',
     REQUEST_VALIDATION_ERROR: '请检查输入内容是否完整、格式是否正确',
     INTERNAL_SERVER_ERROR: '系统暂时无法处理请求，请稍后再试',
     USER_CANNOT_DELETE_SELF: '不能删除当前登录账号',
@@ -379,7 +384,7 @@ export const api = {
   systemRuntimeStatus: () => getData<SystemRuntimeStatus>('/system/runtime-status'),
   systemConfig: () => getData<SystemConfig>('/system/config'),
   mailTestPreflight: () => postData<MailTestPreflightResult>('/system/mail-test/preflight'),
-  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'auto_followup_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up' | 'imap_fetch_enabled' | 'imap_poll_interval_minutes' | 'imap_folder' | 'imap_fetch_limit' | 'imap_unseen_only' | 'imap_max_retries' | 'imap_archive_to_oss'>>) =>
+  updateSystemConfig: (body: Partial<Pick<SystemConfig, 'auto_send_enabled' | 'auto_followup_enabled' | 'relay_sn_sync_enabled' | 'auto_send_min_confidence' | 'confidence_threshold' | 'max_follow_up' | 'imap_fetch_enabled' | 'imap_poll_interval_minutes' | 'imap_folder' | 'imap_fetch_limit' | 'imap_unseen_only' | 'imap_max_retries' | 'imap_archive_to_oss'>>) =>
     patchData<SystemConfig>('/system/config', body),
   replyTemplates: () => getData<ReplyTemplate[]>('/system/reply-templates'),
   createReplyTemplate: (body: Omit<ReplyTemplate, 'id' | 'created_by_user_id' | 'created_at' | 'updated_at'>) =>

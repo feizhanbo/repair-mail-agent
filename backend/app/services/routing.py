@@ -13,6 +13,7 @@ from app.services.notifications import resolve_notifications_for_target
 CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
 SCOPE_OWNER_USERNAMES = {"domestic": "miya", "overseas": "demi"}
+DEFAULT_OWNER_USERNAME = "miya"
 
 
 def detect_language(email: Email) -> str:
@@ -44,10 +45,26 @@ def _operator_query():
 
 
 async def choose_scope_owner(session: AsyncSession, customer_scope: str | None) -> User | None:
-    username = SCOPE_OWNER_USERNAMES.get(str(customer_scope or ""))
-    if username is None:
-        return None
-    return await session.scalar(_operator_query().where(User.username == username))
+    primary = SCOPE_OWNER_USERNAMES.get(str(customer_scope or ""), DEFAULT_OWNER_USERNAME)
+    backup = "demi" if primary == "miya" else "miya"
+    owner = await session.scalar(_operator_query().where(User.username == primary))
+    if owner is not None:
+        return owner
+    return await session.scalar(_operator_query().where(User.username == backup))
+
+
+async def choose_task_owner(
+    session: AsyncSession,
+    *,
+    customer_scope: str | None,
+    preferred_user_id: int | None = None,
+) -> User | None:
+    """Preserve a valid explicit owner, otherwise use the fixed scope owner pair."""
+    if preferred_user_id is not None:
+        preferred = await session.scalar(_operator_query().where(User.id == preferred_user_id))
+        if preferred is not None:
+            return preferred
+    return await choose_scope_owner(session, customer_scope)
 
 
 async def route_ticket_by_customer_scope(

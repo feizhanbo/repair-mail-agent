@@ -1,616 +1,84 @@
-import { DeleteOutlined, DownloadOutlined, EditOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
-import type { UploadProps } from 'antd';
+import { useQuery } from '@tanstack/react-query';
+import { Button, Form, Input, Space, Table, Tabs, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo, useState, type Key } from 'react';
+import { useState } from 'react';
 import { api, apiErrorMessage } from '../api/client';
-import { waitForJob } from '../utils/jobs';
 import ErrorResult from '../components/ErrorResult';
-import { ChangePreview, DeletionImpactPreview } from '../components/FriendlyPreview';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
-import StatusTag from '../components/StatusTag';
-import { useAuthStore } from '../stores/authStore';
-import type { BoardCard, CustomerServicePolicy, DeletePreview, SnAsset } from '../types/api';
-import { compactFilters } from '../utils/filters';
-import { saveBlob } from '../utils/download';
-import { hasAnyRole } from '../utils/roles';
+import type { BoardCard, CustomerServicePolicy, SnAsset } from '../types/api';
 
-type ImportKind = 'sn' | 'board' | 'policy';
-
-type SnFilters = {
-  sn?: string;
-  customer?: string;
-  material?: string;
-  asset_status?: string;
-};
-
-type BoardFilters = {
-  board_code?: string;
-  board_name?: string;
-  customer_scope?: string;
-  return_location?: string;
-  status?: string;
-};
-
-type PolicyFormValues = Partial<CustomerServicePolicy> & {
-  repair_price?: number;
-  tax_rate?: number;
-  reason?: string;
-};
-
-type SnFormValues = Partial<SnAsset> & { reason: string };
-type BoardFormValues = Partial<BoardCard> & { reason: string };
+type TabKey = 'policy' | 'sn' | 'board';
 
 export default function MasterDataPage() {
-  const [activeTab, setActiveTab] = useState<ImportKind>('sn');
+  const [activeTab, setActiveTab] = useState<TabKey>('policy');
   const [page, setPage] = useState(1);
-  const [snFilters, setSnFilters] = useState<Record<string, unknown>>({});
-  const [boardFilters, setBoardFilters] = useState<Record<string, unknown>>({});
-  const [policyFilters, setPolicyFilters] = useState<Record<string, unknown>>({});
-  const [editingPolicy, setEditingPolicy] = useState<CustomerServicePolicy | null | undefined>(undefined);
-  const [editingSn, setEditingSn] = useState<SnAsset | undefined>();
-  const [editingBoard, setEditingBoard] = useState<BoardCard | undefined>();
-  const [selectedSnKeys, setSelectedSnKeys] = useState<Key[]>([]);
-  const [selectedBoardKeys, setSelectedBoardKeys] = useState<Key[]>([]);
-  const [snFilterForm] = Form.useForm<SnFilters>();
-  const [boardFilterForm] = Form.useForm<BoardFilters>();
-  const [policyFilterForm] = Form.useForm<Record<string, unknown>>();
-  const [policyForm] = Form.useForm<PolicyFormValues>();
-  const [snForm] = Form.useForm<SnFormValues>();
-  const [boardForm] = Form.useForm<BoardFormValues>();
-  const queryClient = useQueryClient();
-  const canManage = hasAnyRole(useAuthStore((state) => state.user?.roles), ['admin', 'operator']);
+  const [keyword, setKeyword] = useState('');
+  const [form] = Form.useForm<{ keyword?: string }>();
+  const params = { page, page_size: 20, keyword: keyword || undefined };
+  const policyQuery = useQuery({ queryKey: ['customer-policies', params], queryFn: () => api.customerPolicies(params), enabled: activeTab === 'policy' });
+  const snQuery = useQuery({ queryKey: ['sn-assets', params], queryFn: () => api.snAssets(params), enabled: activeTab === 'sn' });
+  const boardQuery = useQuery({ queryKey: ['board-cards', params], queryFn: () => api.boardCards(params), enabled: activeTab === 'board' });
 
-  const snQuery = useQuery({
-    queryKey: ['sn-assets', snFilters, page],
-    queryFn: () => api.snAssets({ ...snFilters, page, page_size: 20 }),
-    enabled: activeTab === 'sn',
-  });
-  const boardQuery = useQuery({
-    queryKey: ['board-cards', boardFilters, page],
-    queryFn: () => api.boardCards({ ...boardFilters, page, page_size: 20 }),
-    enabled: activeTab === 'board',
-  });
-  const policyQuery = useQuery({
-    queryKey: ['customer-policies', policyFilters, page],
-    queryFn: () => api.customerPolicies({ ...policyFilters, page, page_size: 20 }),
-    enabled: activeTab === 'policy',
-  });
-  const savePolicyMutation = useMutation({
-    mutationFn: (values: Record<string, unknown>) => (
-      editingPolicy
-        ? api.updateCustomerPolicy(editingPolicy.id, values)
-        : api.createCustomerPolicy(values)
-    ),
-    onSuccess: () => {
-      message.success('客户政策已保存');
-      setEditingPolicy(undefined);
-      policyForm.resetFields();
-      void queryClient.invalidateQueries({ queryKey: ['customer-policies'] });
-    },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const saveSnMutation = useMutation({
-    mutationFn: (values: Record<string, unknown>) => api.updateSnAsset(editingSn!.id, values),
-    onSuccess: () => { message.success('SN 资料已保存并记录审计'); setEditingSn(undefined); void queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const saveBoardMutation = useMutation({
-    mutationFn: (values: Record<string, unknown>) => api.updateBoardCard(editingBoard!.id, values),
-    onSuccess: () => { message.success('板卡资料已保存并记录审计'); setEditingBoard(undefined); void queryClient.invalidateQueries({ queryKey: ['board-cards'] }); },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const snSyncMutation = useMutation({
-    mutationFn: api.startSnSync,
-    onSuccess: () => {
-      message.success('SN 同步任务已执行');
-      void queryClient.invalidateQueries({ queryKey: ['sn-assets'] });
-      void queryClient.invalidateQueries({ queryKey: ['sn-sync-latest'] });
-    },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const confirmChange = (title: string, before: unknown, after: unknown, onOk: () => Promise<unknown> | void) => Modal.confirm({
-    title,
-    width: 680,
-    content: <div><Typography.Paragraph type="secondary">请确认以下变更，提交后将写入审计日志。</Typography.Paragraph><ChangePreview before={(before ?? {}) as Record<string, unknown>} after={(after ?? {}) as Record<string, unknown>} /></div>,
-    okText: '确认提交',
-    cancelText: '取消',
-    onOk,
-  });
-  const confirmDelete = async (title: string, loadPreview: () => Promise<DeletePreview>, onDelete: () => Promise<unknown>) => {
-    try {
-      const preview = await loadPreview();
-      Modal.confirm({ title, width: 680, content: <DeletionImpactPreview preview={preview} />, okText: '确认删除', okButtonProps: { danger: true, disabled: !preview.deletable }, onOk: async () => { await onDelete(); message.success('数据已删除并记录审计'); } });
-    } catch (error) {
-      message.error(apiErrorMessage(error));
-    }
-  };
-  const openSnEditor = (row: SnAsset) => { setEditingSn(row); snForm.setFieldsValue({ ...row, reason: '' }); };
-  const openBoardEditor = (row: BoardCard) => { setEditingBoard(row); boardForm.setFieldsValue({ ...row, reason: '' }); };
-
-  const templateMutation = useMutation({
-    mutationFn: () => (activeTab === 'sn' ? api.snAssetsTemplate() : api.boardCardsTemplate()),
-    onSuccess: (blob) => saveBlob(blob, activeTab === 'sn' ? 'sn-assets-template.xlsx' : 'board-cards-template.xlsx'),
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const exportMutation = useMutation({
-    mutationFn: () => (
-      activeTab === 'sn'
-        ? api.exportSelectedSnAssets(selectedSnKeys.map(Number))
-        : api.exportSelectedBoardCards(selectedBoardKeys.map(Number))
-    ),
-    onSuccess: (blob) => saveBlob(blob, activeTab === 'sn' ? 'sn-assets-selected-export.xlsx' : 'board-cards-selected-export.xlsx'),
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-  const importFileMutation = useMutation({
-    mutationFn: async (file: File) => {
-      if (import.meta.env.VITE_IMPORT_EXPORT_ASYNC_ENABLED !== 'true') {
-        return activeTab === 'sn' ? api.importSnAssetsFile(file) : api.importBoardCardsFile(file);
-      }
-      const job = activeTab === 'sn' ? await api.importSnAssetsFileJob(file) : await api.importBoardCardsFileJob(file);
-      return waitForJob(job);
-    },
-    onSuccess: () => {
-      message.success('基础资料已导入');
-      void queryClient.invalidateQueries({ queryKey: ['sn-assets'] });
-      void queryClient.invalidateQueries({ queryKey: ['board-cards'] });
-    },
-    onError: (error) => message.error(apiErrorMessage(error)),
-  });
-
-  const uploadProps: UploadProps = {
-    accept: activeTab === 'board'
-      ? '.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      : '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    beforeUpload: (file) => {
-      importFileMutation.mutate(file);
-      return Upload.LIST_IGNORE;
-    },
-    showUploadList: false,
-  };
-
-  const snColumns: ColumnsType<SnAsset> = useMemo(
-    () => [
-      { title: 'insID', dataIndex: 'ins_id', width: 100, render: (value?: number) => value ?? '-' },
-      { title: 'SN', dataIndex: 'sn', width: 180 },
-      { title: '客户代码', dataIndex: 'customer_code', width: 120 },
-      { title: '客户名称', dataIndex: 'customer_name', ellipsis: true },
-      { title: 'SAP 物料编码', dataIndex: 'material_code', width: 140 },
-      { title: 'SAP 物料名称', dataIndex: 'material_name', ellipsis: true, render: (value?: string) => value || '-' },
-      { title: '服务追踪卡编号', dataIndex: 'service_tracking_card_no', width: 150, render: (value?: string) => value || '-' },
-      { title: '上级 SN', dataIndex: 'parent_sn', width: 160, render: (value?: string) => value || '-' },
-      { title: 'Top SN', dataIndex: 'top_sn', width: 160, render: (value?: string) => value || '-' },
-      { title: '上级物料代码', dataIndex: 'parent_material_code', width: 150, render: (value?: string) => value || '-' },
-      { title: 'Top 物料代码', dataIndex: 'top_material_code', width: 150, render: (value?: string) => value || '-' },
-      { title: '状态', dataIndex: 'asset_status', width: 100, render: (value: string) => <StatusTag value={value === 'valid' ? 'pass' : 'warning'} /> },
-      { title: 'ExpDate', dataIndex: 'warranty_end_date', width: 120, render: (value?: string) => value || '-' },
-      { title: '来源', dataIndex: 'source_system', width: 110, render: (value?: string) => value || '-' },
-      { title: '操作', width: 130, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openSnEditor(row)}>编辑</Button><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDelete('确认删除该 SN 资料？', () => api.snAssetDeletePreview(row.id), async () => { await api.deleteSnAsset(row.id); await queryClient.invalidateQueries({ queryKey: ['sn-assets'] }); })}>删除</Button></Space> : null },
-    ],
-    [canManage, queryClient],
-  );
-  const boardColumns: ColumnsType<BoardCard> = useMemo(
-    () => [
-      { title: '板卡型号', dataIndex: 'board_code', width: 150 },
-      { title: '板卡名称', dataIndex: 'board_name', ellipsis: true, render: (value?: string) => value || '-' },
-      { title: '客户范围', dataIndex: 'customer_scope', width: 110, render: (value: string) => value === 'overseas' ? '海外' : '国内' },
-      { title: '规则类型', dataIndex: 'route_type', width: 120 },
-      { title: '寄回地点', dataIndex: 'return_location', width: 100, render: (value: string) => value === 'beijing' ? '北京' : '天津' },
-      { title: '维修寄回地址', dataIndex: 'shipping_address', ellipsis: true, render: (value?: string) => value || '-' },
-      { title: '维修联系人', dataIndex: 'shipping_contact', width: 120, render: (value?: string) => value || '-' },
-      { title: '维修电话', dataIndex: 'shipping_phone', width: 150, render: (value?: string) => value || '-' },
-      { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <StatusTag value={value} /> },
-      { title: '操作', width: 130, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openBoardEditor(row)}>编辑</Button><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => void confirmDelete('确认删除该板卡规则？', () => api.boardCardDeletePreview(row.id), async () => { await api.deleteBoardCard(row.id); await queryClient.invalidateQueries({ queryKey: ['board-cards'] }); })}>删除</Button></Space> : null },
-    ],
-    [canManage, queryClient],
-  );
-  const selectedCount = activeTab === 'sn' ? selectedSnKeys.length : selectedBoardKeys.length;
-  const openPolicyEditor = (policy: CustomerServicePolicy | null) => {
-    setEditingPolicy(policy);
-    policyForm.setFieldsValue(policy ? {
-      ...policy,
-      repair_price: Number(policy.repair_price),
-      tax_rate: Number(policy.tax_rate),
-      reason: '',
-    } : {
-      policy_type: 'special_out_of_warranty',
-      charge_status: 'chargeable',
-      customer_scope: 'domestic',
-      currency: 'RMB',
-      tax_rate: 13,
-      shipping_fee_text: 'one-way charge/单次收费',
-      enabled: true,
-      hide_company_name: false,
-      force_manual_review: false,
-      reason: '',
-    });
-  };
   const policyColumns: ColumnsType<CustomerServicePolicy> = [
     { title: '客户代码', dataIndex: 'customer_code', width: 130 },
     { title: '客户名称', dataIndex: 'customer_name', ellipsis: true, render: (v?: string) => v || '-' },
-    { title: '政策类型', dataIndex: 'policy_type', width: 170 },
-    { title: '收费状态', dataIndex: 'charge_status', width: 140 },
-    { title: '客户范围', dataIndex: 'customer_scope', width: 100, render: (v?: string) => v === 'overseas' ? '海外' : v === 'domestic' ? '国内' : '待确认' },
+    { title: '政策类型', dataIndex: 'policy_type', width: 180 },
+    { title: '收费状态', dataIndex: 'charge_status', width: 150 },
+    { title: '范围', dataIndex: 'customer_scope', width: 90, render: (v?: string) => v === 'overseas' ? '海外' : v === 'domestic' ? '国内' : '待确认' },
     { title: '生效日期', dataIndex: 'effective_from', width: 120, render: (v?: string) => v || '-' },
     { title: '失效日期', dataIndex: 'effective_until', width: 120, render: (v?: string) => v || '-' },
-    { title: '单个 SN 超保单价', dataIndex: 'repair_price', width: 150 },
-    { title: '币种', dataIndex: 'currency', width: 75 },
-    { title: '税率', dataIndex: 'tax_rate', width: 75, render: (v: number | string) => `${v}%` },
-    { title: '快递费规则', dataIndex: 'shipping_fee_text', width: 180 },
-    { title: '称呼', dataIndex: 'reply_salutation', width: 110, render: (v?: string) => v || '-' },
-    { title: '公司名展示', dataIndex: 'hide_company_name', width: 110, render: (v: boolean) => <Tag color={v ? 'orange' : 'green'}>{v ? '隐藏' : '显示'}</Tag> },
-    { title: '强制复核', dataIndex: 'force_manual_review', width: 90, render: (v: boolean) => <Tag color={v ? 'orange' : 'default'}>{v ? '是' : '否'}</Tag> },
-    { title: '启用', dataIndex: 'enabled', width: 75, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag> },
-    { title: '操作', width: 140, fixed: 'right', render: (_: unknown, row) => canManage ? <Space size={0}><Button type="link" size="small" onClick={() => openPolicyEditor(row)}>编辑</Button><Button type="link" danger size="small" onClick={() => void confirmDelete('确认删除该客户政策？', () => api.customerPolicyDeletePreview(row.id), async () => { await api.deleteCustomerPolicy(row.id); await queryClient.invalidateQueries({ queryKey: ['customer-policies'] }); })}>删除</Button></Space> : null },
+    { title: '维修单价', dataIndex: 'repair_price', width: 110 },
+    { title: '币种', dataIndex: 'currency', width: 80 },
+    { title: '启用', dataIndex: 'enabled', width: 80, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '是' : '否'}</Tag> },
+  ];
+  const snColumns: ColumnsType<SnAsset> = [
+    { title: 'SN', dataIndex: 'sn', width: 180 },
+    { title: '客户代码', dataIndex: 'customer_code', width: 120 },
+    { title: '客户名称', dataIndex: 'customer_name', ellipsis: true },
+    { title: '物料编码', dataIndex: 'material_code', width: 150 },
+    { title: '物料名称', dataIndex: 'material_name', ellipsis: true, render: (v?: string) => v || '-' },
+    { title: '服务追踪卡', dataIndex: 'service_tracking_card_no', width: 160, render: (v?: string) => v || '-' },
+    { title: '上级 SN', dataIndex: 'parent_sn', width: 160, render: (v?: string) => v || '-' },
+    { title: 'Top SN', dataIndex: 'top_sn', width: 160, render: (v?: string) => v || '-' },
+    { title: '状态', dataIndex: 'asset_status', width: 100 },
+    { title: '质保截止', dataIndex: 'warranty_end_date', width: 120, render: (v?: string) => v || '-' },
+    { title: '来源', dataIndex: 'source_system', width: 100, render: (v?: string) => v || '-' },
+  ];
+  const boardColumns: ColumnsType<BoardCard> = [
+    { title: '板卡型号', dataIndex: 'board_code', width: 160 },
+    { title: '板卡名称', dataIndex: 'board_name', ellipsis: true, render: (v?: string) => v || '-' },
+    { title: '客户范围', dataIndex: 'customer_scope', width: 110, render: (v: string) => v === 'overseas' ? '海外' : '国内' },
+    { title: '规则类型', dataIndex: 'route_type', width: 130 },
+    { title: '寄回地点', dataIndex: 'return_location', width: 110, render: (v: string) => v === 'beijing' ? '北京' : '天津' },
+    { title: '维修寄回地址', dataIndex: 'shipping_address', ellipsis: true, render: (v?: string) => v || '-' },
+    { title: '联系人', dataIndex: 'shipping_contact', width: 120, render: (v?: string) => v || '-' },
+    { title: '电话', dataIndex: 'shipping_phone', width: 150, render: (v?: string) => v || '-' },
+    { title: '状态', dataIndex: 'status', width: 100 },
   ];
 
+  const current = activeTab === 'policy' ? policyQuery : activeTab === 'sn' ? snQuery : boardQuery;
   return (
     <div className="page-stack">
-      <PageTitle
-        title="基础资料"
-        extra={(
-          <Space wrap>
-            {activeTab === 'policy' && canManage ? <Button type="primary" onClick={() => openPolicyEditor(null)}>新增政策</Button> : null}
-            {activeTab === 'sn' && canManage ? (
-              <Button
-                icon={<SyncOutlined />}
-                loading={snSyncMutation.isPending}
-                onClick={() => Modal.confirm({
-                  title: '确认立即同步 SN 数据？',
-                  content: '系统将按“系统配置”页面中已保存的同步配置读取数据，并记录本次操作。',
-                  okText: '确认同步',
-                  cancelText: '取消',
-                  onOk: () => snSyncMutation.mutateAsync(),
-                })}
-              >
-                立即同步
-              </Button>
-            ) : null}
-            {activeTab !== 'policy' ? (
-              <>
-            <Button icon={<DownloadOutlined />} loading={templateMutation.isPending} onClick={() => templateMutation.mutate()}>
-              模板
-            </Button>
-            <Button
-              icon={<DownloadOutlined />}
-              loading={exportMutation.isPending}
-              disabled={selectedCount === 0}
-              onClick={() => exportMutation.mutate()}
-            >
-              导出已选{selectedCount ? `(${selectedCount})` : ''}
-            </Button>
-            {canManage ? (
-              <Upload {...uploadProps}>
-                <Button type="primary" icon={<UploadOutlined />} loading={importFileMutation.isPending}>
-                  导入
-                </Button>
-              </Upload>
-            ) : null}
-              </>
-            ) : null}
-          </Space>
-        )}
-      />
+      <PageTitle title="基础资料" />
       <SectionPanel>
-        <Tabs
-          activeKey={activeTab}
-          onChange={(key) => {
-            setActiveTab(key as ImportKind);
-            setPage(1);
-            setSelectedSnKeys([]);
-            setSelectedBoardKeys([]);
-          }}
-          items={[
-            {
-              key: 'sn',
-              label: 'SN 资产库',
-              children: (
-                <div className="page-stack">
-                  <Form<SnFilters>
-                    form={snFilterForm}
-                    layout="inline"
-                    className="filter-bar"
-                    onFinish={(values) => {
-                      setPage(1);
-                      setSnFilters(compactFilters(values));
-                      setSelectedSnKeys([]);
-                    }}
-                  >
-                    <Form.Item name="sn">
-                      <Input allowClear placeholder="SN" />
-                    </Form.Item>
-                    <Form.Item name="customer">
-                      <Input allowClear placeholder="客户" />
-                    </Form.Item>
-                    <Form.Item name="material">
-                      <Input allowClear placeholder="物料" />
-                    </Form.Item>
-                    <Form.Item name="asset_status">
-                      <Select
-                        allowClear
-                        placeholder="状态"
-                        style={{ width: 120 }}
-                        options={[{ value: 'valid', label: '有效' }, { value: 'invalid', label: '无效' }]}
-                      />
-                    </Form.Item>
-                    <Space>
-                      <Button htmlType="submit" type="primary">筛选</Button>
-                      <Button
-                        onClick={() => {
-                          snFilterForm.resetFields();
-                          setPage(1);
-                          setSnFilters({});
-                          setSelectedSnKeys([]);
-                        }}
-                      >
-                        重置
-                      </Button>
-                    </Space>
-                  </Form>
-                  <Table<SnAsset>
-                    rowKey="id"
-                    columns={snColumns}
-                    dataSource={snQuery.data?.items ?? []}
-                    loading={snQuery.isFetching}
-                    rowSelection={{
-                      selectedRowKeys: selectedSnKeys,
-                      onChange: setSelectedSnKeys,
-                    }}
-                    locale={{
-                      emptyText: snQuery.isError
-                        ? <ErrorResult message={apiErrorMessage(snQuery.error)} onRetry={() => snQuery.refetch()} />
-                        : '暂无 SN 资产'
-                    }}
-                    pagination={{
-                      current: page,
-                      pageSize: 20,
-                      total: snQuery.data?.total ?? 0,
-                      onChange: (nextPage) => {
-                        setPage(nextPage);
-                        setSelectedSnKeys([]);
-                      },
-                      showSizeChanger: false,
-                    }}
-                  />
-                </div>
-              ),
-            },
-            {
-              key: 'board',
-              label: '板卡规则',
-              children: (
-                <div className="page-stack">
-                  <Form<BoardFilters>
-                    form={boardFilterForm}
-                    layout="inline"
-                    className="filter-bar"
-                    onFinish={(values) => {
-                      setPage(1);
-                      setBoardFilters(compactFilters(values));
-                      setSelectedBoardKeys([]);
-                    }}
-                  >
-                    <Form.Item name="board_code">
-                      <Input allowClear placeholder="板卡型号" />
-                    </Form.Item>
-                    <Form.Item name="board_name">
-                      <Input allowClear placeholder="板卡名称" />
-                    </Form.Item>
-                    <Form.Item name="customer_scope">
-                      <Select allowClear placeholder="客户范围" style={{ width: 120 }} options={[
-                        { value: 'domestic', label: '国内' },
-                        { value: 'overseas', label: '海外' },
-                      ]} />
-                    </Form.Item>
-                    <Form.Item name="return_location">
-                      <Select allowClear placeholder="寄回地点" style={{ width: 120 }} options={[
-                        { value: 'beijing', label: '北京' },
-                        { value: 'tianjin', label: '天津' },
-                      ]} />
-                    </Form.Item>
-                    <Form.Item name="status">
-                      <Select
-                        allowClear
-                        placeholder="状态"
-                        style={{ width: 120 }}
-                        options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]}
-                      />
-                    </Form.Item>
-                    <Space>
-                      <Button htmlType="submit" type="primary">筛选</Button>
-                      <Button
-                        onClick={() => {
-                          boardFilterForm.resetFields();
-                          setPage(1);
-                          setBoardFilters({});
-                          setSelectedBoardKeys([]);
-                        }}
-                      >
-                        重置
-                      </Button>
-                    </Space>
-                  </Form>
-                  <Table<BoardCard>
-                    rowKey="id"
-                    columns={boardColumns}
-                    dataSource={boardQuery.data?.items ?? []}
-                    loading={boardQuery.isFetching}
-                    rowSelection={{
-                      selectedRowKeys: selectedBoardKeys,
-                      onChange: setSelectedBoardKeys,
-                    }}
-                    locale={{
-                      emptyText: boardQuery.isError
-                        ? <ErrorResult message={apiErrorMessage(boardQuery.error)} onRetry={() => boardQuery.refetch()} />
-                        : '暂无板卡规则'
-                    }}
-                    pagination={{
-                      current: page,
-                      pageSize: 20,
-                      total: boardQuery.data?.total ?? 0,
-                      onChange: (nextPage) => {
-                        setPage(nextPage);
-                        setSelectedBoardKeys([]);
-                      },
-                      showSizeChanger: false,
-                    }}
-                  />
-                </div>
-              ),
-            },
-            {
-              key: 'policy',
-              label: '客户服务政策',
-              children: (
-                <div className="page-stack">
-                  <Form
-                    form={policyFilterForm}
-                    layout="inline"
-                    className="filter-bar"
-                    onFinish={(values) => {
-                      setPage(1);
-                      setPolicyFilters(compactFilters(values));
-                    }}
-                  >
-                    <Form.Item name="customer_code"><Input allowClear placeholder="客户代码" /></Form.Item>
-                    <Form.Item name="policy_type">
-                      <Select
-                        allowClear
-                        placeholder="政策类型"
-                        style={{ width: 190 }}
-                        options={[
-                          { value: 'default', label: '默认超保价' },
-                          { value: 'permanent_free', label: '永久免费' },
-                          { value: 'annual_free', label: '包年免费' },
-                          { value: 'special_out_of_warranty', label: '特殊超保价' },
-                        ]}
-                      />
-                    </Form.Item>
-                    <Form.Item name="enabled">
-                      <Select
-                        allowClear
-                        placeholder="启用状态"
-                        style={{ width: 120 }}
-                        options={[{ value: true, label: '启用' }, { value: false, label: '停用' }]}
-                      />
-                    </Form.Item>
-                    <Space>
-                      <Button htmlType="submit" type="primary">筛选</Button>
-                      <Button onClick={() => {
-                        policyFilterForm.resetFields();
-                        setPage(1);
-                        setPolicyFilters({});
-                      }}>重置</Button>
-                    </Space>
-                  </Form>
-                  <Table<CustomerServicePolicy>
-                    rowKey="id"
-                    columns={policyColumns}
-                    dataSource={policyQuery.data?.items ?? []}
-                    loading={policyQuery.isFetching}
-                    scroll={{ x: 1550 }}
-                    locale={{
-                      emptyText: policyQuery.isError
-                        ? <ErrorResult message={apiErrorMessage(policyQuery.error)} onRetry={() => policyQuery.refetch()} />
-                        : '暂无客户政策',
-                    }}
-                    pagination={{
-                      current: page,
-                      pageSize: 20,
-                      total: policyQuery.data?.total ?? 0,
-                      onChange: setPage,
-                      showSizeChanger: false,
-                    }}
-                  />
-                </div>
-              ),
-            },
-          ]}
-        />
+        <Typography.Paragraph type="secondary">该页面仅供管理员查询。资料由外部主数据及后台自动同步维护，不提供编辑、删除、导入、导出或下载操作。</Typography.Paragraph>
+        <Form form={form} layout="inline" onFinish={(values) => { setPage(1); setKeyword(values.keyword?.trim() ?? ''); }}>
+          <Form.Item name="keyword"><Input allowClear placeholder="关键字" style={{ width: 260 }} /></Form.Item>
+          <Space>
+            <Button type="primary" htmlType="submit">查询</Button>
+            <Button onClick={() => { form.resetFields(); setPage(1); setKeyword(''); }}>重置</Button>
+          </Space>
+        </Form>
       </SectionPanel>
-      <Modal
-        title={editingPolicy ? '编辑客户政策' : '新增客户政策'}
-        open={editingPolicy !== undefined}
-        onCancel={() => setEditingPolicy(undefined)}
-        footer={null}
-        destroyOnClose
-      >
-        <Form form={policyForm} layout="vertical" onFinish={(values) => confirmChange('确认保存客户政策？', editingPolicy, values, () => savePolicyMutation.mutateAsync({ ...values }))}>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="政策编码" name="policy_code" rules={[{ required: true }]}><Input disabled={Boolean(editingPolicy)} /></Form.Item>
-            <Form.Item label="客户代码" name="customer_code" rules={[{ required: true }]}><Input disabled={Boolean(editingPolicy)} /></Form.Item>
-          </Space>
-          <Form.Item label="客户名称" name="customer_name"><Input /></Form.Item>
-          <Form.Item label="政策类型" name="policy_type" rules={[{ required: true }]}>
-            <Select options={[
-              { value: 'default', label: '默认超保价' },
-              { value: 'permanent_free', label: '永久免费' },
-              { value: 'annual_free', label: '包年免费' },
-              { value: 'special_out_of_warranty', label: '特殊超保价' },
-            ]} />
-          </Form.Item>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="收费状态" name="charge_status" rules={[{ required: true }]}>
-              <Select style={{ width: 180 }} options={[
-                { value: 'free', label: '免费' },
-                { value: 'annual_contract', label: '包年合同' },
-                { value: 'chargeable', label: '收费' },
-                { value: 'manual_confirmation', label: '人工确认' },
-              ]} />
-            </Form.Item>
-            <Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}>
-              <Select style={{ width: 140 }} options={[
-                { value: 'domestic', label: '国内' },
-                { value: 'overseas', label: '海外' },
-              ]} />
-            </Form.Item>
-          </Space>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="生效日期" name="effective_from"><Input type="date" /></Form.Item>
-            <Form.Item label="失效日期" name="effective_until"><Input type="date" /></Form.Item>
-          </Space>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item label="单个 SN 超保单价" name="repair_price" rules={[{ required: true }]}><InputNumber min={0} precision={2} /></Form.Item>
-            <Form.Item label="币种" name="currency" rules={[{ required: true }]}><Select style={{ width: 100 }} options={[{ value: 'RMB', label: 'RMB' }, { value: 'USD', label: 'USD' }]} /></Form.Item>
-            <Form.Item label="税率(%)" name="tax_rate" rules={[{ required: true }]}><InputNumber min={0} max={100} precision={4} /></Form.Item>
-          </Space>
-          <Form.Item label="快递费规则" name="shipping_fee_text" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item label="特殊称呼" name="reply_salutation"><Input /></Form.Item>
-          <Space size="large">
-            <Form.Item label="隐藏公司名称" name="hide_company_name" valuePropName="checked"><Switch /></Form.Item>
-            <Form.Item label="强制人工复核" name="force_manual_review" valuePropName="checked"><Switch /></Form.Item>
-            <Form.Item label="启用" name="enabled" valuePropName="checked"><Switch /></Form.Item>
-          </Space>
-          <Form.Item label="变更原因" name="reason" rules={editingPolicy ? [{ required: true, min: 3, max: 500 }] : undefined}><Input.TextArea rows={2} /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={savePolicyMutation.isPending}>保存</Button>
-        </Form>
-      </Modal>
-      <Modal title="编辑 SN 资料" open={Boolean(editingSn)} onCancel={() => setEditingSn(undefined)} footer={null} destroyOnClose>
-        <Form<SnFormValues> form={snForm} layout="vertical" onFinish={(values) => confirmChange('确认保存 SN 资料？', editingSn, values, () => saveSnMutation.mutateAsync(values as Record<string, unknown>))}>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="SN" name="sn" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="状态" name="asset_status" rules={[{ required: true }]}><Select style={{ width: 120 }} options={[{ value: 'valid', label: '有效' }, { value: 'invalid', label: '无效' }]} /></Form.Item></Space>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="客户代码" name="customer_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="客户名称" name="customer_name" rules={[{ required: true }]}><Input /></Form.Item></Space>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="物料代码" name="material_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="物料名称" name="material_name"><Input /></Form.Item></Space>
-          <Form.Item label="服务追踪卡编号" name="service_tracking_card_no"><Input /></Form.Item>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="上级 SN" name="parent_sn"><Input /></Form.Item><Form.Item label="Top SN" name="top_sn"><Input /></Form.Item></Space>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="上级物料代码" name="parent_material_code"><Input /></Form.Item><Form.Item label="Top 物料代码" name="top_material_code"><Input /></Form.Item></Space>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="质保开始" name="warranty_start_date"><Input type="date" /></Form.Item><Form.Item label="质保结束" name="warranty_end_date"><Input type="date" /></Form.Item></Space>
-          <Form.Item label="变更原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}><Input.TextArea rows={3} /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={saveSnMutation.isPending}>保存</Button>
-        </Form>
-      </Modal>
-      <Modal title="编辑板卡规则" open={Boolean(editingBoard)} onCancel={() => setEditingBoard(undefined)} footer={null} destroyOnClose>
-        <Form<BoardFormValues> form={boardForm} layout="vertical" onFinish={(values) => confirmChange('确认保存板卡规则？', editingBoard, values, () => saveBoardMutation.mutateAsync(values as Record<string, unknown>))}>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="板卡型号" name="board_code" rules={[{ required: true }]}><Input /></Form.Item><Form.Item label="板卡名称" name="board_name"><Input /></Form.Item></Space>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="客户范围" name="customer_scope" rules={[{ required: true }]}><Select style={{ width: 130 }} options={[{ value: 'domestic', label: '国内' }, { value: 'overseas', label: '海外' }]} /></Form.Item><Form.Item label="规则类型" name="route_type" rules={[{ required: true }]}><Select style={{ width: 150 }} options={[{ value: 'board_rule', label: '板卡规则' }, { value: 'scope_default', label: '范围默认' }]} /></Form.Item><Form.Item label="寄回地点" name="return_location" rules={[{ required: true }]}><Select style={{ width: 120 }} options={[{ value: 'beijing', label: '北京' }, { value: 'tianjin', label: '天津' }]} /></Form.Item></Space>
-          <Form.Item label="维修寄回地址" name="shipping_address"><Input /></Form.Item>
-          <Space style={{ display: 'flex' }} align="start"><Form.Item label="联系人" name="shipping_contact"><Input /></Form.Item><Form.Item label="电话" name="shipping_phone"><Input /></Form.Item><Form.Item label="邮编" name="postal_code"><Input /></Form.Item></Space>
-          <Form.Item label="状态" name="status" rules={[{ required: true }]}><Select options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /></Form.Item>
-          <Form.Item label="变更原因" name="reason" rules={[{ required: true, min: 3, max: 500 }]}><Input.TextArea rows={3} /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={saveBoardMutation.isPending}>保存</Button>
-        </Form>
-      </Modal>
+      <SectionPanel>
+        <Tabs activeKey={activeTab} onChange={(key) => { setActiveTab(key as TabKey); setPage(1); }} items={[
+          { key: 'policy', label: '客户政策', children: <Table<CustomerServicePolicy> rowKey="id" columns={policyColumns} dataSource={policyQuery.data?.items ?? []} loading={policyQuery.isFetching} scroll={{ x: 1200 }} pagination={{ current: page, pageSize: 20, total: policyQuery.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} /> },
+          { key: 'sn', label: 'SN 资料', children: <Table<SnAsset> rowKey="id" columns={snColumns} dataSource={snQuery.data?.items ?? []} loading={snQuery.isFetching} scroll={{ x: 1500 }} pagination={{ current: page, pageSize: 20, total: snQuery.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} /> },
+          { key: 'board', label: '板卡规则', children: <Table<BoardCard> rowKey="id" columns={boardColumns} dataSource={boardQuery.data?.items ?? []} loading={boardQuery.isFetching} scroll={{ x: 1200 }} pagination={{ current: page, pageSize: 20, total: boardQuery.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} /> },
+        ]} />
+        {current.isError ? <ErrorResult message={apiErrorMessage(current.error)} onRetry={() => current.refetch()} /> : null}
+      </SectionPanel>
     </div>
   );
 }

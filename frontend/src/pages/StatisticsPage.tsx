@@ -42,10 +42,12 @@ export default function StatisticsPage() {
     { label: '工单数', value: data?.ticket_count ?? 0, icon: <FileTextOutlined />, tone: 'orange', path: '/tickets' },
     { label: '完成数', value: data?.completed_count ?? 0, icon: <CheckCircleOutlined />, tone: 'green', path: '/tickets?status_code=ready_for_export' },
     { label: '重解析次数', value: data?.reparse_count ?? 0, icon: <SyncOutlined />, tone: 'gold', path: '/emails' },
+    { label: 'Token 总消耗', value: data?.ai_total_tokens ?? 0, icon: <RobotOutlined />, tone: 'cyan', path: '/ai-logs' },
     { label: 'AI 成功率', value: `${data?.ai_success_rate ?? 0}%`, icon: <RobotOutlined />, tone: 'cyan', path: '/ai-logs' },
     { label: '自动回复率', value: `${data?.auto_reply_rate ?? 0}%`, icon: <UserOutlined />, tone: 'red', path: '/replies' },
     { label: '人工介入率', value: `${data?.manual_intervention_rate ?? 0}%`, icon: <UserOutlined />, tone: 'gold', path: '/manual-review' },
-    { label: '任务池', value: data?.task_pool_total ?? 0, icon: <UserOutlined />, tone: 'orange', path: '/manual-review' },
+    { label: '任务池任务数', value: data?.task_pool_total ?? 0, icon: <UserOutlined />, tone: 'orange', path: '/manual-review' },
+    { label: '涉及工单数', value: data?.task_pool_ticket_total ?? 0, icon: <FileTextOutlined />, tone: 'orange', path: '/manual-review' },
     { label: '待客户补充', value: data?.need_customer_info ?? 0, icon: <MailOutlined />, tone: 'blue', path: '/tickets?status_code=need_customer_info' },
     { label: '异常工单', value: data?.error_ticket_count ?? 0, icon: <SyncOutlined />, tone: 'red', path: '/tickets?status_code=error' },
   ];
@@ -124,6 +126,10 @@ export default function StatisticsPage() {
             {data ? `${data.start_date} 至 ${data.end_date}` : '-'}
           </Typography.Text>
         </div>
+        <Typography.Paragraph type="secondary">
+          AI 成功率 = 成功及低置信度调用 / 全部 AI 调用；自动回复率 = 自动发送成功 / 全部发送成功；人工介入率 = 区间内产生人工任务的去重工单 / 区间内新建工单。任务池按任务计数，同一工单可产生多个任务。
+          {data?.ai_unmetered_call_count ? ` 当前另有 ${data.ai_unmetered_call_count} 次 AI 调用未返回 Token 用量，未计入 Token 总消耗。` : ''}
+        </Typography.Paragraph>
         <Table<StatisticsTrendItem>
           rowKey={(record) => `${record.start_date}-${record.end_date}`}
           loading={query.isFetching}

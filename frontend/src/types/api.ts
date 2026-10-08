@@ -934,6 +934,7 @@ export type SystemInfo = {
 export type SystemConfig = {
   auto_send_enabled: boolean;
   auto_followup_enabled: boolean;
+  relay_sn_sync_enabled: boolean;
   /** @deprecated Compatibility field; derive from auto_send_enabled. */
   reply_send_mode: 'human_review' | 'auto_send';
   auto_apply_min_confidence: number;
@@ -1050,10 +1051,18 @@ export type StatisticsSummary = {
   ticket_count: number;
   completed_count: number;
   reparse_count: number;
+  ai_input_tokens: number;
+  ai_output_tokens: number;
+  ai_total_tokens: number;
+  ai_metered_call_count: number;
+  ai_unmetered_call_count: number;
   ai_success_rate: number;
   auto_reply_rate: number;
   manual_intervention_rate: number;
+  manual_intervention_ticket_count: number;
   task_pool_total: number;
+  task_pool_ticket_total: number;
+  task_pool_email_total: number;
   need_customer_info: number;
   error_ticket_count: number;
   ready_for_export: number;

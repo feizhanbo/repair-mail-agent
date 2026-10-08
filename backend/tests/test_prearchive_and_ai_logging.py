@@ -38,6 +38,12 @@ def _png(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
 
 
+def test_token_usage_supports_gateway_and_response_metadata_shapes() -> None:
+    assert ai._token_usage({"usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}}) == (3, 4, 7)
+    assert ai._token_usage({"response_metadata": {"token_usage": {"input_tokens": 5, "output_tokens": 6}}}) == (5, 6, 11)
+    assert ai._token_usage({"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}) == (0, 0, 0)
+
+
 def test_decorative_inline_image_is_removed_before_archival() -> None:
     payload = EmailIngestRequest(
         mailbox_account="test",

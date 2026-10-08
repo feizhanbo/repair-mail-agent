@@ -16,7 +16,7 @@ from app.api.v1 import system as system_api
 from app.config import settings
 from app.core.database import get_session
 from app.main import app
-from app.models import JobRunLog
+from app.models import JobRunLog, ReplyTemplate
 from app.services import emails as email_service
 from app.services import manual_review as manual_review_service
 from app.services import master_data as master_data_service
@@ -37,6 +37,9 @@ class FakeExecuteResult:
 
     def scalars(self) -> FakeScalarResult:
         return FakeScalarResult()
+
+    def one(self) -> tuple[int, int, int, int]:
+        return (0, 0, 0, 0)
 
 
 class FakeSession:
@@ -86,6 +89,43 @@ class EmptyScalarSession(FakeSession):
     async def scalar(self, statement):
         self.scalar_statements.append(statement)
         return None
+
+
+class ReplyTemplateSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.template = ReplyTemplate(
+            id=41,
+            template_code="operator_template",
+            template_name="Operator Template",
+            template_type="manual_review",
+            language="zh-CN",
+            version="1",
+            subject_template="Subject",
+            body_template="Body",
+            html_body_template=None,
+            enabled=True,
+            created_by_user_id=7,
+        )
+        self.deleted = False
+
+    async def scalar(self, statement):
+        self.scalar_statements.append(statement)
+        return None
+
+    async def get(self, _model, _value):
+        return self.template
+
+    async def flush(self) -> None:
+        for value in self.added:
+            if isinstance(value, ReplyTemplate) and value.id is None:
+                value.id = 42
+
+    async def refresh(self, _value) -> None:
+        return None
+
+    async def delete(self, _value) -> None:
+        self.deleted = True
 
 
 def make_current_user(*, roles: list[str] | None = None, user_id: int = 7) -> CurrentUser:
@@ -596,6 +636,50 @@ def test_operator_cannot_patch_system_config() -> None:
     assert payload["message"] == "AUTH_FORBIDDEN"
 
 
+def test_operator_can_read_system_page_data(monkeypatch) -> None:
+    async def fake_load(_session):
+        return system_api.read_runtime_config()
+
+    monkeypatch.setattr(system_api, "load_runtime_config", fake_load)
+
+    with make_client(roles=["operator"]) as client:
+        info_response = client.get("/api/v1/system/info")
+        config_response = client.get("/api/v1/system/config")
+        templates_response = client.get("/api/v1/system/reply-templates")
+
+    assert info_response.status_code == 200
+    assert config_response.status_code == 200
+    assert templates_response.status_code == 200
+
+
+def test_operator_can_manage_reply_templates() -> None:
+    session = ReplyTemplateSession()
+    create_payload = {
+        "template_code": "new_operator_template",
+        "template_name": "New Operator Template",
+        "template_type": "manual_review",
+        "language": "zh-CN",
+        "version": "1",
+        "subject_template": "Subject",
+        "body_template": "Body",
+        "enabled": True,
+    }
+
+    with make_client(session, roles=["operator"]) as client:
+        create_response = client.post("/api/v1/system/reply-templates", json=create_payload)
+        update_response = client.patch(
+            "/api/v1/system/reply-templates/41",
+            json={"template_name": "Updated Operator Template"},
+        )
+        delete_response = client.delete("/api/v1/system/reply-templates/41")
+
+    assert create_response.status_code == 200
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["template_name"] == "Updated Operator Template"
+    assert delete_response.status_code == 200
+    assert session.deleted is True
+
+
 @pytest.mark.parametrize("role", ["operator", "admin"])
 def test_supported_roles_reuse_active_imap_fetch_job(role: str) -> None:
     session = ActiveImapJobSession()
@@ -772,7 +856,7 @@ def test_operator_statistics_summary_empty_contract() -> None:
     assert payload["data"]["manual_intervention_rate"] == 0
 
 
-def test_master_data_filter_params_are_forwarded(monkeypatch) -> None:
+def test_master_data_is_not_available_to_operator(monkeypatch) -> None:
     seen = {}
 
     async def fake_list(_session, **kwargs):
@@ -787,15 +871,37 @@ def test_master_data_filter_params_are_forwarded(monkeypatch) -> None:
             params={"sn": "SN", "customer": "Acme", "material": "MAT", "asset_status": "valid", "keyword": "compat"},
         )
 
+    assert response.status_code == 403
+    assert seen == {}
+
+
+def test_admin_can_query_read_only_master_data(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_list(_session, **kwargs):
+        seen.update(kwargs)
+        return ([], 0)
+
+    monkeypatch.setattr(master_data_service, "list_sn_assets", fake_list)
+    with make_client(roles=["admin"]) as client:
+        response = client.get(
+            "/api/v1/master-data/sn-assets",
+            params={"sn": "SN", "customer": "Acme", "material": "MAT", "asset_status": "valid", "keyword": "compat"},
+        )
+
     assert response.status_code == 200
-    assert seen["sn"] == "SN"
-    assert seen["customer"] == "Acme"
-    assert seen["material"] == "MAT"
-    assert seen["asset_status"] == "valid"
-    assert seen["keyword"] == "compat"
+    assert seen == {
+        "page": 1,
+        "page_size": 20,
+        "sn": "SN",
+        "customer": "Acme",
+        "material": "MAT",
+        "asset_status": "valid",
+        "keyword": "compat",
+    }
 
 
-def test_master_data_selected_export_forwards_ids(monkeypatch) -> None:
+def test_master_data_export_is_disabled_for_admin(monkeypatch) -> None:
     seen = {}
 
     async def fake_export(_session, *, ids: list[int]):
@@ -804,13 +910,12 @@ def test_master_data_selected_export_forwards_ids(monkeypatch) -> None:
 
     monkeypatch.setattr(master_data_service, "export_sn_assets_selected", fake_export)
 
-    with make_client(roles=["operator"]) as client:
+    with make_client(roles=["admin"]) as client:
         response = client.post("/api/v1/master-data/sn-assets/export-selected", json={"ids": [1, 2, 5]})
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    assert response.content.startswith(b"PK")
-    assert seen["ids"] == [1, 2, 5]
+    assert response.status_code == 405
+    assert response.json()["message"] == "MASTER_DATA_READ_ONLY"
+    assert seen == {}
 
 
 def test_public_business_functions_are_not_duplicated() -> None:

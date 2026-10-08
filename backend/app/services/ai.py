@@ -494,12 +494,22 @@ def _payload_metadata(payload: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _token_usage(response_payload: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
-    usage = (response_payload or {}).get("usage")
+    payload = response_payload or {}
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        metadata = payload.get("response_metadata")
+        usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
     if not isinstance(usage, dict):
         return None, None, None
-    input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
-    output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+    input_tokens = usage.get("prompt_tokens")
+    if input_tokens is None:
+        input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("completion_tokens")
+    if output_tokens is None:
+        output_tokens = usage.get("output_tokens")
     total_tokens = usage.get("total_tokens")
+    if total_tokens is None and isinstance(input_tokens, (int, float)) and isinstance(output_tokens, (int, float)):
+        total_tokens = input_tokens + output_tokens
     return (
         int(input_tokens) if isinstance(input_tokens, (int, float)) else None,
         int(output_tokens) if isinstance(output_tokens, (int, float)) else None,

@@ -1254,7 +1254,6 @@ function TicketDetailView({
                   columns={[
                     { title: '类型', dataIndex: 'task_type', width: 150 },
                     { title: '状态', dataIndex: 'status', width: 110, render: (v: string) => <StatusTag value={v} kind="task" /> },
-                    { title: '优先级', dataIndex: 'priority', width: 100, render: (v: string) => <StatusTag value={v} kind="priority" /> },
                     { title: '描述', dataIndex: 'description', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '触发原因', dataIndex: 'trigger_reason', ellipsis: true, render: (v?: string) => v || '-' },
                     { title: '恢复节点', dataIndex: 'recovery_stage', width: 170, render: (v?: string) => v || '-' },

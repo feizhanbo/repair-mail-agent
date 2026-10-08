@@ -116,9 +116,6 @@ export default function NotificationCenterPage() {
                   title={(
                     <Space wrap>
                       <Typography.Text strong>{item.title}</Typography.Text>
-                      <Tag color={item.priority === 'high' ? 'red' : item.priority === 'normal' ? 'orange' : 'blue'}>
-                        {item.priority}
-                      </Tag>
                       {item.ticket_no ? <Tag color="geekblue">{item.ticket_no}</Tag> : null}
                       <Tag color="purple">{item.state_user_real_name || item.state_username || `用户 #${item.state_user_id}`}</Tag>
                       <Tag>{item.active_event_count} 个当前问题</Tag>

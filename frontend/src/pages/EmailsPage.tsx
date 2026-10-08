@@ -242,32 +242,12 @@ export default function EmailsPage() {
                 disabled={Boolean(fetchStatusQuery.data?.active_job) || fetchStatusQuery.data?.configured === false}
                 onClick={() => fetchImapMutation.mutate()}
               >
-                立即捞取
+                立即接收
               </Button>
             )}
           </Space>
         )}
       />
-      {canFetchImap && (
-        <SectionPanel>
-          <Descriptions column={4} size="small" bordered>
-            <Descriptions.Item label="自动捞取">{fetchStatusQuery.data?.enabled ? '已开启' : '已关闭'}</Descriptions.Item>
-            <Descriptions.Item label="收信账号">{fetchStatusQuery.data?.mailbox_account ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="轮询策略">
-              {fetchStatusQuery.data ? `${fetchStatusQuery.data.poll_interval_minutes} 分钟 / 每批 ${fetchStatusQuery.data.fetch_limit} 封` : '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="当前任务">
-              <StatusTag value={fetchStatusQuery.data?.active_job?.status ?? fetchStatusQuery.data?.latest_job?.status ?? 'idle'} />
-            </Descriptions.Item>
-            <Descriptions.Item label="文件夹">{fetchStatusQuery.data?.folder ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="读取方式">只读 / UNSEEN / BODY.PEEK[]</Descriptions.Item>
-            <Descriptions.Item label="OSS 归档">{fetchStatusQuery.data?.archive_to_oss ? '强制开启' : '未配置'}</Descriptions.Item>
-            <Descriptions.Item label="失败 / 待重试">
-              {fetchStatusQuery.data ? `${fetchStatusQuery.data.latest_job?.failed_count ?? 0} / ${fetchStatusQuery.data.retry_count}` : '-'}
-            </Descriptions.Item>
-          </Descriptions>
-        </SectionPanel>
-      )}
       <SectionPanel>
         <Form<EmailFilters>
           form={filterForm}

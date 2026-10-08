@@ -28,10 +28,17 @@ from app.services.storage import find_orphan_oss_objects
 router = APIRouter()
 
 
-@router.post("/sap-sn-sync")
+def _manual_sn_sync_disabled(
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+) -> None:
+    del current_user
+    raise HTTPException(status_code=status.HTTP_405_METHOD_NOT_ALLOWED, detail="MANUAL_SN_SYNC_DISABLED")
+
+
+@router.post("/sap-sn-sync", dependencies=[Depends(_manual_sn_sync_disabled)])
 async def start_sap_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     result = await create_sn_sync_batch(session, user_id=current_user.id)
     await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="SN full snapshot requested through compatibility endpoint", after_data=result)
@@ -43,7 +50,7 @@ async def start_sap_sn_sync(
 async def get_sap_sn_sync(
     batch_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     batch = await session.get(SapSnSyncBatch, batch_id)
@@ -52,12 +59,12 @@ async def get_sap_sn_sync(
     return ok(serialize_sync_batch(batch))
 
 
-@router.post("/sap-sn-sync/{batch_id}/apply")
+@router.post("/sap-sn-sync/{batch_id}/apply", dependencies=[Depends(_manual_sn_sync_disabled)])
 async def approve_sap_sn_sync(
     batch_id: int,
     payload: SapSnSyncApprovalRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     try:
         result = await apply_sn_sync_batch(
@@ -79,6 +86,7 @@ def _config_payload() -> dict:
     return {
         "auto_send_enabled": runtime["auto_send_enabled"],
         "auto_followup_enabled": runtime["auto_followup_enabled"],
+        "relay_sn_sync_enabled": runtime["relay_sn_sync_enabled"],
         "reply_send_mode": "auto_send" if runtime["auto_send_enabled"] else "human_review",
         "auto_apply_min_confidence": runtime["auto_apply_min_confidence"],
         "auto_send_min_confidence": runtime["auto_send_min_confidence"],
@@ -124,7 +132,7 @@ def _config_payload() -> dict:
 @router.get("/info")
 async def system_info(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     statuses = (await session.execute(select(WorkflowStatus).order_by(WorkflowStatus.sort_order, WorkflowStatus.id))).scalars().all()
@@ -213,7 +221,7 @@ async def runtime_status(
 @router.get("/config")
 async def get_config(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     await load_runtime_config(session)
@@ -222,7 +230,7 @@ async def get_config(
 
 @router.get("/integrations/sqlserver/status")
 async def sqlserver_status(
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     return ok(relay_configuration_status())
@@ -236,6 +244,10 @@ async def update_config(
 ) -> dict:
     values = payload.model_dump(exclude_unset=True)
     current = await load_runtime_config(session)
+    if values.get("relay_sn_sync_enabled") is True:
+        # SN polling uses the same SQL Server relay switch. Keep the UI's
+        # single automation control aligned with the worker prerequisites.
+        values["relay_sqlserver_enabled"] = True
     enabling_send = any(
         values.get(key) is True and not bool(current.get(key))
         for key in ("auto_send_enabled", "auto_followup_enabled")
@@ -283,7 +295,7 @@ def _sn_sync_config_payload() -> dict:
 @router.get("/sn-sync/config")
 async def get_sn_sync_config(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     await load_runtime_config(session)
@@ -294,7 +306,7 @@ async def get_sn_sync_config(
 async def update_sn_sync_config(
     payload: SnSyncConfigUpdateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     values = payload.model_dump(exclude_unset=True)
     current = await load_runtime_config(session)
@@ -313,10 +325,10 @@ async def update_sn_sync_config(
     return ok(_sn_sync_config_payload(), "SN sync config updated")
 
 
-@router.post("/sn-sync")
+@router.post("/sn-sync", dependencies=[Depends(_manual_sn_sync_disabled)])
 async def start_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     result = await create_sn_sync_batch(session, user_id=current_user.id)
     await log_operation(session, user_id=current_user.id, operation_type="sn_sync_executed", target_type="sap_sn_sync_batch", target_id=result.get("id"), description="用户从系统配置页面执行SN同步", after_data=result)
@@ -327,7 +339,7 @@ async def start_sn_sync(
 @router.get("/sn-sync/latest")
 async def latest_sn_sync(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
 ) -> dict:
     del current_user
     batch = await session.scalar(select(SapSnSyncBatch).order_by(SapSnSyncBatch.id.desc()).limit(1))
@@ -382,7 +394,7 @@ def _reply_template_payload(template: ReplyTemplate) -> dict:
 @router.get("/reply-templates")
 async def list_reply_templates(
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     del current_user
     rows = (
@@ -395,7 +407,7 @@ async def list_reply_templates(
 async def create_reply_template(
     payload: ReplyTemplateCreateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     values = payload.model_dump()
     exists = await session.scalar(
@@ -417,7 +429,7 @@ async def update_reply_template(
     template_id: int,
     payload: ReplyTemplateUpdateRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     template = await session.get(ReplyTemplate, template_id)
     if template is None:
@@ -438,7 +450,7 @@ async def update_reply_template(
 async def delete_reply_template(
     template_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[CurrentUser, Depends(require_roles("admin"))],
+    current_user: Annotated[CurrentUser, Depends(require_roles("operator"))],
 ) -> dict:
     template = await session.get(ReplyTemplate, template_id)
     if template is None:

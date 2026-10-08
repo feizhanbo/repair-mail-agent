@@ -67,7 +67,7 @@ export default function AppLayout() {
     ...baseMenuItems.slice(0, 4),
     { key: '/replies', icon: <SafetyCertificateOutlined />, label: '回复管理' },
     ...(canOperate ? [{ key: '/statistics', icon: <BarChartOutlined />, label: '统计分析' }] : []),
-    ...(canOperate ? [{ key: '/master-data', icon: <DatabaseOutlined />, label: '基础资料' }] : []),
+    ...(canAdmin ? [{ key: '/master-data', icon: <DatabaseOutlined />, label: '基础资料' }] : []),
     ...(canAdmin ? [{ key: '/users', icon: <UserOutlined />, label: '用户管理' }] : []),
     ...baseMenuItems.slice(4),
     ...(canOperate ? [{ key: '/ai-logs', icon: <RobotOutlined />, label: 'AI 日志' }] : []),

@@ -14,7 +14,10 @@ from app.models import (
     MailFetchRecord,
     ManualReviewTask,
     RepairTicketItem,
+    Role,
     SnAsset,
+    User,
+    UserRole,
 )
 from app.services.audit import create_notification, log_operation
 from app.services.common import model_to_dict, paginate_scalars, utcnow
@@ -281,6 +284,19 @@ async def assign_task(
     task = await get_task(session, task_id)
     if task.status in {"resolved", "closed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MANUAL_TASK_CLOSED")
+    if assigned_user_id is not None:
+        valid_operator = await session.scalar(
+            select(User.id)
+            .join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(
+                User.id == assigned_user_id,
+                User.status == "active",
+                Role.role_code == "operator",
+            )
+        )
+        if valid_operator is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="TASK_ASSIGNEE_NOT_ACTIVE_OPERATOR")
     before = {
         "assigned_user_id": task.assigned_user_id,
         "claimed_by_user_id": task.claimed_by_user_id,
@@ -294,8 +310,10 @@ async def assign_task(
         task.status = "pending"
         task.claimed_by_user_id = None
         task.claimed_at = None
-    elif task.status == "pending":
+    elif task.status in {"pending", "assignment_failed"}:
         task.status = "assigned"
+        task.claimed_by_user_id = None
+        task.claimed_at = None
     await log_operation(
         session,
         user_id=operator_user_id,

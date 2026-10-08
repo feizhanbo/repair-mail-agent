@@ -105,6 +105,9 @@ export default function AiLogsPage() {
       ),
     },
     { title: '置信度', dataIndex: 'confidence_score', width: 90, render: numberText },
+    { title: '输入 Token', dataIndex: 'input_tokens', width: 110, render: numberText },
+    { title: '输出 Token', dataIndex: 'output_tokens', width: 110, render: numberText },
+    { title: '总 Token', dataIndex: 'total_tokens', width: 105, render: numberText },
     { title: '耗时', dataIndex: 'latency_ms', width: 90, render: (value?: number | null) => (value ? `${value} ms` : '-') },
     { title: '输出摘要', dataIndex: 'output_summary', ellipsis: true, render: (value?: string | null) => compactText(value) },
     { title: '时间', dataIndex: 'created_at', width: 160, render: formatTime },
@@ -174,11 +177,15 @@ export default function AiLogsPage() {
             </Button>
           </Space>
         </Form>
+      </SectionPanel>
+      <SectionPanel>
+        <div className="section-heading"><Typography.Title level={4}>逐次 AI 调用</Typography.Title></div>
         <Table<AiLog>
           rowKey="id"
           columns={columns}
           dataSource={logsQuery.data?.items ?? []}
           loading={logsQuery.isFetching}
+          scroll={{ x: 2200 }}
           locale={{
             emptyText: logsQuery.isError
               ? <ErrorResult message={apiErrorMessage(logsQuery.error)} onRetry={() => logsQuery.refetch()} />

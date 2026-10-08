@@ -24,7 +24,7 @@ from app.models import (
 from app.services.audit import create_notification, log_operation
 from app.services.common import utcnow
 from app.services.notifications import resolve_notifications_for_ticket
-from app.services.routing import choose_available_operator
+from app.services.routing import choose_task_owner
 
 OPEN_TASK_STATUSES = ("pending", "claimed", "assigned", "assignment_failed")
 
@@ -165,10 +165,10 @@ async def create_manual_task_if_missing(
             or trigger_reason
             or "请核对异常原因并从对应业务阶段恢复。"
         )
-        owner = await choose_available_operator(
+        owner = await choose_task_owner(
             session,
-            existing.assigned_user_id or assigned_user_id or ticket.assigned_user_id,
-            allow_fallback=False,
+            customer_scope=getattr(ticket, "customer_scope", None),
+            preferred_user_id=existing.assigned_user_id or assigned_user_id or ticket.assigned_user_id,
         )
         if owner is not None and (existing.status == "assignment_failed" or existing.assigned_user_id != owner.id):
             from app.services.notifications import resolve_notifications_for_target
@@ -197,7 +197,13 @@ async def create_manual_task_if_missing(
         return existing
 
     sticky_assignee = assigned_user_id or ticket.assigned_user_id
-    owner = await choose_available_operator(session, sticky_assignee, allow_fallback=False)
+    owner = await choose_task_owner(
+        session,
+        customer_scope=getattr(ticket, "customer_scope", None),
+        preferred_user_id=sticky_assignee,
+    )
+    if owner is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TASK_OWNER_NOT_CONFIGURED")
     task = ManualReviewTask(
         ticket_id=ticket.id,
         email_id=email_id or ticket.source_email_id,
@@ -213,41 +219,22 @@ async def create_manual_task_if_missing(
             or trigger_reason
             or "请核对异常原因并从对应业务阶段恢复。"
         ),
-        assigned_user_id=owner.id if owner is not None else None,
+        assigned_user_id=owner.id,
     )
     session.add(task)
     await session.flush()
-    if owner is not None:
-        await create_notification(
-            session,
-            event_type="manual_review_assigned",
-            target_type="manual_review_task",
-            target_id=task.id,
-            title="人工复核任务已由系统分配",
-            content=trigger_reason or f"工单 {ticket.ticket_no} 需要处理。",
-            priority=priority,
-            recipient_user_id=owner.id,
-            recipient_role_code=None,
-            metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
-        )
-    else:
-        await create_notification(
-            session,
-            event_type="manual_review_assignment_failed",
-            target_type="manual_review_task",
-            target_id=task.id,
-            title="人工复核任务负责人分配失败",
-            content=f"工单 {ticket.ticket_no} 的系统负责人不可用，请管理员纠正负责人。",
-            priority="high",
-            recipient_user_id=None,
-            recipient_role_code="admin",
-            metadata={
-                "ticket_id": ticket.id,
-                "ticket_no": ticket.ticket_no,
-                "task_type": task_type,
-                "requested_owner_user_id": sticky_assignee,
-            },
-        )
+    await create_notification(
+        session,
+        event_type="manual_review_assigned",
+        target_type="manual_review_task",
+        target_id=task.id,
+        title="人工复核任务已由系统分配",
+        content=trigger_reason or f"工单 {ticket.ticket_no} 需要处理。",
+        priority=priority,
+        recipient_user_id=owner.id,
+        recipient_role_code=None,
+        metadata={"ticket_id": ticket.id, "ticket_no": ticket.ticket_no, "task_type": task_type},
+    )
     return task
 
 
@@ -272,32 +259,34 @@ async def create_email_manual_task_if_missing(
     )
     if existing is not None:
         return existing
-    owner = await choose_available_operator(session, None, allow_fallback=False)
+    owner = await choose_task_owner(session, customer_scope=None)
+    if owner is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TASK_OWNER_NOT_CONFIGURED")
     task = ManualReviewTask(
         ticket_id=None,
         email_id=email.id,
         thread_id=email.thread_id,
         task_type=task_type,
         priority=priority,
-        status="pending" if owner is not None else "assignment_failed",
+        status="pending",
         description="邮件业务需要人工判断或通过现有业务渠道处理。",
         trigger_reason=trigger_reason,
         recovery_stage=recovery_stage,
         recovery_action=recovery_action or "人工定类、关联/创建工单或记录外部处理结果。",
-        assigned_user_id=owner.id if owner is not None else None,
+        assigned_user_id=owner.id,
     )
     session.add(task)
     await session.flush()
     await create_notification(
         session,
-        event_type="email_manual_business_assigned" if owner else "manual_review_assignment_failed",
+        event_type="email_manual_business_assigned",
         target_type="manual_review_task",
         target_id=task.id,
         title="邮件业务需要人工处理",
         content=trigger_reason,
         priority=priority,
-        recipient_user_id=owner.id if owner else None,
-        recipient_role_code=None if owner else "admin",
+        recipient_user_id=owner.id,
+        recipient_role_code=None,
         metadata={"email_id": email.id, "thread_id": email.thread_id, "task_type": task_type},
         requires_attention=True,
     )

@@ -61,7 +61,6 @@ type TaskFilters = {
   status?: string;
   task_type?: string;
   scope?: string;
-  priority?: string;
   category?: string;
   date_range?: unknown;
 };
@@ -108,12 +107,6 @@ const resolveActionOptions = [
 const taskScopeOptions = [
   { value: 'mine', label: '我的待处理' },
   { value: 'all', label: '全部待处理' },
-];
-
-const taskPriorityOptions = [
-  { value: 'high', label: '高' },
-  { value: 'normal', label: '普通' },
-  { value: 'low', label: '低' },
 ];
 
 const resolutionTypeOptions = [
@@ -413,10 +406,6 @@ export default function ManualReviewPage() {
       render: (v: string) => <StatusTag value={v} kind="task" />,
     },
     {
-      title: '优先级', dataIndex: 'priority', width: 70,
-      render: (v: string) => <StatusTag value={v} kind="priority" />,
-    },
-    {
       title: '负责人', dataIndex: 'assigned_user_id', width: 100,
       render: (v: number | null) => (v && operatorMap.has(v)) ? operatorMap.get(v) : v ? `用户#${v}` : <Typography.Text type="secondary">未分配</Typography.Text>,
     },
@@ -450,9 +439,6 @@ export default function ManualReviewPage() {
               </Form.Item>
               <Form.Item name="status" noStyle>
                 <Select allowClear placeholder="任务状态" options={taskStatusOptions} />
-              </Form.Item>
-              <Form.Item name="priority" noStyle>
-                <Select allowClear placeholder="优先级" options={taskPriorityOptions} />
               </Form.Item>
               <Form.Item name="task_type" noStyle>
                 <Input allowClear placeholder="任务类型" />

@@ -15,8 +15,10 @@ import { api } from '../api/client';
 import PageTitle from '../components/PageTitle';
 import SectionPanel from '../components/SectionPanel';
 import StatusTag from '../components/StatusTag';
+import { useAuthStore } from '../stores/authStore';
 import type { JobRunLog } from '../types/api';
 import { formatTime } from '../utils/format';
+import { hasRole } from '../utils/roles';
 
 const columns: ColumnsType<JobRunLog> = [
   { title: '任务', dataIndex: 'job_name' },
@@ -29,6 +31,7 @@ const columns: ColumnsType<JobRunLog> = [
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const canAdmin = hasRole(useAuthStore((state) => state.user?.roles), 'admin');
   const summaryQuery = useQuery({
     queryKey: ['dashboard-summary'],
     queryFn: api.dashboard,
@@ -68,7 +71,7 @@ export default function Dashboard() {
           </Col>
         ))}
       </Row>
-      <SectionPanel>
+      {canAdmin ? <SectionPanel>
         <div className="section-heading">
           <Typography.Title level={4}>最近异常任务</Typography.Title>
         </div>
@@ -80,7 +83,7 @@ export default function Dashboard() {
           columns={columns}
           pagination={false}
         />
-      </SectionPanel>
+      </SectionPanel> : null}
     </div>
   );
 }

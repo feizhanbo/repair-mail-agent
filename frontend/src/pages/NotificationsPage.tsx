@@ -16,7 +16,6 @@ import { useAuthStore } from '../stores/authStore';
 type NotificationFilters = {
   delivery_status?: string;
   event_type?: string;
-  priority?: string;
   target_type?: string;
   keyword?: string;
   date_range?: unknown;
@@ -64,7 +63,6 @@ export default function NotificationsPage() {
     { title: '标题', dataIndex: 'title', ellipsis: true },
     { title: '工单', dataIndex: 'ticket_id', width: 90, render: (value: number | null | undefined) => value ? `#${value}` : '-' },
     { title: '类型', dataIndex: 'event_type', width: 150 },
-    { title: '优先级', dataIndex: 'priority', width: 90, render: (value: string) => <Tag color={value === 'high' ? 'orange' : 'blue'}>{value}</Tag> },
     {
       title: '状态',
       dataIndex: 'delivery_status',
@@ -114,14 +112,6 @@ export default function NotificationsPage() {
           </Form.Item>
           <Form.Item name="event_type">
             <Input allowClear placeholder="事件类型" />
-          </Form.Item>
-          <Form.Item name="priority">
-            <Select
-              allowClear
-              style={{ width: 120 }}
-              placeholder="优先级"
-              options={[{ value: 'high', label: '高' }, { value: 'normal', label: '普通' }, { value: 'low', label: '低' }]}
-            />
           </Form.Item>
           <Form.Item name="target_type">
             <Input allowClear placeholder="目标类型" />

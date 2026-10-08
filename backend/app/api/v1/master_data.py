@@ -4,7 +4,7 @@ import asyncio
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +32,16 @@ from app.services import master_data as master_data_service
 from app.services.jobs import enqueue_job, serialize_job
 from app.services.storage import StorageConfigurationError, StorageUploadError, upload_bytes_to_oss
 
-router = APIRouter()
+def _enforce_admin_read_only(request: Request) -> None:
+    """Master data is an admin-only, read-only catalogue."""
+    readable_collections = ("/customer-policies", "/sn-assets", "/board-cards")
+    if request.method != "GET" or not request.url.path.endswith(readable_collections):
+        raise HTTPException(status_code=status.HTTP_405_METHOD_NOT_ALLOWED, detail="MASTER_DATA_READ_ONLY")
+
+
+router = APIRouter(
+    dependencies=[Depends(require_roles("admin")), Depends(_enforce_admin_read_only)],
+)
 
 _SN_LOCAL_FIELDS = {
     "sn", "customer_code", "customer_name", "material_code", "material_name",
